@@ -122,20 +122,157 @@ def load_scenario(path):
 
 _SCRIPTS = {}
 
+# The most recent scan taken by each agent, by agent id.
+#
+# Module-level because a mission asks for a scan DURING step(), and step() runs
+# before this frame's scans are computed - so what a mission gets is the last
+# scan taken, one tick old. That is not a compromise, it is what a real
+# subscriber gets: you act on the reading you have, not the one that has not
+# happened yet. A mission written against this will behave the same on a car.
+_LAST_SCANS = {}
+
+
+class World:
+    """Everything a mission is allowed to know, as one argument.
+
+    WHY ONE ARGUMENT AND NOT FOUR. This is the interface every future mission
+    in this project is written against. Adding a new sense - link quality,
+    battery, a jammer's bearing - must not change the signature, because
+    changing it invalidates every mission anyone has written. So the signature
+    is frozen at target(agent, world) and the world grows instead.
+
+    Everything here is read-only from a mission's point of view. A mission
+    returns a point; it does not move anything itself. Speed limits, collision
+    and walls still apply, so you cannot drive through anything by returning a
+    target on the far side of it.
+    """
+
+    def __init__(self, t, dt, poses, arena, agents, scans=None):
+        self.t = t                  # seconds since the run started
+        self.dt = dt                # seconds per tick
+        self.arena = arena          # extent, boundaries, propagation, spectrum
+        self.poses = poses          # {id: {x, y, z, yaw, speed}}
+        self.agents = agents        # every agent's config
+        self._scans = scans if scans is not None else _LAST_SCANS
+
+    # -- where things are ---------------------------------------------------
+    def pose(self, agent_id):
+        """One agent's pose, or None if it has never been heard from."""
+        return self.poses.get(agent_id)
+
+    def distance_to(self, me, other):
+        """Metres between two agents, in the plane."""
+        a, b = self.poses.get(me), self.poses.get(other)
+        if a is None or b is None:
+            return float("inf")
+        return math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+
+    def bearing_to(self, me, other):
+        """Radians from `me`'s NOSE to `other`. Zero means dead ahead."""
+        a, b = self.poses.get(me), self.poses.get(other)
+        if a is None or b is None:
+            return 0.0
+        return wrap_pi(math.atan2(b["y"] - a["y"], b["x"] - a["x"]) - a["yaw"])
+
+    # -- what things can see ------------------------------------------------
+    def scan(self, agent_id):
+        """That agent's last lidar scan, or None if it has no lidar yet.
+
+        The dict is exactly what goes on the wire and onto the ROS topic:
+        angle_min, angle_max, angle_increment, range_min, range_max, ranges.
+        A ray that returned nothing is float('inf') - NOT range_max. The two
+        mean different things and a mission that treats them alike will drive
+        into open doorways.
+        """
+        return self._scans.get(agent_id)
+
+    def nearest_return(self, agent_id, lo=None, hi=None):
+        """(range_m, angle_rad) of the closest lidar return, optionally only
+        within a bearing window. Returns (inf, 0.0) if nothing came back.
+
+        The single most useful thing to ask a lidar, and worth having here so
+        that every mission does not reimplement the index arithmetic - which is
+        where sign errors live.
+        """
+        sc = self.scan(agent_id)
+        if not sc:
+            return (float("inf"), 0.0)
+        best, best_a = float("inf"), 0.0
+        n = len(sc["ranges"])
+        span = sc["angle_max"] - sc["angle_min"]
+        for i, r in enumerate(sc["ranges"]):
+            if r is None or not (r < float("inf")):
+                continue
+            a = sc["angle_min"] + span * i / max(1, n - 1)
+            if lo is not None and a < lo:
+                continue
+            if hi is not None and a > hi:
+                continue
+            if r < best:
+                best, best_a = r, a
+        return (best, best_a)
+
+    # -- what things can hear ----------------------------------------------
+    def link(self, a, b):
+        """Link quality between two agents right now.
+
+        {distance_m, quality, state, latency_ms, pdr}, or None if either agent
+        is unknown. state is 'up' | 'degraded' | 'down'.
+
+        THIS IS THE POINT OF THE WHOLE FRAMEWORK. A mission that reads this and
+        changes behaviour when the link degrades is a resilient-control
+        experiment; one that ignores it is just a path follower.
+        """
+        pa, pb = self.poses.get(a), self.poses.get(b)
+        if pa is None or pb is None:
+            return None
+        return link_state(pa, pb)
+
+
+def _call_mission(mod, agent, world):
+    """Call a mission's target(), accepting either shape.
+
+    target(agent, world)              <- write new missions this way
+    target(agent, t, poses, arena)    <- the original four-argument form
+
+    The old form still works so that nothing already written breaks, but it
+    cannot see the lidar or the link, which is most of what makes a mission
+    interesting. It is deprecated and will be removed once nothing uses it.
+    """
+    import inspect
+    try:
+        n = len(inspect.signature(mod.target).parameters)
+    except (TypeError, ValueError):
+        n = 2
+    if n >= 4:
+        if not getattr(mod, "_deadband_warned", False):
+            mod._deadband_warned = True
+            print(f"mission {mod.__name__}: target(agent, t, poses, arena) is "
+                  f"deprecated - use target(agent, world); see "
+                  f"docs/writing-a-mission.md", file=sys.stderr)
+        return mod.target(agent, world.t, world.poses, world.arena)
+    return mod.target(agent, world)
+
+
+
 
 def load_mission_script(path):
     """Load a researcher's own mission file.
 
     The file defines one function:
 
-        def target(agent, t, poses, arena):
-            '''Return (x, y) - where this agent should be heading at time t.'''
+        def target(agent, world):
+            '''Return (x, y) - where this agent should be heading now.'''
             return (0.0, 0.0)
 
-    It gets the agent's own config, the clock, every agent's current pose, and
-    the arena. That is enough to write pursuit, formation, coverage, or anything
-    else, and it needs no knowledge of the framework's internals. Speed limits
-    and collision still apply, so a script cannot cheat physics.
+    `agent` is this agent's own configuration; `world` is everything it is
+    allowed to know - see the World class above. Speed limits and collision
+    still apply, so a script cannot cheat physics.
+
+    The function imports no framework code and no rclpy. That is deliberate and
+    it is the whole sim-to-real argument: the same file runs against this
+    simulator today and against a real car tomorrow, because nothing in it
+    knows which one it is talking to.
     """
     path = str(path)
     if path in _SCRIPTS:
@@ -148,7 +285,7 @@ def load_mission_script(path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     if not hasattr(mod, "target"):
-        raise AttributeError(f"{full} has no target(agent, t, poses, arena)")
+        raise AttributeError(f"{full} has no target(agent, world)")
     _SCRIPTS[path] = mod
     return mod
 
@@ -174,7 +311,8 @@ def mission_target(agent, t, poses, arena):
         # a mission that throws should be obvious, not quietly become "static".
         try:
             mod = load_mission_script(m.get("file", ""))
-            xy = mod.target(agent, t, poses, arena)
+            world = World(t, 1.0 / RATE_HZ, poses, arena, _ALL_AGENTS or [agent])
+            xy = _call_mission(mod, agent, world)
             return (float(xy[0]), float(xy[1]))
         except Exception as exc:
             print(f"mission script failed for {agent['id']}: {exc}", file=sys.stderr)
@@ -258,6 +396,9 @@ def blocked(agent, nx, ny, poses, agents, arena):
     return None
 
 
+_ALL_AGENTS = []
+
+
 def step(agents, poses, t, dt, arena):
     """Advance every agent one tick toward its mission target.
 
@@ -268,6 +409,9 @@ def step(agents, poses, t, dt, arena):
     jittering. This is a kinematic constraint solver, not a physics engine —
     there is no momentum, restitution or contact force.
     """
+    global _ALL_AGENTS
+    _ALL_AGENTS = agents            # so a World built inside mission_target
+                                    # can answer questions about every agent
     contacts = []
     for a in agents:
         p = poses[a["id"]]
@@ -601,6 +745,10 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             "health": {"ok": True,
                        "warnings": [w for i, w in contacts if i == a["id"]]},
         })
+
+    # Keep the scans so the next tick's missions can read them. See _LAST_SCANS.
+    _LAST_SCANS.clear()
+    _LAST_SCANS.update({a["id"]: a["scan"] for a in agents_out if a["scan"]})
 
     links_out = [{**l, **link_state(poses[l["a"]], poses[l["b"]])} for l in links]
 

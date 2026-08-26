@@ -116,14 +116,18 @@ demonstrated and handed over with no ROS installed at all.
 
 A mission answers one question: **where should this agent be heading right now?**
 
+> **The full walkthrough is [`writing-a-mission.md`](writing-a-mission.md)** —
+> the contract, what bites you, one written from scratch, and how to run it.
+> What follows is the summary.
+
 ### The simulation version
 
 `missions/example_pursuit.py`:
 
 ```python
-def target(agent, t, poses, arena):
+def target(agent, world):
     """Return (x, y) in metres, world frame."""
-    lead = poses["car1"]
+    lead = world.pose("car1")
     return (lead["x"] - 1.2 * math.cos(lead["yaw"]),
             lead["y"] - 1.2 * math.sin(lead["yaw"]))
 ```
@@ -131,12 +135,17 @@ def target(agent, t, poses, arena):
 You get:
 
 - `agent` — this agent's own config: id, dimensions, speed, sensors, mission
-- `t` — seconds since the run started
-- `poses` — every agent's current pose, keyed by id
-- `arena` — extent, boundaries, propagation, spectrum
+- `world` — everything it is allowed to know:
+  - `world.t`, `world.dt`, `world.arena`
+  - `world.pose(id)`, `world.distance_to(a, b)`, `world.bearing_to(a, b)`
+  - `world.scan(id)`, `world.nearest_return(id, lo, hi)` — the lidar
+  - `world.link(a, b)` — quality, state, latency, PDR
 
 Speed limits and collision still apply, so you cannot cheat physics by
 returning a point behind a wall.
+
+The older `target(agent, t, poses, arena)` still runs with a deprecation
+warning. It cannot see the lidar or the link.
 
 Point a scenario at it:
 

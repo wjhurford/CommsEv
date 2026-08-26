@@ -132,6 +132,7 @@ QMenuBar::item:selected, QMenu::item:selected {{ background: {C_ACCENT};
     color: #12171A; }}
 QMenu {{ background: {C_PANEL}; border: 1px solid {C_LINE}; }}
 QLabel#hint {{ color: {C_DIM}; padding: 14px; }}
+QWidget#bottomframe {{ background: {C_PANEL}; border-top: 1px solid {C_LINE}; }}
 """
 
 
@@ -425,13 +426,9 @@ class Viewport(QWidget):
             p.setPen(QPen(QColor(62, 154, 168, alpha + 60)))
             p.drawText(rp + QPointF(px - 62, -4), label)
 
-        misses = sum(1 for r in ranges if r is None)
-        if misses:
-            p.setPen(QPen(QColor(C_WARN)))
-            p.setFont(QFont("Consolas", 8))
-            origin = self.to_screen(x, y, z)
-            p.drawText(origin + QPointF(10, 14),
-                       f"{misses}/{n} rays: no return")
+        # The no-return count is on the sensor panel, where the rest of this
+        # agent's numbers are. Printing it on the map as well put a second copy
+        # over the top of the arena for no benefit.
 
     def _link_lines(self, p):
         by_id = {a.get("id"): a for a in self.agents}
@@ -1473,8 +1470,17 @@ class Console(QMainWindow):
         self.terminals.setDocumentMode(True)
         bottom.setDocumentMode(True)
         bottom.setObjectName("chrome")
+        # One framed block, so the divide between the views above and the
+        # output below reads as a section rather than as loose tabs.
+        frame = QWidget()
+        frame.setObjectName("bottomframe")
+        framelay = QVBoxLayout(frame)
+        framelay.setContentsMargins(1, 1, 1, 1)
+        framelay.setSpacing(0)
+        framelay.addWidget(bottom)
+
         d = QDockWidget("Output")
-        d.setWidget(bottom)
+        d.setWidget(frame)
         # The dock's own title bar just repeated the word "Output" above a tab
         # that already said it. Replacing it with an empty widget reclaims the
         # row and lets the tabs act as the title.
@@ -2316,16 +2322,54 @@ class Console(QMainWindow):
             self.proc.waitForFinished(2000)
 
     def stop_ros_stack(self):
-        """Stop the nodes and the recorder, then ask what to do with the bag."""
+        """Stop the nodes and the recorder, then ask what to do with the bag.
+
+        THE RECORDER MUST BE ASKED TO STOP, NOT KILLED.
+
+        rosbag2's MCAP writer holds the chunk index and the summary section in
+        memory and writes them when the file is closed. Kill the process and
+        that trailing section is never written, so the last record on disk is
+        truncated - which is exactly the "record type 0x07 ... has length 1878
+        but only 1784 bytes remaining" that PlotJuggler reports as a corrupt
+        bag. The data is all there; the footer that says where it is, is not.
+
+        pkill's default signal is SIGTERM, which rclpy does not handle, so the
+        old code had the same problem even before QProcess.kill(). SIGINT is
+        what Ctrl-C sends and is the one rclpy installs a handler for. So the
+        sequence is: SIGINT, wait for the writer to flush, and only then
+        escalate. The whole thing is one WSL call because each wsl.exe launch
+        costs a fifth of a second and doing this in a Python poll loop would
+        spend longer starting shells than waiting for the flush.
+        """
+        self.say("Closing the recorder cleanly (this is what keeps the bag "
+                 "readable)...")
+        self.wsl(
+            # Ctrl-C the recorder and give it up to 10 s to write its index.
+            "pkill -INT -f 'ros2 bag record' 2>/dev/null; "
+            "for i in $(seq 1 40); do "
+            "  pgrep -f 'ros2 bag record' >/dev/null || break; sleep 0.25; "
+            "done; "
+            "if pgrep -f 'ros2 bag record' >/dev/null; then "
+            "  echo 'recorder did not exit on SIGINT - forcing; the bag may be "
+            "truncated'; pkill -KILL -f 'ros2 bag record'; "
+            "else echo 'recorder closed cleanly'; fi; "
+            # Then the nodes. Same courtesy, shorter fuse - they have no file
+            # to finish writing, they just have destructors worth running.
+            "pkill -INT -f deadband_ros 2>/dev/null; "
+            "for i in $(seq 1 8); do "
+            "  pgrep -f deadband_ros >/dev/null || break; sleep 0.25; "
+            "done; "
+            "pkill -KILL -f deadband_ros 2>/dev/null; true",
+            "cleanup").waitForFinished(20000)
+
+        # Only now tear down the Windows-side shells. Doing this first would
+        # take the WSL process tree with it and undo everything above.
         for attr in ("bag_proc", "ros_proc"):
             proc = getattr(self, attr, None)
             if proc is not None:
                 proc.kill()
                 proc.waitForFinished(2000)
                 setattr(self, attr, None)
-        # ros2 launch spawns children that do not die with the shell.
-        self.wsl("pkill -f deadband_ros; pkill -f 'ros2 bag record'; true",
-                 "cleanup").waitForFinished(4000)
 
         name = getattr(self, "bag_name", None)
         if not name:
@@ -2345,24 +2389,16 @@ class Console(QMainWindow):
             return
 
         self.say(f"Kept runs/{name}")
+        # List it. "Did the recording actually save?" should be answerable from
+        # the log rather than by going and looking.
+        self.wsl(f"ls -la {REPO_WSL_PATH}/runs/{name} | tail -n +2", "bag")
         if QMessageBox.question(
                 self, "Deadband Console", "Open it in PlotJuggler now?",
                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
-            # Two ways it can be installed: as a plain binary on PATH, or as a
-            # ROS package run through `ros2 run`. Try both before concluding it
-            # is missing, and if it is, say exactly how to get it rather than
-            # leaving a bare "command not found" in the log.
             bag = f"{REPO_WSL_PATH}/runs/{name}"
-            # Say the path whatever happens. PlotJuggler may or may not pick up
-            # the bag from the command line depending on how it was installed,
-            # and "it opened but I cannot find my data" is a worse failure than
-            # it not opening at all.
-            # Do NOT pass the bag on the command line. PlotJuggler's -d expects
-            # a file, and handed a rosbag DIRECTORY it aborts with
-            # std::out_of_range from inside its own loader. That is a bug in
-            # PlotJuggler, not something to work around blindly - so launch it
-            # clean and say exactly what to click.
-            self.show_plotjuggler_help(bag)
+            # Launch FIRST, then show the instructions. The dialog is modal, so
+            # calling it first meant PlotJuggler only started once you had
+            # dismissed the very instructions you needed while using it.
             self.wsl(
                 "if command -v plotjuggler >/dev/null; then plotjuggler; "
                 "elif ros2 pkg list 2>/dev/null | grep -qx plotjuggler; then "
@@ -2370,35 +2406,60 @@ class Console(QMainWindow):
                 "else echo 'PlotJuggler is not installed:'; "
                 "  echo '  sudo apt install ros-humble-plotjuggler-ros'; fi",
                 "plotjuggler")
+            self.show_plotjuggler_help(bag)
 
     def show_plotjuggler_help(self, bagdir):
-        """The path in a selectable field, not buried in a log line."""
+        """The path in a selectable field, not buried in a log line.
+
+        Rewritten after watching the MCAP flow actually happen: the steps are
+        different from the sqlite3 ones this used to describe, and the two
+        warnings it now throws up look alarming and are not.
+        """
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
+
+        name = bagdir.rstrip("/").rsplit("/", 1)[-1]
+        # rosbag2 names its first split file <bag>_0.<ext>. Pasting that
+        # straight in skips a navigation step; the folder still works if the
+        # recorder fell back to sqlite3 because MCAP was not installed.
+        mcap = f"{bagdir}/{name}_0.mcap"
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Load the bag in PlotJuggler")
         lay = QVBoxLayout(dlg)
 
         text = QLabel(
-            "PlotJuggler cannot take a bag on its command line, so load it from\n"
-            "inside:\n\n"
+            "PlotJuggler cannot take a bag on its command line, so load it\n"
+            "from inside:\n\n"
             "  1.  Top left, under File, click the Data import icon\n"
             "       (the arrow pointing into a tray).\n"
-            "  2.  Paste the path below into the file dialog.\n"
-            "  3.  If it asks which plugin to use, PICK IT FROM THE LIST.\n"
-            "       Typing a name there crashes PlotJuggler 3.17 - that is the\n"
-            "       map::at abort in your log, and it is their bug, not the bag.\n"
-            "  4.  Tick the topics you want, then press OK.")
+            "  2.  Paste the path below into the file dialog, press Enter.\n"
+            "  3.  If a plugin picker appears, PICK IT FROM THE LIST.\n"
+            "       Typing a name there crashes PlotJuggler 3.17 - that is\n"
+            "       the map::at abort, and it is their bug, not the bag.\n"
+            "  4.  The MCAP Parser lists every channel it found. Ctrl-A\n"
+            "       selects all of them; then OK.\n"
+            "  5.  The topics appear in the tree on the left. Expand one and\n"
+            "       drag a series onto a plot.\n\n"
+            "If it says CORRUPTED MCAP FILE, or recovers only partially:\n"
+            "answer yes, and the data loads anyway. It means the recorder was\n"
+            "killed before it could write the index at the end of the file -\n"
+            "every message is on disk, only the table of contents is missing.\n"
+            "The Console now stops the recorder with Ctrl-C and waits for it,\n"
+            "so bags recorded from here on should load clean. If one still\n"
+            "warns, that is worth telling me about.")
         text.setTextFormat(Qt.PlainText)
         lay.addWidget(text)
 
-        field = QLineEdit(bagdir)
+        field = QLineEdit(mcap)
         field.setReadOnly(True)
         field.setFont(QFont("Consolas", 9))
         lay.addWidget(field)
         field.selectAll()
 
-        note = QLabel("Already copied to your clipboard.")
+        note = QLabel(
+            "Already copied to your clipboard. If that file is not there, the\n"
+            f"recorder fell back to sqlite3 - open the folder instead:\n  {bagdir}")
+        note.setTextFormat(Qt.PlainText)
         note.setStyleSheet(f"color: {C_DIM};")
         lay.addWidget(note)
 
@@ -2406,7 +2467,7 @@ class Console(QMainWindow):
         buttons.accepted.connect(dlg.accept)
         lay.addWidget(buttons)
 
-        QApplication.clipboard().setText(bagdir)
+        QApplication.clipboard().setText(mcap)
         dlg.exec()
 
     def on_stopped(self):

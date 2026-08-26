@@ -206,6 +206,22 @@ agents:
       from: {x: -3.0, y: -2.0}
       to:   {x: 3.0, y: -2.0}
 
+    # Swap car 3 onto a mission SCRIPT instead: comment out the block above,
+    # uncomment one below, press Play. See docs/writing-a-mission.md.
+    #
+    # mission:                              # follow the wall - uses the LIDAR
+    #   type: script
+    #   file: missions/wall_follow.py
+    #   side: right
+    #   standoff: 0.8
+    #
+    # mission:                              # patrol until the link degrades,
+    #   type: script                        # then come home - uses the NETWORK
+    #   file: missions/return_on_link_loss.py
+    #   coordinator: gcs
+    #   degraded_below: 0.45
+    #   recovered_above: 0.65
+
 # -----------------------------------------------------------------------------
 # RADIO DEFINITIONS
 # -----------------------------------------------------------------------------

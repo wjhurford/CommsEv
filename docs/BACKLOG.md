@@ -14,6 +14,14 @@ the bottom with a date.
 - **The Console is a client.** It reads one stream of telemetry frames and knows
   nothing about what produces them. That boundary is why swapping the stub for
   real ROS 2 took one afternoon.
+- **The mission signature is `target(agent, world)` and it is frozen.** New
+  senses are added to `world`, never to the argument list. Changing the
+  signature later invalidates every mission anyone has written, including a
+  future student's; growing the world costs nothing.
+- **A mission sees only what ITS OWN agent senses.** The ROS controller
+  subscribes to one `/scan` - its own - even though every scan is on the wire.
+  A mission that can read other agents' sensors is cheating in a way no real
+  vehicle can, and cheating quietly is worse than not working.
 - **Algorithms never import `rclpy`.** A mission, controller or detector takes
   plain numbers and returns plain numbers; the ROS node is a wrapper. This is
   the whole sim-to-real argument.
@@ -31,7 +39,12 @@ the bottom with a date.
 
 ## Next up
 
-- [ ] **Mission writing walkthrough** — Will writes one end to end
+- [ ] **Will writes a mission end to end** — `docs/writing-a-mission.md` is
+      written and three worked examples run; the remaining half is Will
+      actually writing `missions/my_first.py` and watching it drive
+- [ ] **Pick a mission from the Console** — right now swapping one means
+      editing YAML. A dropdown on the agent, writing back to the scenario file,
+      would make it clickable like everything else
 - [ ] **PACE plan** (Primary / Alternate / Contingency / Emergency per network).
       Declare a fallback ladder, then measure whether the fallback actually
       works under attack. Best paper-shaped idea on this list.
@@ -95,6 +108,15 @@ the bottom with a date.
 
 ## Done
 
+- 2026-08-26 — Bags close cleanly. The recorder is now SIGINT'd and waited for
+  instead of killed, so MCAP writes its index and PlotJuggler stops reporting
+  "corrupted / recovered partially". The data was always there; the footer
+  saying where it was, was not
+- 2026-08-26 — Mission contract v2: `target(agent, world)`, with lidar and link
+  state reachable from inside a mission. Old four-argument form still runs,
+  deprecated. `docs/writing-a-mission.md`, plus `wall_follow.py` (sensor loop)
+  and `return_on_link_loss.py` (network-reactive)
+- 2026-08-26 — PlotJuggler instructions rewritten for the MCAP flow
 - 2026-08-26 — ROS 2 nodes: world, bridge, controller. Real `LaserScan`,
   `Odometry`, `AckermannDriveStamped` on 14 topics; Console reads them
 - 2026-08-26 — Odometry covariance published instead of zeros

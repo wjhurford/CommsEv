@@ -19,6 +19,7 @@ from pathlib import Path
 
 import rclpy
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
 
 from .common import default_scenario, load_sim_core
@@ -66,14 +67,39 @@ class ControllerNode(Node):
             raise SystemExit(1)
 
         self.poses = {}
+        self.scans = {}
         for a in agents:
             self.create_subscription(Odometry, f"/{a['id']}/odom",
                                      lambda m, i=a["id"]: self.on_odom(i, m), 10)
+        # Our OWN lidar only. A mission is entitled to what this agent senses;
+        # subscribing to everyone's scans would let it cheat in a way no real
+        # vehicle can, and cheating quietly is worse than not working.
+        if any(sn["type"] == "ust10lx" for sn in self.agent["sensors"]):
+            self.create_subscription(LaserScan, f"/{self.me}/scan",
+                                     self.on_scan, 10)
         self.pub = self.create_publisher(
             AckermannDriveStamped, f"/{self.me}/drive", 10)
         self.t = 0.0
         self.dt = 0.05
         self.create_timer(self.dt, self.tick)
+
+    def on_scan(self, msg):
+        """Translate LaserScan into the same dict a mission sees in the sim.
+
+        One conversion, in one place. The mission never learns whether its
+        ranges came from a ROS topic or from the simulator's raycaster, which
+        is exactly the property that lets the same file run on a real car.
+        """
+        self.scans[self.me] = {
+            "angle_min": float(msg.angle_min),
+            "angle_max": float(msg.angle_max),
+            "angle_increment": float(msg.angle_increment),
+            "range_min": float(msg.range_min),
+            "range_max": float(msg.range_max),
+            # inf stays inf. ROS uses it for "no return" and so do we; mapping
+            # it to range_max here would silently invent a wall.
+            "ranges": [float(r) for r in msg.ranges],
+        }
 
     def on_odom(self, aid, msg):
         self.poses[aid] = {
@@ -87,8 +113,10 @@ class ControllerNode(Node):
         self.t += self.dt
         if self.me not in self.poses:
             return                      # nothing heard yet
+        world = self.sim.World(self.t, self.dt, self.poses, self.arena,
+                               self.others, scans=self.scans)
         try:
-            tx, ty = self.mission.target(self.agent, self.t, self.poses, self.arena)
+            tx, ty = self.sim._call_mission(self.mission, self.agent, world)
         except Exception as exc:
             self.get_logger().error(f"mission failed: {exc}")
             return
