@@ -60,7 +60,10 @@ one app.**
 
 ## Next up
 
-- [ ] **Objective + speed on a selected agent, live** — visible while running.
+- [ ] **Objective + speed on a selected agent, live** — DONE for objective and
+      speed; the panel still needs to feel bespoke rather than generic.
+- [ ] **Bespoke Properties panel** — per-agent, shaped to what that agent is and
+      is doing, rather than a flat table of file keys.
 - [ ] **Per-agent bespoke sensor panel** — shows the sensors THIS agent has;
       lidar stays as default when present, is not removed.
 - [ ] **Pre-run point editing for split missions** — in-app map-point editor;
@@ -78,8 +81,37 @@ one app.**
 
 ## Research capabilities (the paper-shaped work)
 
+The gap to close, stated plainly: right now nothing BREAKS. There is a control
+condition and no contested condition. Everything below follows from that, and
+in this order it tells one complete story — here is a fleet, here is the attack,
+here is how it degrades, here is what each robot THOUGHT was happening, here is
+whether the fallback held.
+
+- [ ] **Attacks that actually fire (Cyber tab)** — jamming (a region or emitter
+      raising the noise floor), spoofing (an agent fed false positions), replay.
+      The single highest-value addition: it turns Deadband from a fleet sim into
+      a testbed for autonomy under attack, and every other feature below is more
+      impressive once it exists.
 - [ ] **PACE plan** (Primary/Alternate/Contingency/Emergency per network) —
-      declare a fallback ladder, measure whether it holds under attack.
+      declare a fallback ladder, jam the primary, and MEASURE it: time to
+      detect, time to switch, what was lost in between. A result, not a demo.
+- [ ] **Degraded-comms autonomy behaviours** — return-to-comms, continue-on-
+      last-order, hold-and-wait, autonomous regroup. `return_on_link_loss.py`
+      is written and has never been run. Jam the net and watch the fleet behave
+      sensibly without being told: that is the demo that lands.
+- [ ] **Per-agent belief, not just ground truth** — each agent holds a stale,
+      partial picture with age on every track ("last seen 4 s ago"). Let the
+      operator view switch between ground truth and any agent's belief. The
+      divergence between them under jamming is the whole point.
+- [ ] **Multi-domain: the air layer** — ArduPilot + Gazebo. Ground and air on
+      one network, with the air asset as a comms relay when the ground link
+      breaks. Uses the z-axis already modelled.
+- [ ] **Replay / after-action review** — scrub a recorded run with link drops,
+      objective changes and attack events on one timeline. Makes it a tool
+      rather than a script.
+- [ ] **Seeded batch runs → results table** — same mission across N jamming
+      intensities, headless, producing a curve. The difference between a demo
+      and a paper. `seed` already exists.
 - [ ] **Real-test overlay** — draw a real-car rosbag over the simulated run.
 - [ ] **VESC model** — real actuator limits; an attack surface below ROS.
 - [ ] **Edge compute budget** — per-agent CPU/memory as a modelled resource.
