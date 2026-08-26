@@ -1218,6 +1218,20 @@ class ShellPanel(QWidget):
             self.out.clear()
             return
 
+        # REOBJECTIVE / REMISSION - retasking, handled here rather than sent to
+        # the shell. Grammar:
+        #     REOBJECTIVE <agent> <objective> <args...>
+        #     e.g.  REOBJECTIVE car1 pursue car3
+        #           REOBJECTIVE car3 shuttle A B
+        #           REOBJECTIVE car2 stop
+        # It writes one line to the run's retask queue, which the running sim
+        # reads on its next tick. The queue line format is what parse_retask in
+        # the stub already understands: "<agent>: <objective> <args>".
+        head = cmd.split()
+        if head and head[0].upper() in ("REOBJECTIVE", "REMISSION"):
+            self._retask(head)
+            return
+
         full = (f"cd {self.cwd} 2>/dev/null; "
                 f"source /opt/ros/humble/setup.bash 2>/dev/null; "
                 f"source {self.repo}/ros2/install/setup.bash 2>/dev/null; "
@@ -1236,6 +1250,41 @@ class ShellPanel(QWidget):
         if not proc.waitForStarted(3000):
             self.out.appendPlainText(
                 "[cannot start wsl.exe - is WSL installed and on PATH?]")
+
+    def _retask(self, tokens):
+        """Write a retask command to the running sim's queue.
+
+        tokens[0] is REOBJECTIVE or REMISSION (already upper-checked).
+            REOBJECTIVE <agent> <objective> <args...>
+        becomes the queue line "<agent>: <objective> <args>", which the stub's
+        parse_retask understands. REMISSION (retask a whole system at once) is
+        recognised but not built yet - it says so rather than failing silently.
+        """
+        verb = tokens[0].upper()
+        if verb == "REMISSION":
+            self.out.appendPlainText(
+                "[REMISSION - retasking a whole system - is not built yet. "
+                "Use REOBJECTIVE per agent for now.]")
+            return
+        if len(tokens) < 3:
+            self.out.appendPlainText(
+                "[usage: REOBJECTIVE <agent> <objective> <args>   "
+                "e.g. REOBJECTIVE car1 pursue car3]")
+            return
+        agent = tokens[1]
+        rest = " ".join(tokens[2:])
+        line = f"{agent}: {rest}\n"
+        # runs/retask/queue - the fixed path start_run() launches the sim with.
+        # Console and stub are both Windows-side Python sharing REPO_ROOT, so
+        # writing here is the file the sim is watching.
+        try:
+            qdir = REPO_ROOT / "runs" / "retask"
+            qdir.mkdir(parents=True, exist_ok=True)
+            with open(qdir / "queue", "a", encoding="utf-8") as fh:
+                fh.write(line)
+            self.out.appendPlainText(f"[retask sent: {agent} -> {rest}]")
+        except OSError as exc:
+            self.out.appendPlainText(f"[retask failed: {exc}]")
 
     def stop_all(self):
         for proc in list(self.procs):
@@ -1395,7 +1444,13 @@ class Console(QMainWindow):
         self.tab_env.setHeaderLabels(["Environment"])
         self.tab_scn = QTreeWidget()
         self.tab_scn.setHeaderLabels(["Overview"])
-        for t in (self.tab_env, self.tab_scn):
+        # Two questions, two trees. OVERVIEW answers "what is each agent" -
+        # system, network, agents, and each agent's equipment (sensors). MISSION
+        # answers "what is each agent doing" - the same hierarchy down to agents,
+        # then their objectives, and nothing about hardware.
+        self.tab_msn = QTreeWidget()
+        self.tab_msn.setHeaderLabels(["Mission"])
+        for t in (self.tab_env, self.tab_scn, self.tab_msn):
             t.itemSelectionChanged.connect(self.on_select)
             # The default indent stacks five levels deep off the right edge of a
             # narrow panel. Networks > blue > Agents > car1 > lidar has to fit.
@@ -1403,6 +1458,7 @@ class Console(QMainWindow):
         # Double-click an agent or its objective row -> a short popup describing
         # what that agent is doing right now.
         self.tab_scn.itemDoubleClicked.connect(self.on_overview_double_click)
+        self.tab_msn.itemDoubleClicked.connect(self.on_overview_double_click)
 
         cyber = QLabel(
             "Not built yet.\n\n"
@@ -1478,11 +1534,14 @@ class Console(QMainWindow):
         clay.addWidget(self.linktable, 1)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.tab_env, "Environment")
-        self.tabs.addTab(self.tab_scn, "Overview")
-        self.tabs.addTab(comms, "Comms")
-        self.tabs.addTab(cyber, "Cyber")
+        # Order top-to-bottom down the left edge, as Will laid it out: the
+        # analysis tabs first, then the two build trees, then tasking.
         self.tabs.addTab(results, "Results")
+        self.tabs.addTab(cyber, "Cyber")
+        self.tabs.addTab(comms, "Comms")
+        self.tabs.addTab(self.tab_scn, "Overview")
+        self.tabs.addTab(self.tab_env, "Environment")
+        self.tabs.addTab(self.tab_msn, "Mission")
         self.tabs.currentChanged.connect(self.on_tab_changed)
         # Tabs down the left edge rather than across the top: the labels stack
         # vertically, the panel stays narrow, and the section you are in is the
@@ -1649,6 +1708,7 @@ class Console(QMainWindow):
     def populate_trees(self):
         self.tab_env.clear()
         self.tab_scn.clear()
+        self.tab_msn.clear()
         if not self.doc:
             return
 
@@ -1674,54 +1734,85 @@ class Console(QMainWindow):
                 n.setData(0, Qt.UserRole, ("node", ["arena", key]))
         self.tab_env.expandAll()
 
-        # Agents live inside the network they belong to. Network membership is
-        # the thing that decides who can talk to whom, so it is the right
-        # hierarchy for a tool about communications - and when red agents on a
-        # second network arrive, they slot in as a sibling folder.
-        #
-        # Agents come from the RESOLVED view (map + mission merged), so a split
-        # mission - whose agents live in its map - still shows them here.
+        # OVERVIEW and MISSION share one hierarchy - system > network > agents -
+        # and differ only in what hangs off each agent. Overview shows the
+        # agent's EQUIPMENT (its sensors); Mission shows its OBJECTIVE. Building
+        # both from one helper keeps them from drifting apart.
+        self._build_agent_tree(self.tab_scn, leaf="equipment")
+        self._build_agent_tree(self.tab_msn, leaf="objective")
+
+    def _systems(self, networks):
+        """Group networks into systems. A SYSTEM is a side - one or more
+        networks that belong together (blue+green = friendly, red = adversary).
+
+        A network may name its system with `system: friendly`. Until maps do
+        that, everything falls into one 'friendly' system, so the tier is
+        present and correct now and simply gains siblings when red arrives."""
+        groups = {}
+        for name, net in (networks or {}).items():
+            sys_name = (net or {}).get("system", "friendly")
+            groups.setdefault(sys_name, []).append((name, net))
+        return groups
+
+    def _build_agent_tree(self, tree, leaf):
+        """Fill one tree with Mission > system > network > agents > <leaf>.
+
+        leaf = 'equipment' hangs each agent's sensors under it (the Overview
+        answer: what the agent IS). leaf = 'objective' hangs the agent's current
+        objective under it (the Mission answer: what the agent is DOING). Nothing
+        about hardware appears in the objective tree, and no objective appears in
+        the equipment tree."""
         view = self.resolved or self.doc
         mission_name = view.get("name") or (self.path.stem if self.path else "")
-        nets = QTreeWidgetItem(self.tab_scn, [f"Mission: {mission_name}"])
+        root = QTreeWidgetItem(tree, [f"Mission: {mission_name}"])
         agents = view.get("agents") or []
+        networks = view.get("networks") or {}
         placed = set()
-        for name, net in (view.get("networks") or {}).items():
-            n = QTreeWidgetItem(nets, [name])
-            n.setData(0, Qt.UserRole, ("node", ["networks", name]))
-            hub = (net or {}).get("coordinator")
-            folder = QTreeWidgetItem(n, ["Agents"])
-            for i, agent in enumerate(agents):
-                if agent.get("network") != name:
-                    continue
-                placed.add(i)
-                label = agent.get("id", "?")
-                if label == hub:
-                    label += "   (coordinator)"
-                a = QTreeWidgetItem(folder, [label])
-                a.setData(0, Qt.UserRole, ("agent", ["agents", i]))
-                # The agent's OBJECTIVE, as a child row. Double-click it (or the
-                # agent) for a plain-language description of what it is doing.
-                obj = agent.get("mission") or {"type": "static"}
-                o = QTreeWidgetItem(a, [f"objective: {_objective_label(obj)}"])
-                o.setData(0, Qt.UserRole, ("objective", ["agents", i]))
-                for j, sen in enumerate(agent.get("sensors") or []):
-                    it = QTreeWidgetItem(a, [f"{sen.get('id')}  ({sen.get('type')})"])
-                    it.setData(0, Qt.UserRole, ("node", ["agents", i, "sensors", j]))
+
+        for sys_name, members in self._systems(networks).items():
+            sys_item = QTreeWidgetItem(root, [f"system: {sys_name}"])
+            sys_item.setData(0, Qt.UserRole, ("system", [sys_name]))
+            for name, net in members:
+                n = QTreeWidgetItem(sys_item, [name])
+                n.setData(0, Qt.UserRole, ("node", ["networks", name]))
+                hub = (net or {}).get("coordinator")
+                folder = QTreeWidgetItem(n, ["Agents"])
+                for i, agent in enumerate(agents):
+                    if agent.get("network") != name:
+                        continue
+                    placed.add(i)
+                    label = agent.get("id", "?")
+                    if label == hub:
+                        label += "   (coordinator)"
+                    a = QTreeWidgetItem(folder, [label])
+                    a.setData(0, Qt.UserRole, ("agent", ["agents", i]))
+                    if leaf == "objective":
+                        obj = agent.get("mission") or {"type": "static"}
+                        o = QTreeWidgetItem(a, [f"objective: {_objective_label(obj)}"])
+                        o.setData(0, Qt.UserRole, ("objective", ["agents", i]))
+                    else:  # equipment
+                        for j, sen in enumerate(agent.get("sensors") or []):
+                            it = QTreeWidgetItem(
+                                a, [f"{sen.get('id')}  ({sen.get('type')})"])
+                            it.setData(0, Qt.UserRole,
+                                       ("node", ["agents", i, "sensors", j]))
 
         loose = [i for i in range(len(agents)) if i not in placed]
         if loose:
-            orphan = QTreeWidgetItem(self.tab_scn, ["Agents (no network)"])
+            orphan = QTreeWidgetItem(root, ["Agents (no network)"])
             for i in loose:
                 a = QTreeWidgetItem(orphan, [agents[i].get("id", "?")])
                 a.setData(0, Qt.UserRole, ("agent", ["agents", i]))
 
-        radios = QTreeWidgetItem(self.tab_scn, ["Radios"])
-        for name in (view.get("radios") or {}):
-            n = QTreeWidgetItem(radios, [name])
-            n.setData(0, Qt.UserRole, ("node", ["radios", name]))
+        # Radios belong to the equipment view only - they are hardware, not
+        # tasking.
+        if leaf == "equipment":
+            radios = QTreeWidgetItem(tree, ["Radios"])
+            for name in (view.get("radios") or {}):
+                r = QTreeWidgetItem(radios, [name])
+                r.setData(0, Qt.UserRole, ("node", ["radios", name]))
 
-        self.tab_scn.expandAll()
+        tree.expandAll()
 
     def show_static_scene(self):
         """The scene as the file defines it, before any run.
@@ -1798,6 +1889,24 @@ class Console(QMainWindow):
             self.props.setRowCount(0)
             return
         kind, path = data
+        # A 'system' row is a UI grouping, not a node in the file - selecting it
+        # highlights every agent on its networks and shows no properties.
+        if kind == "system":
+            view = self._view()
+            sys_name = path[0]
+            net_names = {n for n, net in (view.get("networks") or {}).items()
+                         if (net or {}).get("system", "friendly") == sys_name}
+            self.viewport.selected = {
+                a.get("id") for a in (view.get("agents") or [])
+                if a.get("network") in net_names}
+            self.selected_agent = None
+            self.viewport.update()
+            self.props.setRowCount(0)
+            return
+        # An 'objective' row points at its agent; show that agent selected.
+        if kind == "objective":
+            kind, path = "agent", path
+
         try:
             node = self._at(path)
         except (KeyError, IndexError, TypeError):
@@ -2486,6 +2595,18 @@ class Console(QMainWindow):
         argv = ["-u", str(script)]
         if self.path:
             argv += ["--scenario", str(self.path)]
+        # A retask channel at a fixed, known path. The terminal's REOBJECTIVE
+        # command writes here and the running sim picks it up next tick. Fixed
+        # rather than passed around, so terminal and sim agree without wiring.
+        self._retask_dir = REPO_ROOT / "runs" / "retask"
+        try:
+            self._retask_dir.mkdir(parents=True, exist_ok=True)
+            queue = self._retask_dir / "queue"
+            if queue.exists():
+                queue.unlink()          # start clean; no stale command fires
+        except OSError:
+            pass
+        argv += ["--retask", str(self._retask_dir)]
         self.proc.start(sys.executable, argv)
         self.run_button.setText("\u25a0")
         self.run_button.setToolTip("Stop")
