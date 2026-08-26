@@ -1,0 +1,48 @@
+# =============================================================================
+# Deadband MISSION — three_lane_shuttle
+# =============================================================================
+# A MISSION is TASKING, with no world in it. It says what each agent is trying
+# to do - its OBJECTIVE - and leaves WHERE to the map. This one loads the lab
+# and sets all three cars shuttling in their lanes.
+#
+# It carries NO arena, NO radios, NO agent bodies. Those live in the map it
+# names below. That separation is the whole point: drop this same mission onto
+# a different map that also defines points A-F and it runs there unchanged.
+#
+#   map:        which world to load (maps/lab_box.yaml)
+#   objectives: one entry per agent id, each a command with no fixed coordinate
+#
+# An OBJECTIVE is a verb plus parameters, never a destination. "shuttle between
+# A and B" is portable; "shuttle from (-3,2) to (3,2)" is welded to one map.
+# Prefer the point names.
+#
+# You can also retask an agent LIVE while this is running - see
+# docs/retasking.md. Nothing here has to change for that; the live command
+# overrides the objective below until the run ends.
+# =============================================================================
+
+spec_version: 0.1
+name: three_lane_shuttle
+kind: mission
+
+description: >
+  All three cars shuttle in parallel lanes on the lab map. The control
+  condition, expressed as a portable mission rather than a welded scenario.
+
+map: lab_box
+
+objectives:
+  car1: {do: shuttle, between: [A, B]}
+  car2: {do: shuttle, between: [C, D]}
+  car3: {do: shuttle, between: [E, F]}
+  # gcs has no objective, so it stays put - a ground station does not drive.
+
+run:
+  duration_s: 180
+  seed: 1
+  realtime_factor: 1.0
+
+logging:
+  rosbag: true
+  metrics: [pdr, latency, link_uptime, position_error]
+  output_dir: runs/

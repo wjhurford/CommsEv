@@ -49,10 +49,90 @@ def wrap_pi(a):
 # Scenario
 # ---------------------------------------------------------------------------
 
-def load_scenario(path):
+def _load_yaml(path):
     import yaml
     with open(path, encoding="utf-8") as fh:
-        doc = yaml.safe_load(fh)
+        return yaml.safe_load(fh) or {}
+
+
+def resolve_mission(path):
+    """Read a mission file and merge in its map, if it names one.
+
+    A mission file describes WHAT the agents are doing (their objectives). It
+    MAY carry the world inline - arena, agents, radios - exactly as the old
+    scenario files did, and then it is self-contained. OR it may say
+
+        map: lab_box
+
+    and the world is read from maps/lab_box.yaml instead, so the same mission
+    can be dropped onto any map. The merge rule is simple and one-directional:
+    the MAP owns the world (arena, radios, and each agent's body and spawn); the
+    MISSION owns the objectives (each agent's `mission:` block) and may add
+    points of interest. Where a mission also specifies world keys, the mission
+    wins - so a mission can nudge a map without editing it.
+
+    Everything downstream still receives one merged dict shaped exactly like the
+    old scenario, so nothing else in the pipeline had to change.
+    """
+    doc = _load_yaml(path)
+    map_ref = doc.get("map")
+    if not map_ref:
+        return doc                          # self-contained: the old shape
+
+    map_path = Path(map_ref)
+    if not map_path.suffix:
+        map_path = map_path.with_suffix(".yaml")
+    if not map_path.is_absolute():
+        # A bare name means maps/<name>.yaml; a path is taken as given.
+        map_path = (REPO_ROOT / "maps" / map_path) if map_path.parent == Path(".") \
+            else (REPO_ROOT / map_path)
+    world_doc = _load_yaml(map_path)
+
+    merged = dict(world_doc)                 # start from the map's world
+    # The mission's own top-level keys win, EXCEPT agents, which are merged
+    # per-id so the map keeps the bodies and the mission supplies the objectives.
+    for key, val in doc.items():
+        if key in ("map", "agents"):
+            continue
+        merged[key] = val
+
+    map_agents = {a.get("id"): a for a in (world_doc.get("agents") or [])}
+    mission_agents = {a.get("id"): a for a in (doc.get("agents") or [])}
+
+    # A mission may task agents two ways. The preferred, readable one is a top-
+    # level `objectives:` map keyed by agent id, each value {do: <verb>, ...}.
+    # That is translated here into the per-agent `mission:` block the rest of
+    # the pipeline already understands, so the file speaks in objectives and the
+    # machinery underneath is unchanged. `do:` becomes `type:`.
+    for aid, obj in (doc.get("objectives") or {}).items():
+        if not isinstance(obj, dict):
+            continue
+        block = {("type" if k == "do" else k): v for k, v in obj.items()}
+        block.setdefault("type", "static")
+        mission_agents.setdefault(aid, {"id": aid})["mission"] = block
+
+    out_agents = []
+    for aid, body in map_agents.items():
+        agent = dict(body)
+        task = mission_agents.get(aid)
+        if task:
+            for k, v in task.items():
+                if k == "id":
+                    continue
+                agent[k] = v                 # objective (and any override) wins
+        out_agents.append(agent)
+    # Agents the mission names that the map does not have are an error worth
+    # surfacing loudly rather than silently dropping.
+    for aid in mission_agents:
+        if aid not in map_agents:
+            print(f"mission names agent '{aid}' with no body in the map "
+                  f"'{map_ref}' - it will not appear", file=sys.stderr)
+    merged["agents"] = out_agents
+    return merged
+
+
+def load_scenario(path):
+    doc = resolve_mission(path)
 
     arena = doc.get("arena") or {}
     extent = arena.get("extent") or {}
@@ -63,6 +143,13 @@ def load_scenario(path):
         # Sets how far the lidar reaches against a wall. Was being ignored,
         # which is why every beam ran to the geometric wall regardless.
         "surface_reflectivity": arena.get("surface_reflectivity", "high"),
+        # Named points of interest the MAP defines, e.g. {A: {x, y}, B: {x, y}}.
+        # An objective says "shuttle between A and B"; the map says where A is.
+        # This is what lets one mission run on many maps.
+        "points": {k: {"x": _num((v or {}).get("x")),
+                       "y": _num((v or {}).get("y")),
+                       "z": _num((v or {}).get("z"))}
+                   for k, v in (doc.get("points") or {}).items()},
     }
 
     agents = []
@@ -341,10 +428,32 @@ def mission_target(agent, t, poses, arena):
             return (start["x"], start["y"])
 
     if kind == "shuttle":
-        a = m.get("from") or {"x": -hx, "y": start["y"]}
-        b = m.get("to") or {"x": hx, "y": start["y"]}
-        ax, ay = _num(a.get("x")), _num(a.get("y"))
-        bx, by = _num(b.get("x")), _num(b.get("y"))
+        # An objective can name its endpoints as POINTS the map defines
+        # (between: [A, B]) or give raw coordinates (from:/to:). Named points
+        # are what make the objective portable: the same "shuttle between A and
+        # B" runs on any map that defines A and B. Raw coordinates still work
+        # for a one-off welded to this arena.
+        pts = arena.get("points") or {}
+
+        def _resolve(spec, fallback):
+            if isinstance(spec, str):            # a point name like "A"
+                p = pts.get(spec)
+                if p is None:
+                    print(f"objective for {agent['id']}: no point '{spec}' on "
+                          f"this map", file=sys.stderr)
+                    return fallback
+                return (p["x"], p["y"])
+            if isinstance(spec, dict):           # raw {x, y}
+                return (_num(spec.get("x")), _num(spec.get("y")))
+            return fallback
+
+        between = m.get("between")
+        if isinstance(between, (list, tuple)) and len(between) == 2:
+            ax, ay = _resolve(between[0], (-hx, start["y"]))
+            bx, by = _resolve(between[1], (hx, start["y"]))
+        else:
+            ax, ay = _resolve(m.get("from"), (-hx, start["y"]))
+            bx, by = _resolve(m.get("to"), (hx, start["y"]))
         leg = math.hypot(bx - ax, by - ay) or 1.0
         period = 2.0 * leg / speed
         phase = ((t + _num(m.get("offset"))) % period) / period

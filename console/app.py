@@ -1781,10 +1781,19 @@ class Console(QMainWindow):
 
     def _set_pubs(self, rows):
         """rows: (agent, topic, type, rate). Grouped by agent, with expansion
-        remembered so a live refresh does not collapse the tree underneath you."""
+        remembered so a live refresh does not collapse the tree underneath you.
+
+        The tree is rebuilt on every live frame, so whatever the user had open
+        (or closed) has to be restored afterwards. The trap: "nothing is
+        expanded" is ambiguous - it is true both on the very first frame, when
+        we want everything open, AND after the user has deliberately collapsed
+        everything, when we must leave it collapsed. A flag distinguishes them:
+        expand-all happens once, on first populate, and never fights the user
+        again."""
         expanded = {self.pubs.topLevelItem(i).text(0)
                     for i in range(self.pubs.topLevelItemCount())
                     if self.pubs.topLevelItem(i).isExpanded()}
+        first_populate = not getattr(self, "_pubs_populated", False)
         self.pubs.clear()
         groups = {}
         for agent, topic, type_name, rate in rows:
@@ -1792,7 +1801,9 @@ class Console(QMainWindow):
                 groups[agent] = QTreeWidgetItem(self.pubs, [str(agent)])
             QTreeWidgetItem(groups[agent], [str(topic), str(type_name), str(rate)])
         for name, item in groups.items():
-            item.setExpanded(name in expanded or not expanded)
+            item.setExpanded(first_populate or name in expanded)
+        if groups:
+            self._pubs_populated = True
         for column in range(3):
             self.pubs.resizeColumnToContents(column)
 
