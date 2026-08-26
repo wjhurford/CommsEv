@@ -124,6 +124,48 @@ until then. This is irreversible and it gates the whole point of the project.
       question the simulator cannot answer, which quietly invalidates any
       ML-on-edge result.
 
+## In-app workflow — everything set up in the Console (Will's vision, 26 Aug)
+
+The direction: a researcher who is not Will can open the Console and build a
+whole run without touching YAML. Staged so no single step is big enough to
+break the simulator. Order is roughly dependency order.
+
+- [ ] **Objective visible on a selected agent, live** — when an agent is
+      selected during a run, show its current objective next to its speed, so
+      "what is car3 doing right now" is answerable at a glance. (Pre-run
+      display of the objective in the Overview tree is DONE; this is the live,
+      running-view version.)
+- [ ] **Per-agent bespoke sensor panel** — the right-hand panel shows the
+      sensors THIS agent has, not a fixed lidar view. A car with lidar shows
+      lidar (the current view, kept as the default when lidar is present); an
+      agent with a camera shows a camera view; one with neither shows nothing.
+      NB: do not simply hide the lidar - it is the only window into what a
+      sensor-driven mission perceives, and it is how you would catch the
+      /car3/scan QoS bug. Generalise it, don't remove it.
+- [ ] **Pre-run point editing for split missions** — a mission's objective
+      names points the MAP owns (shuttle between A and B). Editing A and B
+      before a run currently needs the map file; the Console refuses the edit
+      with a note. Wire an in-app map-point editor so the points are adjustable
+      pre-run from the Console. (Inline scenarios with raw from/to coordinates
+      are already editable in the property panel.)
+- [ ] **Simple retask grammar + a retask mode in the Console** — a command box
+      that puts you in "retask mode": `retask` then `car1 pursue car3`, or
+      `shuttle 1 3` (between points 1 and 3). Writes the same line the file
+      channel already consumes (docs/maps-missions-and-retasking.md). The stub
+      channel exists; this is the friendly front end and the grammar polish.
+- [ ] **Retask over ROS** — the `--retask` file channel is stub-only. A real
+      ROS 2 service is needed to retask a running ROS controller. Gates live
+      retasking of real cars.
+- [ ] **The setup workflow / startup page** — one page, walked top to bottom:
+      pick a map; set environmental conditions; pick or name a mission; how
+      many networks; how many agents per network; define each agent; set each
+      agent's objective and its points of interest; choose the comms channel;
+      choose the system architecture. Then a **Simulate** button drops into the
+      current home screen, where starting coordinates and objectives can be
+      tweaked pre-run, and Play begins the run (with retasking available during
+      it). Explicitly NOT needed for the current research sandbox - this is the
+      hand-over-to-others milestone, built last of this group.
+
 ## Later
 
 - [ ] Spectrum waterfall — frequency across, time down, power as colour. Makes
