@@ -23,6 +23,23 @@ a scenario. Press Play: that starts the ROS nodes, records a bag, and connects.
 Press Stop: it closes the recorder cleanly and asks whether to keep the bag.
 The embedded Terminals tab starts in the repo root.
 
+**The three scenarios, and which to open for what.**
+  * `three_car_fleet.yaml` - the untouched benchmark. Three cars shuttling.
+  * `wall_follow_demo.yaml` - the wall-follow rig. Cars 1/2 parked as static
+    obstacles, gcs suspended at z 1.5 (out of the scan plane, so genuinely
+    invisible to lidar - verified in the sim, not just asserted). Car 3 runs
+    missions/wall_follow.py.
+  * `formation_demo.yaml` - the FIRST hand-written-mission rig. Cars 1/2
+    shuttle, car 3 runs missions/my_first.py holding station off car 1's flank.
+    Change one number in car 3's mission block and re-run to feel the edit-run-
+    see loop. Verified headless: car 3 tracks car 1 on the correct side; the
+    held gap runs tighter than the 2.0 m target because car 3 chases a moving
+    slot at its own speed cap - that is honest physics, not a bug.
+
+The left panel's first tab is now **Overview** (was "Scenario") - it shows the
+networks/radios tree, i.e. what is in the world, distinct from the loadable
+task a mission represents.
+
 **What Will does and does not do.** He is the manager on this: conceptual
 direction, decisions, and judgement about what is worth building. He is new to
 robotics and does not want to write the plumbing. He has asked, explicitly, to
@@ -71,9 +88,12 @@ until then. This is irreversible and it gates the whole point of the project.
 - [ ] **Test the wall follower under ROS.** Headless it holds 0.85 m against a
       0.80 m standoff, sd 0.08 m, both sides, no contacts. Not yet watched in
       the Console since the two-beam rewrite
-- [ ] **Will writes a mission end to end** — `docs/writing-a-mission.md` is
-      written and three worked examples run; the remaining half is Will
-      actually writing `missions/my_first.py` and watching it drive
+- [ ] **Will watches his first mission drive** — `missions/my_first.py` is now
+      written and points at `scenarios/formation_demo.yaml`; it passes headless.
+      The remaining half is Will opening that scenario in the Console, pressing
+      Play, and changing one number (offset / side / follow) to feel the edit-
+      run-see loop. This is the gate before the mission dropdown gets built -
+      the dropdown must not hide a UX problem the by-hand path would reveal.
 - [ ] **Pick a mission from the Console** — right now swapping one means
       editing YAML. A dropdown on the agent, writing back to the scenario file,
       would make it clickable like everything else
