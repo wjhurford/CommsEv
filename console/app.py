@@ -2217,7 +2217,16 @@ class Console(QMainWindow):
         self.bag_name = f"bag_{datetime.now():%Y%m%d_%H%M%S}"
         self.bag_saved = False
 
-        self.ros_proc = self.wsl("ros2 launch deadband_ros fleet.launch.py", "ros")
+        # PASS THE SCENARIO THAT IS ACTUALLY OPEN. The launch file defaults to
+        # three_car_fleet.yaml, so without this the Console would draw one
+        # scenario while ROS simulated another - and the only symptom would be
+        # that the picture did not match the file you had open, which is the
+        # sort of thing that costs an afternoon.
+        scn = _wsl_path(self.path) if getattr(self, "path", None) else ""
+        self.say(f"Scenario: {scn or 'launch default'}")
+        self.ros_proc = self.wsl(
+            "ros2 launch deadband_ros fleet.launch.py"
+            + (f" scenario:={scn}" if scn else ""), "ros")
         # MCAP where the storage plugin exists: PlotJuggler reads it with a
         # built-in loader and never opens the plugin-choice dialog that its
         # sqlite3 path goes through - which is where it has been aborting.

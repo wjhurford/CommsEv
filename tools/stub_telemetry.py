@@ -186,6 +186,28 @@ class World:
         """
         return self._scans.get(agent_id)
 
+    def ray(self, agent_id, angle):
+        """Range along ONE beam, at the sensor angle nearest to `angle`.
+
+        float('inf') if that beam returned nothing. Two named beams are enough
+        to work out a wall's angle as well as its distance, which is what
+        stops a wall follower oscillating - see missions/wall_follow.py.
+        """
+        sc = self.scan(agent_id)
+        if not sc:
+            return float("inf")
+        n = len(sc["ranges"])
+        if n == 0:
+            return float("inf")
+        span = sc["angle_max"] - sc["angle_min"]
+        if span <= 0:
+            return float("inf")
+        i = round((angle - sc["angle_min"]) / span * (n - 1))
+        if i < 0 or i > n - 1:
+            return float("inf")       # outside the sensor's fan
+        r = sc["ranges"][i]
+        return float("inf") if r is None else float(r)
+
     def nearest_return(self, agent_id, lo=None, hi=None):
         """(range_m, angle_rad) of the closest lidar return, optionally only
         within a bearing window. Returns (inf, 0.0) if nothing came back.
