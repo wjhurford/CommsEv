@@ -1325,7 +1325,7 @@ class Console(QMainWindow):
         self.tab_env = QTreeWidget()
         self.tab_env.setHeaderLabels(["Environment"])
         self.tab_scn = QTreeWidget()
-        self.tab_scn.setHeaderLabels(["Scenario"])
+        self.tab_scn.setHeaderLabels(["Overview"])
         for t in (self.tab_env, self.tab_scn):
             t.itemSelectionChanged.connect(self.on_select)
             # The default indent stacks five levels deep off the right edge of a
@@ -1407,7 +1407,7 @@ class Console(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tab_env, "Environment")
-        self.tabs.addTab(self.tab_scn, "Scenario")
+        self.tabs.addTab(self.tab_scn, "Overview")
         self.tabs.addTab(comms, "Comms")
         self.tabs.addTab(cyber, "Cyber")
         self.tabs.addTab(results, "Results")
