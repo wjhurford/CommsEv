@@ -38,6 +38,9 @@ def _wsl_path(p):
 
 
 REPO_WSL_PATH = _wsl_path(REPO_ROOT)
+
+# Where the bag recorder writes its own pid, inside WSL. See stop_ros_stack.
+BAG_PIDFILE = "/tmp/deadband_bag.pid"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -2200,7 +2203,13 @@ class Console(QMainWindow):
         """
         # Anything left from a previous run holds the port and wins the race.
         self.say("Clearing any previous ROS processes...")
-        cleanup = self.wsl("pkill -f deadband_ros; pkill -f 'ros2 bag record'; true",
+        # [d]eadband is not a typo. pkill -f matches against the FULL command
+        # line, and this shell's own command line contains the pattern, so a
+        # plain `pkill -f deadband_ros` signals the shell that is running it.
+        # The bracket makes the regex match "deadband_ros" while the literal
+        # text "[d]eadband_ros" sitting in our own argv does not match it.
+        cleanup = self.wsl("pkill -f '[d]eadband_ros'; "
+                           "pkill -f 'ros2 bag [r]ecord'; true",
                            "cleanup")
         cleanup.waitForFinished(4000)
 
@@ -2212,15 +2221,26 @@ class Console(QMainWindow):
         # MCAP where the storage plugin exists: PlotJuggler reads it with a
         # built-in loader and never opens the plugin-choice dialog that its
         # sqlite3 path goes through - which is where it has been aborting.
+        # Launched in the BACKGROUND so its pid can be written down, then
+        # waited on. Signalling a pid we recorded ourselves beats matching a
+        # pattern against every process on the machine, which is how the last
+        # version ended up signalling its own cleanup shell.
         self.bag_proc = self.wsl(
-            f"mkdir -p {REPO_WSL_PATH}/runs && cd {REPO_WSL_PATH}/runs && "
+            # `set -m` IS LOAD-BEARING. POSIX says a non-interactive shell sets
+            # SIGINT to SIG_IGN for any command it runs with `&`, and the child
+            # inherits that - so without job control enabled, `kill -INT` on the
+            # recorder does nothing at all and we fall through to SIGKILL every
+            # time, which is the corruption we are here to fix. Verified both
+            # ways before trusting it.
+            f"set -m; mkdir -p {REPO_WSL_PATH}/runs && cd {REPO_WSL_PATH}/runs && "
             f"if ros2 pkg list 2>/dev/null | grep -q rosbag2_storage_mcap; then "
-            f"  ros2 bag record -a -s mcap -o {self.bag_name}; "
+            f"  ros2 bag record -a -s mcap -o {self.bag_name} & "
             f"else "
             f"  echo 'mcap storage not installed (sudo apt install "
             f"ros-humble-rosbag2-storage-mcap) - using sqlite3'; "
-            f"  ros2 bag record -a -o {self.bag_name}; "
-            f"fi", "bag")
+            f"  ros2 bag record -a -o {self.bag_name} & "
+            f"fi; "
+            f"echo $! > {BAG_PIDFILE}; wait $!", "bag")
         self.say(f"Starting ROS 2 nodes, recording {self.bag_name}...")
 
         # The nodes need a moment before the socket exists, so retry rather than
@@ -2344,22 +2364,38 @@ class Console(QMainWindow):
         self.say("Closing the recorder cleanly (this is what keeps the bag "
                  "readable)...")
         self.wsl(
-            # Ctrl-C the recorder and give it up to 10 s to write its index.
-            "pkill -INT -f 'ros2 bag record' 2>/dev/null; "
-            "for i in $(seq 1 40); do "
-            "  pgrep -f 'ros2 bag record' >/dev/null || break; sleep 0.25; "
-            "done; "
-            "if pgrep -f 'ros2 bag record' >/dev/null; then "
-            "  echo 'recorder did not exit on SIGINT - forcing; the bag may be "
-            "truncated'; pkill -KILL -f 'ros2 bag record'; "
-            "else echo 'recorder closed cleanly'; fi; "
+            # Signal the pid we wrote down at launch. The previous version
+            # matched a pattern, and `pkill -f 'ros2 bag record'` matches the
+            # command line of the very shell running it, because that pattern
+            # is sitting in its own argv. So the wait loop could never see the
+            # recorder go, always reported "did not exit on SIGINT", and then
+            # SIGKILLed itself. A pid cannot be ambiguous.
+            f"PID=$(cat {BAG_PIDFILE} 2>/dev/null); "
+            f"if [ -n \"$PID\" ] && kill -0 $PID 2>/dev/null; then "
+            f"  kill -INT $PID; "
+            f"  for i in $(seq 1 40); do "          # up to 10 s to flush
+            f"    kill -0 $PID 2>/dev/null || break; sleep 0.25; "
+            f"  done; "
+            f"  if kill -0 $PID 2>/dev/null; then "
+            f"    echo 'recorder still running after 10 s - forcing; the bag "
+            f"may be truncated'; kill -KILL $PID; "
+            f"  else echo 'recorder closed cleanly'; fi; "
+            f"else "
+            # No pidfile: either it never started, or it has already gone.
+            # Fall back to the pattern, bracketed so it cannot match us.
+            f"  pkill -INT -f 'ros2 bag [r]ecord' 2>/dev/null "
+            f"    && echo 'recorder stopped by pattern match' "
+            f"    || echo 'no recorder was running'; "
+            f"  sleep 1; "
+            f"fi; "
+            f"rm -f {BAG_PIDFILE}; "
             # Then the nodes. Same courtesy, shorter fuse - they have no file
             # to finish writing, they just have destructors worth running.
-            "pkill -INT -f deadband_ros 2>/dev/null; "
-            "for i in $(seq 1 8); do "
-            "  pgrep -f deadband_ros >/dev/null || break; sleep 0.25; "
-            "done; "
-            "pkill -KILL -f deadband_ros 2>/dev/null; true",
+            f"pkill -INT -f '[d]eadband_ros' 2>/dev/null; "
+            f"for i in $(seq 1 8); do "
+            f"  pgrep -f '[d]eadband_ros' >/dev/null || break; sleep 0.25; "
+            f"done; "
+            f"pkill -KILL -f '[d]eadband_ros' 2>/dev/null; true",
             "cleanup").waitForFinished(20000)
 
         # Only now tear down the Windows-side shells. Doing this first would

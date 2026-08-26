@@ -201,19 +201,21 @@ agents:
     radios: [wifi_2g4]
     controller: controllers/car3_shuttle.py
     on_link_loss: hold
-    mission:                     # parallel lane, in step with the others
-      type: shuttle
-      from: {x: -3.0, y: -2.0}
-      to:   {x: 3.0, y: -2.0}
+    # ACTIVE: car 3 follows the right-hand wall using its lidar.
+    mission:                                # follow the wall - uses the LIDAR
+      type: script
+      file: missions/wall_follow.py
+      side: right                           # right | left
+      standoff: 0.8                         # metres to hold off the wall
+      lookahead: 1.2                        # metres ahead to aim
 
-    # Swap car 3 onto a mission SCRIPT instead: comment out the block above,
-    # uncomment one below, press Play. See docs/writing-a-mission.md.
+    # --- other missions for car 3. Exactly ONE `mission:` block may be
+    # --- uncommented at a time. See docs/writing-a-mission.md.
     #
-    # mission:                              # follow the wall - uses the LIDAR
-    #   type: script
-    #   file: missions/wall_follow.py
-    #   side: right
-    #   standoff: 0.8
+    # mission:                   # parallel lane, in step with the others
+    #   type: shuttle
+    #   from: {x: -3.0, y: -2.0}
+    #   to:   {x: 3.0, y: -2.0}
     #
     # mission:                              # patrol until the link degrades,
     #   type: script                        # then come home - uses the NETWORK

@@ -214,6 +214,12 @@ class WorldNode(Node):
         lidar = next(s for s in agent["sensors"] if s["type"] == "ust10lx")
         scan = self.sim.scan_for(agent, lidar, self.poses, self.agents,
                                  self.arena, self.rng)
+        # Hand the scan to the mission layer for the NEXT tick. Without this a
+        # scenario mission of `type: script` sees world.scan() -> None in the
+        # ROS path but real data in the headless path, so a lidar-driven
+        # mission works standalone and drives into a wall under ROS. Same
+        # one-tick lag a real subscriber has.
+        self.sim._LAST_SCANS[aid] = scan
         out = LaserScan()
         out.header.stamp = stamp
         out.header.frame_id = f"{aid}/{lidar['id']}"
