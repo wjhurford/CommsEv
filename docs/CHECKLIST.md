@@ -39,17 +39,24 @@ one app.**
 - [x] **Delivery via patch** — every chat-interface session ends with a
       `git am` patch, since the sandbox cannot push to the remote.
 
-## In progress (this session)
+## Done — this session (verified)
 
-- [ ] **Two tabs: Overview (equipment) and Mission (tasking)** — Overview =
+- [x] **Two tabs: Overview (equipment) and Mission (tasking)** — Overview =
       system → network → agents → their sensors/equipment; Mission = system →
-      network → agents → objectives. Tab order: Results, Cyber, Comms, Overview,
-      Environment, Mission.
-- [ ] **System tier in the tree** — a system groups one or more networks (e.g.
-      blue+green = friendly, red = adversary). Real from the start, even with one.
-- [ ] **`REOBJECTIVE` retask grammar** — terminal line
+      network → agents → objectives. No hardware in the objective tree, no
+      objective in the equipment tree. Tab order: Results, Cyber, Comms,
+      Overview, Environment, Mission.
+- [x] **System tier in the tree** — a system groups one or more networks
+      (blue+green = friendly, red = adversary). A network opts in with
+      `system: friendly`; until maps say so everything lands in one system, so
+      the tier is correct now and simply gains siblings when red arrives.
+- [x] **`REOBJECTIVE` retask grammar** — terminal line
       `REOBJECTIVE <agent> <objective> <args>`, e.g. `REOBJECTIVE car1 pursue
-      car3`. Later `REMISSION` to retask a whole system.
+      car3`. Writes the queue line the running sim consumes next tick. Verified
+      end to end: car1 held its lane, then broke formation and closed on car3
+      from 4.00 m to 0.55 m. `REMISSION` is recognised and reports honestly
+      that it is not built yet rather than failing silently.
+- [x] **Publications tree keeps collapsed folders** across live refresh.
 
 ## Next up
 
