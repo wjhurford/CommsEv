@@ -7,3 +7,11 @@ runs/
 *.bag
 .vscode/
 .DS_Store
+
+# colcon output. Never commit these: a clone that arrives with somebody else's
+# build tree half-satisfies the next `colcon build`, which then fails in ways
+# that look like a code problem and are not. Also dirties the repo on every
+# build.
+ros2/build/
+ros2/install/
+ros2/log/
