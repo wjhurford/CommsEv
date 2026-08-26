@@ -6,6 +6,35 @@ the bottom with a date.
 
 ---
 
+## Resuming in a new session
+
+This file plus `docs/writing-a-mission.md` and `docs/ros2-and-missions.md` are
+the handover. Nothing important should live only in a chat.
+
+**Where things stand (26 Aug 2026).** The Console runs, drives a real ROS 2
+stack, records readable MCAP bags, and PlotJuggler opens them. Scenarios are
+YAML with provenance on every physical quantity. Missions are single Python
+files with a frozen `target(agent, world)` contract, and three worked examples
+exist. Nothing about the radio, the spectrum or attacks is modelled yet - link
+quality is a distance falloff and says so in its docstring.
+
+**How to run it.** Open `console/app.py` (or the desktop shortcut). File → Open
+a scenario. Press Play: that starts the ROS nodes, records a bag, and connects.
+Press Stop: it closes the recorder cleanly and asks whether to keep the bag.
+The embedded Terminals tab starts in the repo root.
+
+**What Will does and does not do.** He is the manager on this: conceptual
+direction, decisions, and judgement about what is worth building. He is new to
+robotics and does not want to write the plumbing. He has asked, explicitly, to
+be pushed back on when an idea is weak, and for bulleted next steps at the end
+of every reply, carried forward rather than reset.
+
+**The standing constraint.** Open-sourcing must be cleared in writing with
+Cheng and Loughborough IP before anything is published. The repo stays private
+until then. This is irreversible and it gates the whole point of the project.
+
+---
+
 ## Decisions taken (do not relitigate)
 
 - **The GUI edits the scenario file; the file stays the source of truth.** Not
@@ -39,6 +68,9 @@ the bottom with a date.
 
 ## Next up
 
+- [ ] **Test the wall follower under ROS.** Headless it holds 0.85 m against a
+      0.80 m standoff, sd 0.08 m, both sides, no contacts. Not yet watched in
+      the Console since the two-beam rewrite
 - [ ] **Will writes a mission end to end** — `docs/writing-a-mission.md` is
       written and three worked examples run; the remaining half is Will
       actually writing `missions/my_first.py` and watching it drive
@@ -108,6 +140,15 @@ the bottom with a date.
 
 ## Done
 
+- 2026-08-26 — Two-beam wall follower. Steering on one side distance oscillates
+  by construction; a second beam angled forward gives the wall's angle in the
+  same instant, so the correction is computed from where the car will be. sd
+  fell from 0.17 m to 0.08 m and the excursions from 2.6 m to 1.4 m
+- 2026-08-26 — `scenarios/wall_follow_demo.yaml`; the ground station suspended
+  at 1.5 m is a real demonstration that the scan plane model works
+- 2026-08-26 — Console passes the open scenario to `ros2 launch`. It had been
+  hardcoded to the launch default, so the picture could silently disagree with
+  the file
 - 2026-08-26 — Bags close cleanly. The recorder is now SIGINT'd and waited for
   instead of killed, so MCAP writes its index and PlotJuggler stops reporting
   "corrupted / recovered partially". The data was always there; the footer
