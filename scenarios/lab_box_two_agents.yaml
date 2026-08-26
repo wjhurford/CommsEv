@@ -1,0 +1,207 @@
+# =============================================================================
+# Deadband scenario spec — DRAFT v0.1
+# =============================================================================
+# One file describes one experiment completely. Everything else in the project
+# is machinery for turning this into a running simulation.
+#
+# YOUR JOB WHEN REVIEWING THIS: don't read it as code, read it as a form.
+# Is every question a researcher needs to answer askable here? Is anything
+# asked twice? Is anything asked that shouldn't be? Those are the manager
+# questions and they're worth more right now than any line of Python.
+#
+# THE PROVENANCE RULE: every physical quantity is {value, unit, source}.
+# An empty source is allowed but it gets counted and flagged. Never invent one.
+# =============================================================================
+
+spec_version: 0.1
+name: lab_box_two_agents
+description: >
+  Two agents in the confined lab volume, clean spectrum, centralised network.
+  The control condition — this is what everything else is measured against.
+
+# -----------------------------------------------------------------------------
+# ARENA — the physical volume
+# -----------------------------------------------------------------------------
+arena:
+  type: box                    # box | strip | field | imported
+  extent:                      # metres, x y z
+    x: 8.0
+    y: 8.0
+    z: 8.0
+
+  # Each face independently. solid | open | absorbing
+  # 'solid' reflects RF (multipath), 'absorbing' does not, 'open' is free space.
+  boundaries:
+    x_min: solid
+    x_max: solid
+    y_min: solid
+    y_max: solid
+    z_min: solid               # floor
+    z_max: solid               # ceiling
+
+  # Propagation belongs to the ARENA, not the scenario. A log-distance model
+  # inside 8 metres is close to meaningless — everything is a couple of metres
+  # from everything, and the walls dominate.
+  propagation:
+    model: indoor_multipath    # perfect | freespace | log_distance | indoor_multipath | measured
+    path_loss_exponent:
+      value:                   # <-- NEEDS A SOURCE. Indoor propagation paper.
+      unit: dimensionless
+      source: ""
+    shadowing_sigma:
+      value:                   # <-- NEEDS A SOURCE.
+      unit: dB
+      source: ""
+
+  # The lab's control condition: nothing else is transmitting.
+  spectrum:
+    model: clean               # clean | modelled | measured
+    background_emitters: []
+    # For 'measured', point at a power-spectral-density CSV from an SDR capture:
+    # measured_psd: recordings/outside_2026-09-02_2400MHz.csv
+    # capture_method: "HackRF One, 20 MHz span, 1 s dwell, 2026-09-02 14:10 BST"
+
+  gnss:
+    availability: denied       # nominal | degraded | denied
+    note: Indoors. No sky view.
+
+  wind:
+    model: none
+
+# -----------------------------------------------------------------------------
+# NETWORKS — logical. Plural from day one, even with only one of them.
+# -----------------------------------------------------------------------------
+# The RF MEDIUM is shared and global: every transmitter raises every receiver's
+# noise floor regardless of network. Networks are overlays on that medium.
+# This separation is what lets adversarial agents on their own network be
+# additive later rather than a rewrite.
+networks:
+  blue:
+    topology: centralized      # centralized | decentralized | hierarchical
+    coordinator: gcs           # agent id acting as the hub
+    encrypted: true
+    band: 2400                 # MHz
+    qos:
+      reliability: reliable
+      deadline_ms: 100
+
+  # red:
+  #   topology: decentralized
+  #   encrypted: true
+  #   band: 5800
+
+# -----------------------------------------------------------------------------
+# AGENTS
+# -----------------------------------------------------------------------------
+agents:
+
+  - id: gcs
+    platform: ground_station   # static, no physics
+    network: blue
+    pose: {x: 0.0, y: 0.0, z: 0.5, yaw: 0.0}
+    radios: [wifi_2g4]
+
+  - id: rover1
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"          # default blue; editable per agent
+    pose: {x: -2.0, y: -2.0, z: 0.0, yaw: 0.0}
+
+    dimensions:                # the rectangle the viewport draws
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width: {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+      mass: {value: null, unit: kg, source: ""}        # <-- weigh it
+
+    performance:
+      max_speed: {value: null, unit: m/s, source: ""}        # <-- Traxxas spec or measure
+      max_accel: {value: null, unit: m/s^2, source: ""}
+      min_turn_radius: {value: null, unit: m, source: ""}
+
+    sensors:
+      - id: lidar
+        type: ust10lx
+        mount:
+          offset: {x: 0.12, y: 0.0, z: 0.18}   # metres from agent origin
+          rpy: {r: 0.0, p: 0.0, y: 0.0}        # radians
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.05}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+
+    radios: [wifi_2g4]
+    controller: controllers/rover1_wall_follow.py
+    on_link_loss: hold          # hold | return | continue | autonomous
+
+  - id: uav1
+    platform: quadcopter_iris
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: 2.0, y: 2.0, z: 0.0, yaw: 0.0}
+
+    dimensions:
+      length: {value: null, unit: m, source: ""}
+      width: {value: null, unit: m, source: ""}
+      height: {value: null, unit: m, source: ""}
+      mass: {value: null, unit: kg, source: ""}
+
+    performance:
+      max_speed: {value: null, unit: m/s, source: ""}
+      max_climb: {value: null, unit: m/s, source: ""}
+      endurance: {value: null, unit: s, source: ""}
+
+    sensors:
+      - id: gnss
+        type: generic_gnss
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.02}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.0}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+
+    radios: [wifi_2g4]
+    controller: controllers/uav1_hold.py
+    on_link_loss: return
+
+# -----------------------------------------------------------------------------
+# RADIO DEFINITIONS — referenced by agents above
+# -----------------------------------------------------------------------------
+radios:
+  wifi_2g4:
+    band: {value: 2400, unit: MHz, source: "Configured"}
+    tx_power: {value: null, unit: dBm, source: ""}       # <-- module datasheet
+    sensitivity: {value: null, unit: dBm, source: ""}    # <-- module datasheet
+    bandwidth: {value: null, unit: MHz, source: ""}
+    data_rate: {value: null, unit: Mbps, source: ""}
+    antenna_gain: {value: null, unit: dBi, source: ""}
+    link_type: rf_omni          # rf_omni | rf_directional | fiber | relay
+
+# -----------------------------------------------------------------------------
+# ATTACKS — scheduled here, or injected live through the runtime API.
+# Same code path either way.
+# -----------------------------------------------------------------------------
+attacks: []
+  # - id: flood1
+  #   type: dos_flood
+  #   target: {agent: rover1}       # or {link: [rover1, gcs]} or {network: blue}
+  #   start_s: 30.0
+  #   stop_s: 60.0
+  #   params:
+  #     rate_hz: 5000
+
+# -----------------------------------------------------------------------------
+# RUN
+# -----------------------------------------------------------------------------
+run:
+  duration_s: 120
+  seed: 1                       # same spec + same seed = same run
+  realtime_factor: 1.0
+
+logging:
+  rosbag: true
+  metrics: [pdr, latency, link_uptime, position_error]
+  output_dir: runs/

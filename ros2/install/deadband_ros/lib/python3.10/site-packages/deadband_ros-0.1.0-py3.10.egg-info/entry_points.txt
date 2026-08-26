@@ -1,0 +1,5 @@
+[console_scripts]
+bridge = deadband_ros.bridge_node:main
+controller = deadband_ros.controller_node:main
+world = deadband_ros.world_node:main
+

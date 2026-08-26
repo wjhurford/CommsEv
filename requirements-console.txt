@@ -1,0 +1,5 @@
+# Windows-side dependencies for the Deadband Console.
+# Install with:  py -m pip install -r requirements-console.txt   (Command Prompt)
+PySide6>=6.6
+PyYAML>=6.0
+ruamel.yaml>=0.18

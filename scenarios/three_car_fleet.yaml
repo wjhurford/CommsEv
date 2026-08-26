@@ -1,0 +1,256 @@
+# =============================================================================
+# Deadband scenario — three RoboRacer cars, lab arena
+# =============================================================================
+# The lab fleet as it actually is: three 1:10 cars and a ground station, in a
+# bounded indoor volume, clean spectrum, centralised network.
+#
+# This is the benchmark scenario. It exists so the same fleet can be run here
+# and in f1tenth_gym and the two compared — see the note at the bottom about
+# what that comparison can and cannot tell you.
+#
+# THE PROVENANCE RULE: every physical quantity is {value, unit, source}.
+# An empty source is allowed but it gets counted and flagged. Never invent one.
+#
+# CONVENTION: pose.z is the BASE of an agent (its ground contact), so an agent
+# occupies [z, z + height]. This matters for lidar: a scan only sees obstacles
+# whose vertical extent crosses the scan plane.
+# =============================================================================
+
+spec_version: 0.1
+name: three_car_fleet
+description: >
+  Three RoboRacer cars shuttling in parallel lanes, plus a ground station.
+  Clean spectrum, no attacks - this is the control condition everything else
+  is measured against.
+
+# -----------------------------------------------------------------------------
+# ARENA
+# -----------------------------------------------------------------------------
+arena:
+  type: box
+  extent:
+    x: 8.0
+    y: 8.0
+    z: 3.0                     # a room, not a cube - ceiling height
+
+  # What the lidar sees when a beam lands on a wall. The datasheet gives 10 m
+  # against a white Kent sheet and 4 m at 10% diffuse reflectance, so the
+  # surface sets the useful range as much as the sensor does. Brick is matte and
+  # dark: the low figure is the right default here.
+  # NEEDS A MEASUREMENT for the real room - point a car at a wall and record
+  # where returns stop.
+  # Reflectance of the wall surface, 0..1 (or a percentage). Red brick and
+  # concrete sit around 0.25-0.40 in the near infrared - well above the 10%
+  # figure the datasheet uses for its worst case, and well below white paper.
+  # NEEDS A MEASUREMENT: point a car at the wall and record where returns stop.
+  surface_reflectivity: 0.30       # low | medium | high, or a number
+
+  # solid | open | absorbing. 'solid' reflects RF (multipath).
+  boundaries:
+    x_min: solid
+    x_max: solid
+    y_min: solid
+    y_max: solid
+    z_min: solid               # floor
+    z_max: solid               # ceiling
+
+  propagation:
+    model: indoor_multipath
+    path_loss_exponent:
+      value:                   # <-- NEEDS A SOURCE. Indoor propagation paper.
+      unit: dimensionless
+      source: ""
+    shadowing_sigma:
+      value:                   # <-- NEEDS A SOURCE.
+      unit: dB
+      source: ""
+
+  spectrum:
+    model: clean               # the control condition: nothing else transmitting
+    background_emitters: []
+
+  gnss:
+    availability: denied       # indoors, no sky view
+
+  wind:
+    model: none
+
+# -----------------------------------------------------------------------------
+# NETWORKS
+# -----------------------------------------------------------------------------
+networks:
+  blue:
+    topology: centralized
+    coordinator: gcs
+    encrypted: true
+    band: 2400                 # MHz
+    qos:
+      reliability: reliable
+      deadline_ms: 100
+
+# -----------------------------------------------------------------------------
+# AGENTS
+# -----------------------------------------------------------------------------
+agents:
+
+  - id: gcs
+    platform: ground_station
+    network: blue
+    colour: "#6B7B85"
+    pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
+    dimensions:
+      length: {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
+      width:  {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
+      height: {value: 1.00, unit: m, source: "Nominal - measure the actual bench"}
+    radios: [wifi_2g4]
+    mission: {type: static}
+    ghost: true                # furniture for now: drawn and visible to lidar,
+                               # but nothing collides with it
+
+  - id: car1
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+      mass:   {value: , unit: kg, source: ""}            # <-- weigh it
+    performance:
+      max_speed:       {value: 1.5, unit: m/s,   source: "Chosen for indoor safety - not a platform limit"}
+      max_accel:       {value: , unit: m/s^2, source: ""}
+      min_turn_radius: {value: , unit: m,     source: ""}
+    sensors:
+      - id: lidar
+        type: ust10lx
+        mount:
+          offset: {x: 0.12, y: 0.0, z: 0.18}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.05}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+    radios: [wifi_2g4]
+    controller: controllers/car1_shuttle.py
+    on_link_loss: hold
+    mission:
+      type: shuttle
+      from: {x: -3.0, y: 2.0}
+      to:   {x: 3.0, y: 2.0}
+
+  - id: car2
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #2, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #2, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #2, 2026-07-21"}
+      mass:   {value: , unit: kg, source: ""}
+    performance:
+      max_speed:       {value: 1.5, unit: m/s, source: "Chosen for indoor safety"}
+      max_accel:       {value: , unit: m/s^2, source: ""}
+      min_turn_radius: {value: , unit: m,     source: ""}
+    sensors:
+      - id: lidar
+        type: ust10lx
+        mount:
+          offset: {x: 0.12, y: 0.0, z: 0.18}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.05}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+    radios: [wifi_2g4]
+    controller: controllers/car2_shuttle.py
+    on_link_loss: hold
+    mission:                     # parallel lane, in step with the others
+      type: shuttle
+      from: {x: -3.0, y: 0.0}
+      to:   {x: 3.0, y: 0.0}
+
+  - id: car3
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #3, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #3, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #3, 2026-07-21"}
+      mass:   {value: , unit: kg, source: ""}
+    performance:
+      max_speed:       {value: 1.5, unit: m/s, source: "Chosen for indoor safety"}
+      max_accel:       {value: , unit: m/s^2, source: ""}
+      min_turn_radius: {value: , unit: m,     source: ""}
+    sensors:
+      - id: lidar
+        type: ust10lx
+        mount:
+          offset: {x: 0.12, y: 0.0, z: 0.18}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.05}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+    radios: [wifi_2g4]
+    controller: controllers/car3_shuttle.py
+    on_link_loss: hold
+    mission:                     # parallel lane, in step with the others
+      type: shuttle
+      from: {x: -3.0, y: -2.0}
+      to:   {x: 3.0, y: -2.0}
+
+# -----------------------------------------------------------------------------
+# RADIO DEFINITIONS
+# -----------------------------------------------------------------------------
+radios:
+  wifi_2g4:
+    band:         {value: 2400, unit: MHz, source: "Configured"}
+    tx_power:     {value: , unit: dBm,  source: ""}    # <-- module datasheet
+    sensitivity:  {value: , unit: dBm,  source: ""}    # <-- module datasheet
+    bandwidth:    {value: , unit: MHz,  source: ""}
+    data_rate:    {value: , unit: Mbps, source: ""}
+    antenna_gain: {value: , unit: dBi,  source: ""}
+    link_type: rf_omni
+
+# -----------------------------------------------------------------------------
+# ATTACKS - none. This is the control condition.
+# -----------------------------------------------------------------------------
+attacks: []
+
+run:
+  duration_s: 180
+  seed: 1
+  realtime_factor: 1.0
+
+logging:
+  rosbag: true
+  metrics: [pdr, latency, link_uptime, position_error]
+  output_dir: runs/
+
+# =============================================================================
+# ON COMPARING THIS WITH f1tenth_gym
+#
+# Worth being precise, because the comparison is easy to overclaim.
+#
+# f1tenth_gym is better at, and this does not attempt: vehicle dynamics (tyre
+# model, slip, actual drivetrain), full-resolution lidar, racing lines,
+# lap timing, and any question about how a car handles.
+#
+# This is better at, and f1tenth_gym cannot do: more than two agents, the
+# network as a modelled object, link quality as a measured signal, a bounded
+# arena matching a real room, heterogeneous platforms in one world, and
+# parameters that carry their sources.
+#
+# So the honest claim is not "better simulator". It is: the two answer
+# different questions, and nothing open answers the second one for a mixed
+# air/ground fleet. Run both, and the comparison that means something is
+# whether the network-layer effects seen here are absent there - because that
+# absence is the gap this exists to fill.
+# =============================================================================

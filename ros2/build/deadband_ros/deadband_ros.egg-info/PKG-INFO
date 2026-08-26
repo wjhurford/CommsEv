@@ -1,0 +1,12 @@
+Metadata-Version: 2.1
+Name: deadband-ros
+Version: 0.1.0
+Summary: Deadband agents as ROS 2 nodes, and a bridge to the Console.
+Home-page: UNKNOWN
+Maintainer: Will Hurford
+Maintainer-email: hurfwj@gmail.com
+License: Apache-2.0
+Platform: UNKNOWN
+
+UNKNOWN
+

@@ -1,0 +1,32 @@
+[1.590s] Invoking command in '/mnt/c/Users/will-/Documents/repos/deadband/ros2/src/deadband_ros': PYTHONPATH=/mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/deadband_ros build --build-base /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build install --record /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/install.log --single-version-externally-managed install_data
+[2.255s] running egg_info
+[2.258s] writing ../../build/deadband_ros/deadband_ros.egg-info/PKG-INFO
+[2.262s] writing dependency_links to ../../build/deadband_ros/deadband_ros.egg-info/dependency_links.txt
+[2.266s] writing entry points to ../../build/deadband_ros/deadband_ros.egg-info/entry_points.txt
+[2.270s] writing requirements to ../../build/deadband_ros/deadband_ros.egg-info/requires.txt
+[2.271s] writing top-level names to ../../build/deadband_ros/deadband_ros.egg-info/top_level.txt
+[2.290s] reading manifest file '../../build/deadband_ros/deadband_ros.egg-info/SOURCES.txt'
+[2.334s] writing manifest file '../../build/deadband_ros/deadband_ros.egg-info/SOURCES.txt'
+[2.335s] running build
+[2.335s] running build_py
+[2.343s] copying deadband_ros/bridge_node.py -> /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build/lib/deadband_ros
+[2.370s] copying deadband_ros/controller_node.py -> /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build/lib/deadband_ros
+[2.390s] copying deadband_ros/world_node.py -> /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build/lib/deadband_ros
+[2.411s] running install
+[2.412s] running install_lib
+[2.434s] copying /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build/lib/deadband_ros/bridge_node.py -> /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros
+[2.468s] copying /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build/lib/deadband_ros/controller_node.py -> /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros
+[2.494s] copying /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build/lib/deadband_ros/world_node.py -> /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros
+[2.529s] byte-compiling /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros/bridge_node.py to bridge_node.cpython-310.pyc
+[2.593s] byte-compiling /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros/controller_node.py to controller_node.cpython-310.pyc
+[2.633s] byte-compiling /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros/world_node.py to world_node.cpython-310.pyc
+[2.666s] running install_data
+[2.768s] running install_egg_info
+[2.790s] removing '/mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros-0.1.0-py3.10.egg-info' (and everything under it)
+[2.850s] Copying ../../build/deadband_ros/deadband_ros.egg-info to /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages/deadband_ros-0.1.0-py3.10.egg-info
+[3.001s] running install_scripts
+[3.051s] Installing bridge script to /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/deadband_ros
+[3.058s] Installing controller script to /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/deadband_ros
+[3.070s] Installing world script to /mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/deadband_ros
+[3.090s] writing list of installed files to '/mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/install.log'
+[3.103s] Invoked command in '/mnt/c/Users/will-/Documents/repos/deadband/ros2/src/deadband_ros' returned '0': PYTHONPATH=/mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/mnt/c/Users/will-/Documents/repos/deadband/ros2/install/deadband_ros/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/deadband_ros build --build-base /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/build install --record /mnt/c/Users/will-/Documents/repos/deadband/ros2/build/deadband_ros/install.log --single-version-externally-managed install_data
