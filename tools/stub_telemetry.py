@@ -896,9 +896,90 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     }
 
 
-def stream(arena, agents, links, duration=None, out=sys.stdout, seed=1):
+def parse_retask(text, agents_by_id):
+    """Turn a line like 'car3: pursue car1' into a new objective dict.
+
+    The grammar is deliberately the same words a person would say out loud:
+
+        car3: pursue car1
+        car3: shuttle between E F
+        car3: wall_follow right
+        car3: stop                 (alias for static - hold position)
+        car3: script missions/return_on_link_loss.py
+
+    Returns (agent_id, mission_dict) or None if it does not parse. Kept
+    forgiving on purpose: a fat-fingered command should be ignored with a note,
+    never crash a running mission.
+    """
+    if ":" not in text:
+        return None
+    aid, rest = text.split(":", 1)
+    aid, parts = aid.strip(), rest.split()
+    if aid not in agents_by_id or not parts:
+        return None
+    verb, args = parts[0].lower(), parts[1:]
+
+    if verb in ("stop", "static", "hold"):
+        return aid, {"type": "static"}
+    if verb == "pursuit" or verb == "pursue":
+        return aid, {"type": "pursuit", "target": args[0] if args else "car1"}
+    if verb == "shuttle":
+        # 'shuttle between A B' or 'shuttle A B'
+        pts = [p for p in args if p.lower() != "between"]
+        if len(pts) >= 2:
+            return aid, {"type": "shuttle", "between": [pts[0], pts[1]]}
+        return aid, {"type": "shuttle"}
+    if verb in ("wall_follow", "wall"):
+        return aid, {"type": "script", "file": "missions/wall_follow.py",
+                     "side": args[0] if args else "right"}
+    if verb == "orbit":
+        return aid, {"type": "orbit",
+                     "radius": float(args[0]) if args else 2.0}
+    if verb == "script":
+        return aid, {"type": "script", "file": args[0]} if args else None
+    # Bare verb we do not know: report it, change nothing.
+    print(f"retask: don't understand '{verb}' for {aid}", file=sys.stderr)
+    return None
+
+
+def drain_retasks(retask_dir, agents_by_id):
+    """Apply any pending retask commands and return a list of what changed.
+
+    A command is one line in a file dropped into retask_dir (or appended to
+    retask_dir/queue). Reading a file consumes it, so a command fires once.
+    File-based rather than a socket because the same channel then works from a
+    terminal (`echo 'car3: pursue car1' > retask/queue`), from the Console, and
+    later from a ROS service, with no protocol to agree on.
+    """
+    changed = []
+    if not retask_dir.exists():
+        return changed
+    queue = retask_dir / "queue"
+    lines = []
+    if queue.exists():
+        try:
+            lines = queue.read_text(encoding="utf-8").splitlines()
+            queue.unlink()                    # consume: each command fires once
+        except OSError:
+            pass
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        result = parse_retask(line, agents_by_id)
+        if result:
+            aid, block = result
+            agents_by_id[aid]["mission"] = block
+            changed.append((aid, block))
+    return changed
+
+
+def stream(arena, agents, links, duration=None, out=sys.stdout, seed=1,
+           retask_dir=None):
     import random
     rng = random.Random(seed)          # seeded, so a run is reproducible
+
+    agents_by_id = {a["id"]: a for a in agents}
 
     # Persistent state. This is what makes collision behave: an agent's pose is
     # carried from tick to tick and only ever changed by a legal move.
@@ -918,6 +999,15 @@ def stream(arena, agents, links, duration=None, out=sys.stdout, seed=1):
             t = time.time() - t0
             if duration is not None and t > duration:
                 return
+            # Live retasking: an agent's objective can be replaced mid-run by a
+            # command on the channel. Because mission_target reads the agent's
+            # mission dict every tick, swapping that dict here is all it takes -
+            # the very next frame the agent is doing the new thing.
+            if retask_dir is not None:
+                for aid, block in drain_retasks(retask_dir, agents_by_id):
+                    print(f"retask: {aid} -> {block.get('type')} "
+                          f"{block.get('target') or block.get('between') or block.get('file') or ''}",
+                          file=sys.stderr)
             dt, last = t - last, t
             out.write(json.dumps(
                 frame(t, dt, seq, arena, agents, links, poses, rng)) + "\n")
@@ -932,6 +1022,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Deadband stub telemetry source")
     ap.add_argument("--scenario", default=str(DEFAULT_SCENARIO))
     ap.add_argument("--record", type=float, metavar="SECONDS")
+    ap.add_argument("--retask", metavar="DIR", default=None,
+                    help="watch DIR/queue for live retask commands, e.g. "
+                         "echo 'car3: pursue car1' > DIR/queue")
     args = ap.parse_args()
 
     path = Path(args.scenario)
@@ -939,9 +1032,13 @@ if __name__ == "__main__":
         sys.exit(f"scenario not found: {path}")
     arena, agents, links = load_scenario(path)
 
+    retask_dir = Path(args.retask) if args.retask else None
+    if retask_dir:
+        retask_dir.mkdir(parents=True, exist_ok=True)
+
     if args.record:
         with open("sample_telemetry.jsonl", "w") as fh:
             stream(arena, agents, links, duration=args.record, out=fh)
         print(f"wrote sample_telemetry.jsonl ({args.record}s)")
     else:
-        stream(arena, agents, links)
+        stream(arena, agents, links, retask_dir=retask_dir)
