@@ -744,8 +744,12 @@ class SensorView(QWidget):
                                f"z {_num(pose.get('z')):7.2f}  m")
             p.drawText(10, 46, f"yaw {math.degrees(_num(pose.get('yaw'))):6.1f} deg   "
                                f"speed {_num(pose.get('speed')):5.2f} m/s")
-            if self.state.get("mission"):
-                p.drawText(10, 60, f"mission {self.state.get('mission')}")
+            obj = self.state.get("objective")
+            if isinstance(obj, dict):
+                # The full objective - "pursue car3", not a bare "pursuit".
+                p.drawText(10, 60, f"objective  {_objective_label(obj)}")
+            elif self.state.get("mission"):
+                p.drawText(10, 60, f"objective  {self.state.get('mission')}")
             top = 66
             p.setPen(QPen(QColor(C_LINE)))
             p.drawLine(8, top, self.width() - 8, top)
@@ -1441,15 +1445,17 @@ class Console(QMainWindow):
         # Left: the three-tab workflow. Left to right is the order you build a
         # study in: where it happens, what is in it, what goes wrong.
         self.tab_env = QTreeWidget()
-        self.tab_env.setHeaderLabels(["Environment"])
+        # No header label: the selected sidebar tab already names the panel,
+        # so repeating it wastes a row of a narrow panel.
+        self.tab_env.setHeaderHidden(True)
         self.tab_scn = QTreeWidget()
-        self.tab_scn.setHeaderLabels(["Overview"])
+        self.tab_scn.setHeaderHidden(True)
         # Two questions, two trees. OVERVIEW answers "what is each agent" -
         # system, network, agents, and each agent's equipment (sensors). MISSION
         # answers "what is each agent doing" - the same hierarchy down to agents,
         # then their objectives, and nothing about hardware.
         self.tab_msn = QTreeWidget()
-        self.tab_msn.setHeaderLabels(["Mission"])
+        self.tab_msn.setHeaderHidden(True)
         for t in (self.tab_env, self.tab_scn, self.tab_msn):
             t.itemSelectionChanged.connect(self.on_select)
             # The default indent stacks five levels deep off the right edge of a
@@ -1536,12 +1542,16 @@ class Console(QMainWindow):
         self.tabs = QTabWidget()
         # Order top-to-bottom down the left edge, as Will laid it out: the
         # analysis tabs first, then the two build trees, then tasking.
+        # The sidebar renders these bottom-up, so adding in reverse gives the
+        # reading order Will wants top-to-bottom: Environment (where), Overview
+        # (what things are), Mission (what they are doing), then the analysis
+        # tabs Comms, Cyber, Results.
         self.tabs.addTab(results, "Results")
         self.tabs.addTab(cyber, "Cyber")
         self.tabs.addTab(comms, "Comms")
+        self.tabs.addTab(self.tab_msn, "Mission")
         self.tabs.addTab(self.tab_scn, "Overview")
         self.tabs.addTab(self.tab_env, "Environment")
-        self.tabs.addTab(self.tab_msn, "Mission")
         self.tabs.currentChanged.connect(self.on_tab_changed)
         # Tabs down the left edge rather than across the top: the labels stack
         # vertically, the panel stays narrow, and the section you are in is the
@@ -1560,7 +1570,8 @@ class Console(QMainWindow):
         self.props.horizontalHeader().setStretchLastSection(True)
         self.props.verticalHeader().setVisible(False)
         self.props.itemChanged.connect(self.on_prop_edited)
-        d_props = QDockWidget("Properties")
+        d_props = QDockWidget("Properties — no agent selected")
+        self.d_props = d_props
         d_props.setWidget(self.props)
         self.addDockWidget(Qt.RightDockWidgetArea, d_props)
 
@@ -1637,9 +1648,12 @@ class Console(QMainWindow):
     # -- scenario -----------------------------------------------------------
 
     def open_dialog(self):
+        # Open at the repo root, not inside scenarios/ - a run is now a SCENE
+        # plus a MISSION, and both folders (plus legacy scenarios/) need to be
+        # one click away rather than up-a-level.
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open scenario", str(REPO_ROOT / "scenarios"),
-            "Scenario files (*.yaml *.yml)")
+            self, "Open mission or scene", str(REPO_ROOT),
+            "Deadband files (*.yaml *.yml)")
         if path:
             self.load_scenario(Path(path))
 
@@ -1717,7 +1731,12 @@ class Console(QMainWindow):
         # the room and changing the weather are different jobs.
         arena = self._view().get("arena") or {}
 
-        scene = QTreeWidgetItem(self.tab_env, ["Scene"])
+        # Name the SCENE that is loaded. A mission names a scene; this is where
+        # you confirm which world you are actually in.
+        view = self._view()
+        scene_name = (view.get("name") if not (self.doc or {}).get("scene")
+                      else (self.doc or {}).get("scene"))
+        scene = QTreeWidgetItem(self.tab_env, [f"Scene: {scene_name or 'inline'}"])
         room = QTreeWidgetItem(scene, [f"{arena.get('type', 'box')}  "
                                        f"({_num((arena.get('extent') or {}).get('x')):.0f}"
                                        f" x {_num((arena.get('extent') or {}).get('y')):.0f}"
@@ -1763,6 +1782,8 @@ class Console(QMainWindow):
         about hardware appears in the objective tree, and no objective appears in
         the equipment tree."""
         view = self.resolved or self.doc
+        if leaf == "objective":
+            self._objective_rows = {}
         mission_name = view.get("name") or (self.path.stem if self.path else "")
         root = QTreeWidgetItem(tree, [f"Mission: {mission_name}"])
         agents = view.get("agents") or []
@@ -1790,6 +1811,10 @@ class Console(QMainWindow):
                         obj = agent.get("mission") or {"type": "static"}
                         o = QTreeWidgetItem(a, [f"objective: {_objective_label(obj)}"])
                         o.setData(0, Qt.UserRole, ("objective", ["agents", i]))
+                        # Keep a handle so a retask can update this row live,
+                        # rather than the tree showing what the FILE said while
+                        # the agent is doing something else entirely.
+                        self._objective_rows[agent.get("id")] = o
                     else:  # equipment
                         for j, sen in enumerate(agent.get("sensors") or []):
                             it = QTreeWidgetItem(
@@ -1877,6 +1902,14 @@ class Console(QMainWindow):
                 node = node[key]
             return node
 
+    def _set_props_title(self, agent_id):
+        """Name what the Properties panel is showing, so a table of values is
+        never ambiguous about whose values they are."""
+        dock = getattr(self, "d_props", None)
+        if dock is not None:
+            dock.setWindowTitle(f"Properties \u2014 {agent_id}" if agent_id
+                                else "Properties \u2014 no agent selected")
+
     def on_select(self):
         tree = self.tabs.currentWidget()
         if not isinstance(tree, QTreeWidget):
@@ -1887,6 +1920,7 @@ class Console(QMainWindow):
         data = items[0].data(0, Qt.UserRole)
         if not data:
             self.props.setRowCount(0)
+            self._set_props_title(None)
             return
         kind, path = data
         # A 'system' row is a UI grouping, not a node in the file - selecting it
@@ -1902,6 +1936,7 @@ class Console(QMainWindow):
             self.selected_agent = None
             self.viewport.update()
             self.props.setRowCount(0)
+            self._set_props_title(None)
             return
         # An 'objective' row points at its agent; show that agent selected.
         if kind == "objective":
@@ -1915,6 +1950,7 @@ class Console(QMainWindow):
         if kind == "agent":
             self.selected_agent = node.get("id")
             self.viewport.selected = {self.selected_agent}
+            self._set_props_title(self.selected_agent)
         elif kind == "node" and len(path) == 2 and path[0] == "networks":
             # Selecting a network highlights everything on it. When red agents
             # arrive this is how you see the two sides apart at a glance.
@@ -2818,11 +2854,32 @@ class Console(QMainWindow):
             return
         self.consume_frame(frame)
 
+    def _refresh_live_objectives(self):
+        """Update the Mission tree's objective rows from live telemetry.
+
+        A retask changes what an agent is DOING; without this the tree keeps
+        showing what the file SAID, which makes it actively misleading. Only
+        rows whose text actually changed are touched, so this costs nothing on
+        a normal frame.
+        """
+        rows = getattr(self, "_objective_rows", None)
+        if not rows:
+            return
+        for aid, item in rows.items():
+            live = (self.latest or {}).get(aid) or {}
+            obj = live.get("objective")
+            if not isinstance(obj, dict):
+                continue
+            text = f"objective: {_objective_label(obj)}"
+            if item.text(0) != text:
+                item.setText(0, text)
+
     def consume_frame(self, frame):
         """One telemetry frame, from whichever source. The only place the
         Console turns numbers into what is on screen."""
         agents = frame.get("agents", [])
         self.latest = {a.get("id"): a for a in agents}
+        self._refresh_live_objectives()
         # Keep the run for the Results tab. Capped so a forgotten overnight run
         # cannot quietly eat all the memory on the machine.
         if len(self.frames) < 36000:

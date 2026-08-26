@@ -29,7 +29,7 @@ description: >
   All three cars shuttle in parallel lanes on the lab map. The control
   condition, expressed as a portable mission rather than a welded scenario.
 
-map: lab_box
+scene: lab_box
 
 objectives:
   car1: {do: shuttle, between: [A, B]}

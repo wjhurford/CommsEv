@@ -75,7 +75,9 @@ def resolve_mission(path):
     old scenario, so nothing else in the pipeline had to change.
     """
     doc = _load_yaml(path)
-    map_ref = doc.get("map")
+    # SCENE is the term: the world a mission is dropped into. `map:` is kept as
+    # a silent alias so nothing already written breaks.
+    map_ref = doc.get("scene") or doc.get("map")
     if not map_ref:
         return doc                          # self-contained: the old shape
 
@@ -83,16 +85,20 @@ def resolve_mission(path):
     if not map_path.suffix:
         map_path = map_path.with_suffix(".yaml")
     if not map_path.is_absolute():
-        # A bare name means maps/<name>.yaml; a path is taken as given.
-        map_path = (REPO_ROOT / "maps" / map_path) if map_path.parent == Path(".") \
-            else (REPO_ROOT / map_path)
+        # A bare name means scenes/<name>.yaml (maps/ still searched for older
+        # files); a path is taken as given.
+        if map_path.parent == Path("."):
+            cand = REPO_ROOT / "scenes" / map_path
+            map_path = cand if cand.exists() else (REPO_ROOT / "maps" / map_path)
+        else:
+            map_path = REPO_ROOT / map_path
     world_doc = _load_yaml(map_path)
 
-    merged = dict(world_doc)                 # start from the map's world
+    merged = dict(world_doc)                 # start from the scene's world
     # The mission's own top-level keys win, EXCEPT agents, which are merged
-    # per-id so the map keeps the bodies and the mission supplies the objectives.
+    # per-id so the scene keeps the bodies and the mission supplies the objectives.
     for key, val in doc.items():
-        if key in ("map", "agents"):
+        if key in ("map", "scene", "agents"):
             continue
         merged[key] = val
 
@@ -864,6 +870,10 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             "network": a["network"],
             "colour": a["colour"],
             "mission": a["mission"].get("type", "static"),
+            # The FULL objective, not just its type, so the Console can show
+            # "pursue car3" rather than a bare "pursuit" - and so a retask is
+            # visible in the tree the moment it takes effect.
+            "objective": a["mission"],
             "dimensions": a["dimensions"],
             "pose": poses[a["id"]],
             "scan": scan_for(a, lidars[0], poses, agents, arena, rng) if lidars else None,
