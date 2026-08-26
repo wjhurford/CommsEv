@@ -58,6 +58,16 @@ from PySide6.QtWidgets import (
 
 from deadband import spec
 
+# The Console shows the same merged map+mission the simulator runs, so a split
+# mission (agents in the map, objectives in the mission file) displays its
+# agents rather than an empty tree. Reuse the sim's own resolver so there is one
+# merge rule, not two that can drift.
+try:
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    from stub_telemetry import resolve_mission as _resolve_mission
+except Exception:
+    _resolve_mission = None
+
 # Round-trip YAML keeps the comments in a scenario file alive across an edit.
 # Those comments are half the value of the file as a research artefact, so
 # losing them silently would be worse than not editing at all.
@@ -147,6 +157,65 @@ def _num(v, default=0.0):
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _objective_label(obj):
+    """A one-line label for an objective, for the tree.
+
+    e.g. {'type': 'shuttle', 'between': ['A','B']} -> "shuttle A-B"
+    """
+    if not isinstance(obj, dict):
+        return "static"
+    kind = obj.get("type", "static")
+    if kind == "shuttle":
+        bt = obj.get("between")
+        if isinstance(bt, (list, tuple)) and len(bt) == 2:
+            return f"shuttle {bt[0]}-{bt[1]}"
+        return "shuttle"
+    if kind == "pursuit":
+        return f"pursue {obj.get('target', '?')}"
+    if kind == "patrol":
+        return "patrol"
+    if kind == "orbit":
+        return f"orbit r={obj.get('radius', '?')}"
+    if kind == "script":
+        f = str(obj.get("file", "")).split("/")[-1]
+        return f"script {f}" if f else "script"
+    return kind
+
+
+def _objective_description(agent):
+    """Plain-language description of what an agent is doing, for the popup.
+
+    Resolves point names to coordinates where it can, so "shuttle between A and
+    B" reads as the actual metres too. Kept to a couple of short sentences: this
+    is a glance, not a manual.
+    """
+    obj = (agent or {}).get("mission") or {"type": "static"}
+    kind = obj.get("type", "static")
+    aid = agent.get("id", "this agent")
+
+    if kind == "static":
+        return f"{aid} holds position. It is not tasked to move."
+    if kind == "shuttle":
+        bt = obj.get("between")
+        if isinstance(bt, (list, tuple)) and len(bt) == 2:
+            return (f"{aid} drives back and forth between points {bt[0]} and "
+                    f"{bt[1]}, repeating until retasked. The points are defined "
+                    f"by the map, so the same objective moves with the map.")
+        return f"{aid} shuttles between two points, repeating until retasked."
+    if kind == "pursuit":
+        return (f"{aid} chases {obj.get('target', 'another agent')}, holding a "
+                f"standoff of {obj.get('standoff', 1.2)} m behind it.")
+    if kind == "patrol":
+        return f"{aid} loops a fixed circuit of waypoints until retasked."
+    if kind == "orbit":
+        return (f"{aid} circles the arena centre at radius "
+                f"{obj.get('radius', 2.0)} m.")
+    if kind == "script":
+        return (f"{aid} runs the mission script {obj.get('file', '?')}. It "
+                f"decides its own target each tick - open the file to see how.")
+    return f"{aid}: {kind}."
 
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1400,9 @@ class Console(QMainWindow):
             # The default indent stacks five levels deep off the right edge of a
             # narrow panel. Networks > blue > Agents > car1 > lidar has to fit.
             t.setIndentation(12)
+        # Double-click an agent or its objective row -> a short popup describing
+        # what that agent is doing right now.
+        self.tab_scn.itemDoubleClicked.connect(self.on_overview_double_click)
 
         cyber = QLabel(
             "Not built yet.\n\n"
@@ -1530,6 +1602,18 @@ class Console(QMainWindow):
                      "comments from this file. Install it with: py -m pip install ruamel.yaml")
 
         self.say(f"Loaded {path.name}")
+        # The RESOLVED view: map merged with mission, agents filled in, the same
+        # thing the simulator runs. The tree and the scene draw from this so a
+        # split mission is not an empty screen. Edits still go to self.doc (the
+        # raw file); this is display-only and rebuilt on every load.
+        self.resolved = None
+        if _resolve_mission is not None:
+            try:
+                self.resolved = _resolve_mission(str(path))
+            except Exception as exc:
+                self.say(f"  NOTE   could not resolve map/mission: {exc}")
+        if not self.resolved:
+            self.resolved = self.doc
         for e in self.report.errors:
             self.say(f"  ERROR  {e}")
         for w in self.report.warnings:
@@ -1571,7 +1655,7 @@ class Console(QMainWindow):
         # Two things a researcher sets separately: the SCENE is the geometry
         # they are working in, BACKGROUND is the conditions inside it. Changing
         # the room and changing the weather are different jobs.
-        arena = self.doc.get("arena") or {}
+        arena = self._view().get("arena") or {}
 
         scene = QTreeWidgetItem(self.tab_env, ["Scene"])
         room = QTreeWidgetItem(scene, [f"{arena.get('type', 'box')}  "
@@ -1594,10 +1678,15 @@ class Console(QMainWindow):
         # the thing that decides who can talk to whom, so it is the right
         # hierarchy for a tool about communications - and when red agents on a
         # second network arrive, they slot in as a sibling folder.
-        nets = QTreeWidgetItem(self.tab_scn, ["Networks"])
-        agents = self.doc.get("agents") or []
+        #
+        # Agents come from the RESOLVED view (map + mission merged), so a split
+        # mission - whose agents live in its map - still shows them here.
+        view = self.resolved or self.doc
+        mission_name = view.get("name") or (self.path.stem if self.path else "")
+        nets = QTreeWidgetItem(self.tab_scn, [f"Mission: {mission_name}"])
+        agents = view.get("agents") or []
         placed = set()
-        for name, net in (self.doc.get("networks") or {}).items():
+        for name, net in (view.get("networks") or {}).items():
             n = QTreeWidgetItem(nets, [name])
             n.setData(0, Qt.UserRole, ("node", ["networks", name]))
             hub = (net or {}).get("coordinator")
@@ -1611,6 +1700,11 @@ class Console(QMainWindow):
                     label += "   (coordinator)"
                 a = QTreeWidgetItem(folder, [label])
                 a.setData(0, Qt.UserRole, ("agent", ["agents", i]))
+                # The agent's OBJECTIVE, as a child row. Double-click it (or the
+                # agent) for a plain-language description of what it is doing.
+                obj = agent.get("mission") or {"type": "static"}
+                o = QTreeWidgetItem(a, [f"objective: {_objective_label(obj)}"])
+                o.setData(0, Qt.UserRole, ("objective", ["agents", i]))
                 for j, sen in enumerate(agent.get("sensors") or []):
                     it = QTreeWidgetItem(a, [f"{sen.get('id')}  ({sen.get('type')})"])
                     it.setData(0, Qt.UserRole, ("node", ["agents", i, "sensors", j]))
@@ -1623,35 +1717,74 @@ class Console(QMainWindow):
                 a.setData(0, Qt.UserRole, ("agent", ["agents", i]))
 
         radios = QTreeWidgetItem(self.tab_scn, ["Radios"])
-        for name in (self.doc.get("radios") or {}):
+        for name in (view.get("radios") or {}):
             n = QTreeWidgetItem(radios, [name])
             n.setData(0, Qt.UserRole, ("node", ["radios", name]))
 
         self.tab_scn.expandAll()
 
     def show_static_scene(self):
-        """The scene as the file defines it, before any run."""
-        if not self.doc:
+        """The scene as the file defines it, before any run.
+
+        Drawn from the RESOLVED view (map + mission), so a split mission - whose
+        agents live in its map - still shows its cars rather than an empty box.
+        """
+        view = getattr(self, "resolved", None) or self.doc
+        if not view:
             return
-        self.viewport.arena = self.doc.get("arena")
+        self.viewport.arena = view.get("arena")
         self.viewport.agents = [
             {"id": a.get("id"), "colour": a.get("colour"),
              "dimensions": a.get("dimensions", {}), "pose": a.get("pose", {}),
              "sensors": a.get("sensors", [])}
-            for a in (self.doc.get("agents") or [])
+            for a in (view.get("agents") or [])
         ]
         self.viewport.links = []
         self.viewport.update()
         self.fill_publications_from_scenario()
         self.fill_comms()
 
+    def on_overview_double_click(self, item, _column):
+        """Popup a short description of an agent's objective on double-click."""
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+        kind, path = data
+        if kind not in ("agent", "objective"):
+            return
+        view = getattr(self, "resolved", None) or self.doc
+        try:
+            idx = path[1]
+            agent = (view.get("agents") or [])[idx]
+        except (IndexError, KeyError, TypeError):
+            return
+        QMessageBox.information(
+            self, f"{agent.get('id', 'agent')} — objective",
+            _objective_description(agent))
+
     # -- selection ----------------------------------------------------------
+
+    def _view(self):
+        """The merged map+mission for DISPLAY. Edits still target self.doc; this
+        is only for showing agents/arena/radios, which a split mission keeps in
+        its map rather than in the file the Console is editing."""
+        return getattr(self, "resolved", None) or self.doc or {}
 
     def _at(self, path):
         node = self.doc
-        for key in path:
-            node = node[key]
-        return node
+        try:
+            for key in path:
+                node = node[key]
+            return node
+        except (KeyError, IndexError, TypeError):
+            # A split mission keeps its agents in the map, not in self.doc, so a
+            # path into agents[] misses. Fall back to the merged view for
+            # DISPLAY. Editing these is guarded in on_prop_edited - you cannot
+            # yet edit a map-owned agent from a mission file, and it says so.
+            node = self._view()
+            for key in path:
+                node = node[key]
+            return node
 
     def on_select(self):
         tree = self.tabs.currentWidget()
@@ -1731,6 +1864,20 @@ class Console(QMainWindow):
         text = item.text().strip()
         if field == "source" and text == "no source":
             text = ""
+
+        # If this path does not exist in the raw file (only in the merged view),
+        # it is owned by the MAP, not by the mission file we are editing. Writing
+        # it would change nothing on disk. Say so once, and stop - editing map-
+        # owned agents from a mission is a separate feature, still on the list.
+        raw = self.doc
+        try:
+            for key in path:
+                raw = raw[key]
+        except (KeyError, IndexError, TypeError):
+            self.say("This field comes from the map, not this mission file - "
+                     "open the map to change it. (In-app map editing is coming.)")
+            return
+
         try:
             node = self._at(path)
         except (KeyError, IndexError, TypeError):
@@ -1759,7 +1906,7 @@ class Console(QMainWindow):
     def fill_publications_from_scenario(self):
         """Before a run, show what each agent is *configured* to publish."""
         rows = []
-        for a in (self.doc.get("agents") or []):
+        for a in (self._view().get("agents") or []):
             aid = a.get("id")
             rows.append((aid, f"/{aid}/odom", "nav_msgs/Odometry", "-"))
             rows.append((aid, f"/{aid}/state", "deadband/AgentState", "-"))
@@ -2111,9 +2258,9 @@ class Console(QMainWindow):
 
     def fill_comms(self, links=None):
         """Emitters from the scenario; link state from the run if there is one."""
-        radios = self.doc.get("radios") or {} if self.doc else {}
+        radios = self._view().get("radios") or {} if self.doc else {}
         rows = []
-        for a in (self.doc.get("agents") or []) if self.doc else []:
+        for a in (self._view().get("agents") or []) if self.doc else []:
             for rname in a.get("radios") or []:
                 r = radios.get(rname) or {}
                 band = _num((r.get("band") or {}).get("value"))
