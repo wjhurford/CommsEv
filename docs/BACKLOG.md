@@ -54,6 +54,20 @@ until then. This is irreversible and it gates the whole point of the project.
 
 ## Decisions taken (do not relitigate)
 
+- **A run is a MAP plus a MISSION, combined at run time.** A map is the world
+  (arena, radios, agent bodies, named points); a mission is tasking (one
+  objective per agent). One mission runs on any map that defines the points it
+  names; proven on `lab_box` and `big_hall`. `scenarios/` files stay valid as
+  missions with the map inline - backward compatible, nothing forced to split.
+  Terminology: the thing you write and run is a **mission**, not a scenario.
+- **An objective is a verb, not a destination.** `shuttle between A B`,
+  `pursuit`, `wall_follow`, `orbit`, `static`, `script`. Portable because it
+  refers to points the map resolves, not coordinates. `docs/maps-missions-and-
+  retasking.md`.
+- **Objectives can be retasked live.** A command channel (`--retask DIR`, one
+  line into `DIR/queue`) swaps a running agent's objective on the next tick.
+  File-based so the same channel serves a terminal, the Console, and later a
+  ROS service. This is why they are missions and not configs.
 - **The GUI edits the scenario file; the file stays the source of truth.** Not
   a GUI-only configurator. Keeps runs diffable in git, sweepable from a script,
   and citable in a paper.
