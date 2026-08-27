@@ -192,17 +192,21 @@ def load_scenario(path):
         # One collision radius per agent, from its own footprint.
         a["radius"] = max(a["dimensions"]["length"], a["dimensions"]["width"]) / 2.0
 
+    # Reachability is EMERGENT, not declared. Every same-network pair is a
+    # CANDIDATE; whether it is usable is decided each tick by the RF model, and
+    # which candidates are actually used is decided by routing.
+    #
+    # The old code built links from whether a coordinator existed, so routing
+    # was derived from the declaration and could never disagree with it - which
+    # made topology unmeasurable. You could declare 'mesh' over a hand-drawn
+    # star and the simulator would agree with you. Candidates now; physics and
+    # routing decide the rest.
     links = []
-    for name, net in (doc.get("networks") or {}).items():
-        hub = (net or {}).get("coordinator")
+    for name in (doc.get("networks") or {}):
         members = [a["id"] for a in agents if a["network"] == name]
-        if hub and hub in members:
-            links += [{"a": m, "b": hub, "network": name}
-                      for m in members if m != hub]
-        else:
-            # Decentralised: every pair.
-            links += [{"a": members[i], "b": members[j], "network": name}
-                      for i in range(len(members)) for j in range(i + 1, len(members))]
+        links += [{"a": members[i], "b": members[j], "network": name}
+                  for i in range(len(members))
+                  for j in range(i + 1, len(members))]
 
     return world, agents, links
 
@@ -855,17 +859,182 @@ def command_authority(agent, arena, links, poses, networks):
     # centralized (the default)
     hub = net.get("coordinator")
     return {"decider": hub, "reachable": _reaches(hub), "tier": "coordinator"}
-def link_state(pa, pb):
-    """Placeholder link quality: falls off with distance.
+def apply_routing(links, agents, networks, poses):
+    """Decide which physically-reachable candidates are actually USED.
 
-    NOT a path loss model and not pretending to be one. The real thing comes
-    from the arena's propagation profile once that exists.
+    Reachability says who CAN hear whom; routing says who DOES relay for whom.
+    Keeping them separate is what makes topology measurable: you can declare
+    mesh and then discover the physics only gave you a star's worth of edges.
+
+      star    only hub<->member edges carry traffic. Two hops between any two
+              non-hub agents, always via the hub.
+      mesh    every reachable pair carries traffic. Multi-hop, routes around
+              damage.
+      tiered  intra-squad edges, plus leader<->coordinator. Cross-squad traffic
+              climbs to a leader rather than going direct.
+
+    Each link gets `active` (is it used by this routing?) and `usable` (is it
+    physically up?). A link can be reachable but inactive - that is precisely
+    the spare capacity a mesh has and a star does not, and it is what makes
+    'route around damage' possible.
     """
-    d = math.dist((pa["x"], pa["y"], pa["z"]), (pb["x"], pb["y"], pb["z"]))
-    q = max(0.0, min(1.0, 1.0 - d / 12.0))
-    state = "up" if q > 0.6 else ("degraded" if q > 0.2 else "down")
-    return {"distance_m": round(d, 3), "quality": round(q, 3), "state": state,
-            "latency_ms": round(8.0 + 40.0 * (1.0 - q), 2), "pdr": round(q, 3)}
+    by_net = {}
+    for a in agents:
+        by_net.setdefault(a["network"], []).append(a["id"])
+
+    squads_of = {}
+    for name, net in (networks or {}).items():
+        for sq, spec in ((net or {}).get("squads") or {}).items():
+            leader = (spec or {}).get("leader")
+            for m in list((spec or {}).get("members") or []) + ([leader] if leader else []):
+                squads_of[m] = (sq, leader)
+
+    out = []
+    for l in links:
+        net = (networks or {}).get(l["network"]) or {}
+        routing = net.get("routing") or ("star" if net.get("coordinator") else "mesh")
+        hub = net.get("coordinator")
+        a, b = l["a"], l["b"]
+
+        if routing == "mesh":
+            active = True
+        elif routing == "star":
+            active = hub in (a, b)
+        elif routing == "tiered":
+            sa, la = squads_of.get(a, (None, None))
+            sb, lb = squads_of.get(b, (None, None))
+            same_squad = sa is not None and sa == sb
+            leader_to_hub = hub in (a, b) and (a in (la, lb) or b in (la, lb))
+            active = bool(same_squad or leader_to_hub)
+        else:
+            active = True
+
+        state = rf_link(poses[a], poses[b])
+        out.append({**l, **state,
+                    "routing": routing,
+                    "active": active,
+                    "usable": state["state"] != "down"})
+    return out
+
+
+def observed_topology(links_out):
+    """What the topology ACTUALLY is, measured, not what it was declared to be.
+
+    Betweenness-style check: in a star the hub sits on essentially every path
+    and scores near 1.0 while everyone else scores 0; in a mesh the load is
+    spread. Reporting this next to the declared routing is what lets the tool
+    say "you declared mesh, the graph says star" instead of taking the label's
+    word for it.
+    """
+    active = [l for l in links_out if l.get("active") and l.get("usable")]
+    nodes = sorted({n for l in active for n in (l["a"], l["b"])})
+    if len(nodes) < 3:
+        return {"nodes": len(nodes), "edges": len(active), "shape": "trivial",
+                "max_betweenness": 0.0, "hub": None}
+
+    adj = {n: set() for n in nodes}
+    for l in active:
+        adj[l["a"]].add(l["b"])
+        adj[l["b"]].add(l["a"])
+
+    # Count, for each node, how many shortest paths between OTHER pairs it lies
+    # on. Small graphs, so brute-force BFS is fine and stays readable.
+    from collections import deque
+    on_path = {n: 0 for n in nodes}
+    pairs = 0
+    for s in nodes:
+        # BFS shortest-path tree from s
+        prev, dist = {s: []}, {s: 0}
+        q = deque([s])
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if v not in dist:
+                    dist[v] = dist[u] + 1
+                    prev[v] = [u]
+                    q.append(v)
+                elif dist[v] == dist[u] + 1:
+                    prev[v].append(u)
+        for t in nodes:
+            if t <= s or t not in dist:
+                continue
+            # walk back collecting intermediates
+            seen, stack = set(), [t]
+            while stack:
+                u = stack.pop()
+                for p in prev.get(u, []):
+                    if p != s and p not in seen:
+                        seen.add(p)
+                        stack.append(p)
+            if not seen:
+                continue        # adjacent pair: no intermediate to credit
+            # Only pairs that HAVE an intermediate can discriminate topology.
+            # Counting adjacent pairs in the denominator caps a 4-node star at
+            # 0.5 and makes it indistinguishable from a partial mesh.
+            pairs += 1
+            for n in seen:
+                on_path[n] += 1
+
+    maxb = max(on_path.values()) / pairs if pairs else 0.0
+    hub = max(on_path, key=on_path.get) if pairs else None
+    shape = "star" if maxb > 0.75 else ("mesh" if maxb < 0.35 else "mixed")
+    return {"nodes": len(nodes), "edges": len(active), "shape": shape,
+            "max_betweenness": round(maxb, 3), "hub": hub}
+
+
+def rf_link(pa, pb, tx_dbm=20.0, freq_mhz=2400.0, plexp=2.8,
+            noise_dbm=-95.0, interference_mw=0.0, sensitivity_dbm=-85.0):
+    """Signal-to-interference-plus-noise for one pair, and what it implies.
+
+    SINR is the single currency. Distance, walls and jamming all reduce to
+    signal-versus-noise, which becomes packet delivery ratio, which becomes link
+    state. Nothing gets special-cased: a jammer is just another term in the
+    denominator, which is what lets a jammer be an ordinary agent rather than a
+    global flag bolted onto the side.
+
+    Log-distance path loss:  PL(d) = PL(d0) + 10 * n * log10(d/d0)
+    with n the path loss exponent (2.0 free space, 2.7-3.5 indoor with
+    multipath). d0 = 1 m reference, computed from the Friis free-space loss at
+    the carrier frequency.
+
+    NOTE ON PROVENANCE: plexp and noise_dbm are the scene's to declare and are
+    currently unsourced in every scene - they are on the measurements list.
+    Until then these are defensible defaults, NOT measurements, and any result
+    that turns on their exact value has to say so.
+    """
+    d = max(0.1, math.dist((pa["x"], pa["y"], pa["z"]),
+                           (pb["x"], pb["y"], pb["z"])))
+    # Friis at 1 m: 20log10(f_MHz) + 20log10(d_km) + 32.44, with d = 0.001 km
+    pl_d0 = 20.0 * math.log10(freq_mhz) + 20.0 * math.log10(0.001) + 32.44
+    path_loss = pl_d0 + 10.0 * plexp * math.log10(d)
+    rx_dbm = tx_dbm - path_loss
+
+    # Noise plus any interference, summed in linear power then back to dB.
+    noise_mw = 10.0 ** (noise_dbm / 10.0)
+    total_mw = noise_mw + max(0.0, interference_mw)
+    effective_noise_dbm = 10.0 * math.log10(total_mw)
+    sinr_db = rx_dbm - effective_noise_dbm
+
+    # PDR from SINR with a logistic curve: near 0 well below threshold, near 1
+    # well above, with a few dB of transition. A stand-in for a modulation
+    # curve, honest about being one.
+    margin = sinr_db - (sensitivity_dbm - noise_dbm)
+    pdr = 1.0 / (1.0 + math.exp(-0.8 * margin))
+    state = "up" if pdr > 0.85 else ("degraded" if pdr > 0.25 else "down")
+    return {"distance_m": round(d, 3), "rx_dbm": round(rx_dbm, 2),
+            "sinr_db": round(sinr_db, 2), "pdr": round(pdr, 3),
+            "quality": round(pdr, 3), "state": state,
+            "latency_ms": round(8.0 + 40.0 * (1.0 - pdr), 2)}
+
+
+def link_state(pa, pb):
+    """Link quality between two poses, from the SINR model.
+
+    Kept as a thin wrapper because several callers want "just tell me if this
+    pair can talk" without assembling radio parameters. Callers that DO have
+    the radio and interference picture should call rf_link directly.
+    """
+    return rf_link(pa, pb)
 
 
 def _unused_enforce_bounds(agents, poses, arena):
@@ -962,7 +1131,7 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     _LAST_SCANS.clear()
     _LAST_SCANS.update({a["id"]: a["scan"] for a in agents_out if a["scan"]})
 
-    links_out = [{**l, **link_state(poses[l["a"]], poses[l["b"]])} for l in links]
+    links_out = apply_routing(links, agents, arena.get("networks") or {}, poses)
 
     return {
         "seq": seq,
@@ -972,6 +1141,9 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         "arena": arena,
         "agents": agents_out,
         "links": links_out,
+        # What the topology MEASURES as, independent of what it was declared
+        # to be. The gap between this and the declared routing is the finding.
+        "topology": observed_topology(links_out),
         "attacks_active": [],
         "contacts": [{"agent": i, "with": w} for i, w in contacts],
     }
