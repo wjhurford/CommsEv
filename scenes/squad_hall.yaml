@@ -1,0 +1,541 @@
+# =============================================================================
+# Deadband SCENE — squad_hall
+# =============================================================================
+# A 30x20 hall, a ground station and SIX cars in two squads. It exists for one
+# reason: hierarchy is only structurally different from a star when there are
+# two or more squads. With one squad, tiered routing measures as a star centred
+# on the squad leader - correctly, because that is what it is.
+#
+# This is NOT a model of the real lab. lab_box is, and it keeps the three cars
+# that actually exist. Architecture experiments are about TOPOLOGY, so a larger
+# fictional fleet is legitimate here in a way it would not be there.
+#
+# alpha (blue)  car1 leads car2, car3   - west side
+# bravo (green) car4 leads car5, car6   - east side
+# The squads sit ~20 m apart so squad-internal links are short and cross-squad
+# links are long: geography and hierarchy agree, which is the sane default.
+# =============================================================================
+
+spec_version: 0.1
+name: squad_hall
+kind: map
+description: A 30x20 hall with a ground station and six cars in two squads. Exists
+  so hierarchy is structurally real - two leaders, each with members - which three
+  cars cannot support. For architecture experiments, not for modelling the real lab.
+arena:
+  type: box
+  extent:
+    x: 30.0
+    y: 20.0
+    z: 3.0
+  surface_reflectivity: 0.3
+  boundaries:
+    x_min: solid
+    x_max: solid
+    y_min: solid
+    y_max: solid
+    z_min: solid
+    z_max: solid
+  propagation:
+    model: indoor_multipath
+    path_loss_exponent:
+      value: null
+      unit: dimensionless
+      source: ''
+    shadowing_sigma:
+      value: null
+      unit: dB
+      source: ''
+  spectrum:
+    model: clean
+    background_emitters: []
+  gnss:
+    availability: denied
+  wind:
+    model: none
+networks:
+  blue:
+    authority: hierarchical
+    routing: tiered
+    coordinator: gcs
+    squads:
+      alpha:
+        leader: car1
+        members:
+        - car2
+        - car3
+      bravo:
+        leader: car4
+        members:
+        - car5
+        - car6
+    encrypted: true
+    band: 2400
+    qos:
+      reliability: reliable
+      deadline_ms: 100
+agents:
+- id: gcs
+  platform: ground_station
+  network: blue
+  colour: '#6B7B85'
+  pose:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    yaw: 0.0
+  dimensions:
+    length:
+      value: 0.4
+      unit: m
+      source: Nominal - measure the actual bench
+    width:
+      value: 0.4
+      unit: m
+      source: Nominal - measure the actual bench
+    height:
+      value: 1.0
+      unit: m
+      source: Nominal - measure the actual bench
+  radios:
+  - wifi_2g4
+  ghost: true
+- id: car1
+  platform: roboracer
+  network: blue
+  colour: '#2E6FB0'
+  pose:
+    x: -10.0
+    y: 4.0
+    z: 0.0
+    yaw: 0.0
+  dimensions:
+    length:
+      value: 0.55
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    width:
+      value: 0.3
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    height:
+      value: 0.2
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    mass:
+      value: null
+      unit: kg
+      source: ''
+  performance:
+    max_speed:
+      value: 1.5
+      unit: m/s
+      source: Chosen for indoor safety - not a platform limit
+    max_accel:
+      value: null
+      unit: m/s^2
+      source: ''
+    min_turn_radius:
+      value: null
+      unit: m
+      source: ''
+  sensors:
+  - id: lidar
+    type: ust10lx
+    mount:
+      offset:
+        x: 0.12
+        y: 0.0
+        z: 0.18
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  - id: imu
+    type: generic_imu
+    mount:
+      offset:
+        x: 0.0
+        y: 0.0
+        z: 0.05
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  radios:
+  - wifi_2g4
+  controller: controllers/car1_shuttle.py
+  on_link_loss: hold
+- id: car2
+  platform: roboracer
+  network: blue
+  colour: '#2E6FB0'
+  pose:
+    x: -12.0
+    y: 6.0
+    z: 0.0
+    yaw: 0.0
+  dimensions:
+    length:
+      value: 0.55
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    width:
+      value: 0.3
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    height:
+      value: 0.2
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    mass:
+      value: null
+      unit: kg
+      source: ''
+  performance:
+    max_speed:
+      value: 1.5
+      unit: m/s
+      source: Chosen for indoor safety - not a platform limit
+    max_accel:
+      value: null
+      unit: m/s^2
+      source: ''
+    min_turn_radius:
+      value: null
+      unit: m
+      source: ''
+  sensors:
+  - id: lidar
+    type: ust10lx
+    mount:
+      offset:
+        x: 0.12
+        y: 0.0
+        z: 0.18
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  - id: imu
+    type: generic_imu
+    mount:
+      offset:
+        x: 0.0
+        y: 0.0
+        z: 0.05
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  radios:
+  - wifi_2g4
+  controller: controllers/car1_shuttle.py
+  on_link_loss: hold
+- id: car3
+  platform: roboracer
+  network: blue
+  colour: '#2E6FB0'
+  pose:
+    x: -12.0
+    y: 2.0
+    z: 0.0
+    yaw: 0.0
+  dimensions:
+    length:
+      value: 0.55
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    width:
+      value: 0.3
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    height:
+      value: 0.2
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    mass:
+      value: null
+      unit: kg
+      source: ''
+  performance:
+    max_speed:
+      value: 1.5
+      unit: m/s
+      source: Chosen for indoor safety - not a platform limit
+    max_accel:
+      value: null
+      unit: m/s^2
+      source: ''
+    min_turn_radius:
+      value: null
+      unit: m
+      source: ''
+  sensors:
+  - id: lidar
+    type: ust10lx
+    mount:
+      offset:
+        x: 0.12
+        y: 0.0
+        z: 0.18
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  - id: imu
+    type: generic_imu
+    mount:
+      offset:
+        x: 0.0
+        y: 0.0
+        z: 0.05
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  radios:
+  - wifi_2g4
+  controller: controllers/car1_shuttle.py
+  on_link_loss: hold
+- id: car4
+  platform: roboracer
+  network: blue
+  colour: '#2E9B7B'
+  pose:
+    x: 10.0
+    y: 4.0
+    z: 0.0
+    yaw: 0.0
+  dimensions:
+    length:
+      value: 0.55
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    width:
+      value: 0.3
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    height:
+      value: 0.2
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    mass:
+      value: null
+      unit: kg
+      source: ''
+  performance:
+    max_speed:
+      value: 1.5
+      unit: m/s
+      source: Chosen for indoor safety - not a platform limit
+    max_accel:
+      value: null
+      unit: m/s^2
+      source: ''
+    min_turn_radius:
+      value: null
+      unit: m
+      source: ''
+  sensors:
+  - id: lidar
+    type: ust10lx
+    mount:
+      offset:
+        x: 0.12
+        y: 0.0
+        z: 0.18
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  - id: imu
+    type: generic_imu
+    mount:
+      offset:
+        x: 0.0
+        y: 0.0
+        z: 0.05
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  radios:
+  - wifi_2g4
+  controller: controllers/car1_shuttle.py
+  on_link_loss: hold
+- id: car5
+  platform: roboracer
+  network: blue
+  colour: '#2E9B7B'
+  pose:
+    x: 12.0
+    y: 6.0
+    z: 0.0
+    yaw: 0.0
+  dimensions:
+    length:
+      value: 0.55
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    width:
+      value: 0.3
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    height:
+      value: 0.2
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    mass:
+      value: null
+      unit: kg
+      source: ''
+  performance:
+    max_speed:
+      value: 1.5
+      unit: m/s
+      source: Chosen for indoor safety - not a platform limit
+    max_accel:
+      value: null
+      unit: m/s^2
+      source: ''
+    min_turn_radius:
+      value: null
+      unit: m
+      source: ''
+  sensors:
+  - id: lidar
+    type: ust10lx
+    mount:
+      offset:
+        x: 0.12
+        y: 0.0
+        z: 0.18
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  - id: imu
+    type: generic_imu
+    mount:
+      offset:
+        x: 0.0
+        y: 0.0
+        z: 0.05
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  radios:
+  - wifi_2g4
+  controller: controllers/car1_shuttle.py
+  on_link_loss: hold
+- id: car6
+  platform: roboracer
+  network: blue
+  colour: '#2E9B7B'
+  pose:
+    x: 12.0
+    y: 2.0
+    z: 0.0
+    yaw: 0.0
+  dimensions:
+    length:
+      value: 0.55
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    width:
+      value: 0.3
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    height:
+      value: 0.2
+      unit: m
+      source: 'Measured, car #1, 2026-07-21'
+    mass:
+      value: null
+      unit: kg
+      source: ''
+  performance:
+    max_speed:
+      value: 1.5
+      unit: m/s
+      source: Chosen for indoor safety - not a platform limit
+    max_accel:
+      value: null
+      unit: m/s^2
+      source: ''
+    min_turn_radius:
+      value: null
+      unit: m
+      source: ''
+  sensors:
+  - id: lidar
+    type: ust10lx
+    mount:
+      offset:
+        x: 0.12
+        y: 0.0
+        z: 0.18
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  - id: imu
+    type: generic_imu
+    mount:
+      offset:
+        x: 0.0
+        y: 0.0
+        z: 0.05
+      rpy:
+        r: 0.0
+        p: 0.0
+        y: 0.0
+  radios:
+  - wifi_2g4
+  controller: controllers/car1_shuttle.py
+  on_link_loss: hold
+points:
+  A:
+    x: -12.0
+    y: 8.0
+  B:
+    x: -12.0
+    y: -8.0
+  C:
+    x: 12.0
+    y: 8.0
+  D:
+    x: 12.0
+    y: -8.0
+  HOME:
+    x: 0.0
+    y: 0.0
+radios:
+  wifi_2g4:
+    band:
+      value: 2400
+      unit: MHz
+      source: Configured
+    tx_power:
+      value: null
+      unit: dBm
+      source: ''
+    sensitivity:
+      value: null
+      unit: dBm
+      source: ''
+    bandwidth:
+      value: null
+      unit: MHz
+      source: ''
+    data_rate:
+      value: null
+      unit: Mbps
+      source: ''
+    antenna_gain:
+      value: null
+      unit: dBi
+      source: ''
+    link_type: rf_omni

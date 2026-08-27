@@ -828,7 +828,10 @@ def command_authority(agent, arena, links, poses, networks):
     """
     net_name = agent.get("network")
     net = (networks or {}).get(net_name) or {}
-    arch = net.get("architecture") or net.get("topology") or "centralized"
+    # AUTHORITY is the current key; architecture/topology are legacy aliases
+    # kept so scenes written before the split still load.
+    arch = (net.get("authority") or net.get("architecture")
+            or net.get("topology") or "centralized")
     aid = agent["id"]
 
     def _reaches(other):
@@ -845,11 +848,26 @@ def command_authority(agent, arena, links, poses, networks):
         return {"decider": aid, "reachable": True, "tier": "self"}
 
     if arch == "hierarchical":
-        leader = (agent.get("reports_to")
-                  or net.get("squad_leader")
-                  or net.get("coordinator"))
+        # Find this agent's squad leader from the squads block. An explicit
+        # reports_to on the agent wins; otherwise look it up by membership.
+        # Without this the hierarchy exists in the routing but not in the
+        # authority, and every agent reports straight to the coordinator - a
+        # hierarchy in name only.
+        leader = agent.get("reports_to")
+        if not leader:
+            for _sq, spec in (net.get("squads") or {}).items():
+                spec = spec or {}
+                if aid in (spec.get("members") or []):
+                    leader = spec.get("leader")
+                    break
+                if aid == spec.get("leader"):
+                    # A leader answers upward, not to itself.
+                    leader = net.get("coordinator")
+                    break
+        leader = leader or net.get("squad_leader") or net.get("coordinator")
         if _reaches(leader):
-            return {"decider": leader, "reachable": True, "tier": "leader"}
+            tier = "coordinator" if leader == net.get("coordinator") else "leader"
+            return {"decider": leader, "reachable": True, "tier": tier}
         # Leader unreachable: try the top-level coordinator before giving up.
         top = net.get("coordinator")
         if top != leader and _reaches(top):
