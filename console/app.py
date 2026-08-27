@@ -2845,6 +2845,11 @@ class Console(QMainWindow):
         self.run_button.setToolTip("Run")
         self.plots.live = False
         self.plots.refresh()
+        # Objective history belongs to ONE run. Carrying it across runs would
+        # show retasks from a previous run against the current one's clock,
+        # which is worse than showing nothing. Rebuilding the tree resets the
+        # history to each agent's initial objective from the file.
+        self.populate_trees()
         self.say("Run stopped")
         self.write_run_log()
         self.update_status()
