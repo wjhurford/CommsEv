@@ -1542,16 +1542,15 @@ class Console(QMainWindow):
         self.tabs = QTabWidget()
         # Order top-to-bottom down the left edge, as Will laid it out: the
         # analysis tabs first, then the two build trees, then tasking.
-        # The sidebar renders these bottom-up, so adding in reverse gives the
-        # reading order Will wants top-to-bottom: Environment (where), Overview
-        # (what things are), Mission (what they are doing), then the analysis
-        # tabs Comms, Cyber, Results.
-        self.tabs.addTab(results, "Results")
-        self.tabs.addTab(cyber, "Cyber")
-        self.tabs.addTab(comms, "Comms")
-        self.tabs.addTab(self.tab_msn, "Mission")
-        self.tabs.addTab(self.tab_scn, "Overview")
+        # The sidebar renders in the order added, top to bottom: Environment
+        # (where you are), Overview (what things are), Mission (what they are
+        # doing), then the analysis tabs Comms, Cyber, Results.
         self.tabs.addTab(self.tab_env, "Environment")
+        self.tabs.addTab(self.tab_scn, "Overview")
+        self.tabs.addTab(self.tab_msn, "Mission")
+        self.tabs.addTab(comms, "Comms")
+        self.tabs.addTab(cyber, "Cyber")
+        self.tabs.addTab(results, "Results")
         self.tabs.currentChanged.connect(self.on_tab_changed)
         # Tabs down the left edge rather than across the top: the labels stack
         # vertically, the panel stays narrow, and the section you are in is the
@@ -1784,6 +1783,7 @@ class Console(QMainWindow):
         view = self.resolved or self.doc
         if leaf == "objective":
             self._objective_rows = {}
+            self._history_rows = {}
         mission_name = view.get("name") or (self.path.stem if self.path else "")
         root = QTreeWidgetItem(tree, [f"Mission: {mission_name}"])
         agents = view.get("agents") or []
@@ -1815,6 +1815,16 @@ class Console(QMainWindow):
                         # rather than the tree showing what the FILE said while
                         # the agent is doing something else entirely.
                         self._objective_rows[agent.get("id")] = o
+                        # History: every objective this agent has been given,
+                        # with the sim time it took effect. A retask is a
+                        # command decision, and a run you cannot reconstruct the
+                        # decisions of is not reviewable.
+                        h = QTreeWidgetItem(a, ["history"])
+                        h.setData(0, Qt.UserRole, ("history", ["agents", i]))
+                        self._history_rows[agent.get("id")] = h
+                        first = QTreeWidgetItem(
+                            h, [f"t=0.0  {_objective_label(obj)}   (initial)"])
+                        first.setDisabled(True)
                     else:  # equipment
                         for j, sen in enumerate(agent.get("sensors") or []):
                             it = QTreeWidgetItem(
@@ -2865,14 +2875,26 @@ class Console(QMainWindow):
         rows = getattr(self, "_objective_rows", None)
         if not rows:
             return
+        hist = getattr(self, "_history_rows", {})
+        now = 0.0
+        if self.frames:
+            now = _num(self.frames[-1].get("sim_time_s"))
         for aid, item in rows.items():
             live = (self.latest or {}).get(aid) or {}
             obj = live.get("objective")
             if not isinstance(obj, dict):
                 continue
-            text = f"objective: {_objective_label(obj)}"
+            label = _objective_label(obj)
+            text = f"objective: {label}"
             if item.text(0) != text:
                 item.setText(0, text)
+                # The objective changed - log it. Only on change, so a 20 Hz
+                # stream does not write 20 identical rows a second.
+                h = hist.get(aid)
+                if h is not None:
+                    row = QTreeWidgetItem(h, [f"t={now:.1f}  {label}"])
+                    row.setDisabled(True)
+                    h.setExpanded(True)
 
     def consume_frame(self, frame):
         """One telemetry frame, from whichever source. The only place the

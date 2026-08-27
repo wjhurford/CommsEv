@@ -133,3 +133,36 @@ whether the fallback held.
 ## Deferred by decision
 
 - ROS is paused — running stubs only until the stub side is perfect.
+
+---
+
+## System architecture (internship scope — confined to the lab room)
+
+The distinction that makes this research rather than a label: **decision
+authority is not network topology.** A mesh can carry centralized decision-
+making, and then the mesh survives a hub loss while the decision-making does
+not. Deadband can show that gap because it models comms as a first-class object.
+
+- [x] **Three architectures with real consequences** — `architecture:` on a
+      network, read by `command_authority()`, reported per agent every frame as
+      {decider, reachable, tier}:
+      * `centralized` — one coordinator decides; unreachable = no authority.
+        Optimal while the link holds, brittle when it does not.
+      * `decentralized` — every agent is its own authority; a lost link costs
+        information, never authority. Robust, globally mediocre decisions.
+      * `hierarchical` — squad leader, then coordinator, then `orphaned`.
+        Degraded rather than decapitated. The one worth measuring.
+- [ ] **`on_link_loss` driven by authority** — an agent that has lost authority
+      should act on it (hold / continue / return), not carry on regardless.
+      The state is reported; nothing consumes it yet. NEXT.
+- [ ] **Architecture visible in the Console** — show each agent's decider and
+      whether it is reachable; colour the tree row when authority is lost.
+- [ ] **Measure the three against each other** — same mission, same jamming,
+      three architectures; time-to-detect, time-to-recover, task completion.
+      This is the internship result.
+
+**A finding already, from testing this:** nothing in an 8x8 room can drive out
+of radio range — the link model only dies past 12 m. So architecture has no
+observable consequence in the lab *unless something takes the link away*. That
+is the argument for the Cyber/jamming work: in a room this size, attack is the
+only realistic route to link loss.

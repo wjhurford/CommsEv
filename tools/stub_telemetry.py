@@ -156,6 +156,9 @@ def load_scenario(path):
                        "y": _num((v or {}).get("y")),
                        "z": _num((v or {}).get("z"))}
                    for k, v in (doc.get("points") or {}).items()},
+        # Networks, carried so command_authority() can read each one's
+        # architecture while building a frame.
+        "networks": doc.get("networks") or {},
     }
 
     agents = []
@@ -789,6 +792,69 @@ def publications_for(agent):
     return out
 
 
+def command_authority(agent, arena, links, poses, networks):
+    """Who decides for this agent right now, and can it be reached?
+
+    ARCHITECTURE is not a label - it is the answer to "when the link to whoever
+    decides for me goes down, what happens?" Three architectures, three answers:
+
+      centralized    One coordinator decides for everyone. If an agent cannot
+                     reach the coordinator it has NO authority: it is on its
+                     own, and what it does is set by `on_link_loss`. Brittle,
+                     but optimal while the link holds - one node sees
+                     everything.
+
+      decentralized  Every agent decides for itself. Losing a link costs
+                     information, never authority. Robust, but no agent has the
+                     whole picture, so decisions are locally good and globally
+                     mediocre.
+
+      hierarchical   Agents answer to a squad leader; leaders answer to the
+                     coordinator. Losing the top link leaves the squad still
+                     commanded by its leader - degraded, not decapitated. The
+                     middle ground, and the one worth measuring.
+
+    Returns {"decider": <agent id or None>, "reachable": bool, "tier": str}.
+
+    NOTE what this deliberately separates: DECISION AUTHORITY is not the same
+    as network TOPOLOGY. A mesh network can carry centralized decision-making,
+    and then the mesh survives a hub loss while the decision-making does not.
+    That gap is the thing this framework is unusually able to show, because it
+    models the comms as a first-class object rather than assuming them free.
+    """
+    net_name = agent.get("network")
+    net = (networks or {}).get(net_name) or {}
+    arch = net.get("architecture") or net.get("topology") or "centralized"
+    aid = agent["id"]
+
+    def _reaches(other):
+        """Is there a usable link between aid and other, right now?"""
+        if other is None or other == aid:
+            return True
+        for l in links:
+            if {l["a"], l["b"]} == {aid, other}:
+                return link_state(poses[l["a"]], poses[l["b"]])["state"] != "down"
+        return False
+
+    if arch == "decentralized":
+        # Each agent is its own authority. Never decapitated.
+        return {"decider": aid, "reachable": True, "tier": "self"}
+
+    if arch == "hierarchical":
+        leader = (agent.get("reports_to")
+                  or net.get("squad_leader")
+                  or net.get("coordinator"))
+        if _reaches(leader):
+            return {"decider": leader, "reachable": True, "tier": "leader"}
+        # Leader unreachable: try the top-level coordinator before giving up.
+        top = net.get("coordinator")
+        if top != leader and _reaches(top):
+            return {"decider": top, "reachable": True, "tier": "coordinator"}
+        return {"decider": leader, "reachable": False, "tier": "orphaned"}
+
+    # centralized (the default)
+    hub = net.get("coordinator")
+    return {"decider": hub, "reachable": _reaches(hub), "tier": "coordinator"}
 def link_state(pa, pb):
     """Placeholder link quality: falls off with distance.
 
@@ -874,6 +940,11 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # "pursue car3" rather than a bare "pursuit" - and so a retask is
             # visible in the tree the moment it takes effect.
             "objective": a["mission"],
+            # Who decides for this agent right now, and whether they are
+            # reachable. This is what makes 'architecture' a behaviour rather
+            # than a label in a file.
+            "authority": command_authority(a, arena, links, poses,
+                                           arena.get("networks") or {}),
             "dimensions": a["dimensions"],
             "pose": poses[a["id"]],
             "scan": scan_for(a, lidars[0], poses, agents, arena, rng) if lidars else None,
