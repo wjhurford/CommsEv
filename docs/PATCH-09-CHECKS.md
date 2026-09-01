@@ -192,3 +192,129 @@ now the **fleet**. This section describes the result as it stands.)
    `runs/lab_box_3_roboracer_test_<stamp>`.
 3. Setup scene tree: the Scene node shows the room only — no greyed
    Map builder / Import topography rows.
+
+---
+
+## Step 4 — Contested: jamming is physics, not a flag
+
+### What changed
+- **A jammer is an ordinary agent.** A `jammer: {tx_power, band}` block on any
+  agent (put it on the **red** network) makes it an emitter; the LAUNCH/HALT
+  state machine arms it, so `red launch` turns the jamming on. Its power
+  travels the same log-distance path loss as any signal and lands in every
+  same-band receiver's SINR denominator (`rf_link`'s `interference_mw`, which
+  already existed and was unused). No special-case jamming code, no global
+  flag — exactly the design the docstrings promised.
+- **The scene owns the baseline.** `apply_routing` and `frame` now read the
+  scene's declared `path_loss_exponent` and `noise_floor` (`scene_rf()`)
+  instead of `rf_link`'s function defaults. The floor is the reference the
+  jamming delta is measured from.
+- **Authority degrades with the spectrum.** `frame` scores the links FIRST
+  (with jamming), then `command_authority` judges reachability from those
+  scored links — so a jammer that kills a hub link strips the command
+  authority that flowed over it. `command_authority` gained an optional
+  `link_states` arg for this; its old geometry fallback is unchanged.
+- **Per-agent experienced spectrum** in every frame: each agent reports the
+  noise floor it actually sees (`rf.noise_floor_dbm`), the scene baseline
+  (`rf.baseline_dbm`), and a `jammed` flag (>3 dB above baseline).
+  `attacks_active` lists the emitters transmitting right now.
+- **The Contested tab is live** (replaces the placeholder): a tree of the
+  scene baseline (noise floor, path-loss exponent, GNSS), the active emitters,
+  and each agent's experienced floor — jammed agents in red.
+- **`fleets/3_roboracer_jammed.yaml`** (new): the lab fleet + `jam1`, a red
+  jammer at room centre, 10 dBm (tuned so blue links show a MIX — some hold,
+  some degrade, some drop — rather than a uniform wall; raise to 30 dBm / 1 W
+  for total denial).
+- **Band separation is a real defence:** an off-band jammer contributes
+  nothing (the frequency-hopping work later depends on this).
+- **Tests: 116 passed** (+3 sections: jamming raises the floor / drops links /
+  strips authority; off-band does nothing; the scene baseline feeds the RF
+  model — path-loss exponent shortens clean-link range, noise floor scales the
+  jamming delta).
+
+### Check
+1. `python3 tests/test_all.py` → **116 passed, 0 failed**.
+2. **Console:** Setup → scene `lab_box` → fleet `3_roboracer_jammed` (spawn
+   dialog now lists jam1 too) → Play → `SETMISSION test` → `blue launch`.
+   Cars shuttle, Comms all green, Contested tab shows every agent at −95 dBm.
+3. **`red launch`** → the Comms link table goes amber/red (some blue links
+   degrade, some drop); the Contested tab lists `jam1` as an active emitter
+   and shows car1/car2 with a raised floor in red; on the map, jammed cars'
+   command authority drops (car1/car2 lose their decider, car3 hangs on).
+   `red halt` → recovers.
+4. `python3 tools/netcheck.py` on a jammed-fleet composition shows jam1 as a
+   red self-network agent; links read clean because netcheck never arms it
+   (it's a static inspector — arming is a Console/live action).
+
+### Known gaps
+- Jamming is continuous-only. Reactive / random / deceptive jammers (the
+  README's ladder) are behaviours on the jammer agent — a later step.
+- Self-jamming (the fleet's own transmitters raising each other's floor) is
+  still unmodelled; the seam is the same `interference_mw` path.
+- GNSS is still binary available/denied; C/N0-grade quality (needed for
+  spoofing) is queued in docs/contested-background.md.
+- The jammer is static; a mobile jammer (`REOBJECTIVE jam1 pursue car1` from
+  the red cell) arrives with the cell terminals.
+
+---
+
+## Step 4b — Red side: separate fleets, console-editable jamming, range ring
+
+Answers Will's four asks (1 Sep), grounded in the project library — see
+`docs/jamming-model-justification.md` for the honest, sourced verdict on
+whether the jamming model is useful (short: yes as a network/command-
+resilience testbed, no as a physical-layer RF simulator; do not quote exact
+dB/PDR figures as truth).
+
+### What changed
+- **Blue and red are separate fleets.** The combined `3_roboracer_jammed`
+  fleet was the mistake — moved to `attic/`. Blue stays `3_roboracer`
+  (friendly only); red is `red_jammer` (one jammer, its own red network,
+  spawned OPPOSITE the gcs at y = +3.0). The loader gained a `fleets:` list
+  (blue + red overlaid); `_overlay` now UNIONS the `networks`/`radios`/
+  `points` sections so a second fleet cannot erase the first's network.
+- **Setup has two pickers — Blue fleet and Red fleet** — each with its own
+  spawn dialog; they must be different files. Red is optional. Composition
+  writes `runs/current_setup.yaml` with `fleets: [blue, red]`.
+- **Jamming is editable in the Console, not baked in.** `red launch`/`red
+  halt` arm/disarm (the existing state machine); a new **`JAM <id> power
+  <dBm>`** / **`JAM <id> band <MHz>`** command tunes a running jammer live,
+  and the Contested tab's emitter rows are **double-click editable** (prompts
+  for transmit power, sends JAM). The fleet file only carries a sensible
+  default.
+- **Range ring on a selected jammer** (TOP view): a dashed **influence
+  boundary** (J/N = 0 dB, the classic jammed-area boundary, Tedeschi & Di
+  Pietro 2021) and a filled **denial core** (J/N = 20 dB), labelled
+  "nominal" because a real jammed area is ragged, not a circle (sensors 2024,
+  Baltic trial). Radius from the shared, tested `jammer_range_m()`.
+- **Interception designed** (`docs/interception-design.md`): a cell "hears"
+  commands on its band — plaintext, or encrypted-traffic-only — reusing the
+  `rf_link()` verdict; built with the cell terminals (it needs a red cell to
+  deliver to). This is the sensing half of a reactive jammer.
+- **Tests: 129 passed** (+3 sections: two fleets compose and stay separate;
+  the JAM command tunes live and rejects non-jammers; the range helper grows
+  with power / shrinks with J/N threshold).
+
+### Check
+1. `python3 tests/test_all.py` → **129 passed, 0 failed**.
+2. **Console Setup now has Blue fleet AND Red fleet pickers.** Scene
+   `lab_box` → Blue `3_roboracer` (spawn) → Red `red_jammer` (spawn) →
+   jam1 appears on the far side from the gcs. Choosing the same file for red
+   as blue is refused.
+3. **Click jam1** (TOP view) → a red dashed influence ring + filled denial
+   core, labelled with the nominal radius. Front/side views show no ring
+   (a 2-D contour only reads on the plan).
+4. Play → `SETMISSION test` → `blue launch` → `red launch`: blue links
+   degrade/drop, Contested lists jam1. **Double-click jam1 in Contested** →
+   enter 30 → denial spreads; enter -20 → it recedes. Or type
+   `JAM jam1 power 30` in the terminal. `red halt` clears it.
+5. Read `docs/jamming-model-justification.md` — the honest account of what the
+   model can and cannot claim.
+
+### Known gaps
+- Range ring is a circle (omni only); directional jammers/antennas are a
+  later axis (the model is omni — justification doc §weaknesses).
+- Interception is designed, not built (lands with the cell terminals).
+- Still constant-jammer only; reactive/random/deceptive is the levels ladder.
+- No processing gain / spread spectrum — the model understates a
+  spread-spectrum radio's resilience (justification doc §weaknesses).

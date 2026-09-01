@@ -690,6 +690,219 @@ def test_retask_claim_failure_is_never_silent_and_not_lost():
           not cmd_path.exists())
 
 
+def test_jamming_raises_floor_drops_links_and_strips_authority():
+    """A jammer is an ordinary agent whose power lands in the SINR
+    denominator: arm it and the noise floor rises, links fall, and the
+    command authority that flowed over them is lost. See
+    docs/contested-background.md."""
+    print("\nCONTESTED - JAMMING IS PHYSICS, NOT A FLAG")
+    arena, agents, links = st.load_scenario(
+        {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"]})
+    poses = _poses_for(agents)
+    jam1 = next(a for a in agents if a["id"] == "jam1")
+    check("jam1 has a jammer block", bool(jam1.get("jammer")))
+
+    import random
+    def snap():
+        return st.frame(0.0, 0.1, 0, arena, agents, links, poses,
+                        random.Random(1))
+
+    jam1["armed"] = False
+    off = snap()
+    car1_off = next(a for a in off["agents"] if a["id"] == "car1")
+    blue_off = [l for l in off["links"] if l["network"] == "blue"]
+    check("jammer off: car1 sees the scene baseline",
+          not car1_off["rf"]["jammed"]
+          and car1_off["rf"]["noise_floor_dbm"]
+              == car1_off["rf"]["baseline_dbm"])
+    check("jammer off: no emitters active", off["attacks_active"] == [])
+
+    jam1["armed"] = True
+    on = snap()
+    car1_on = next(a for a in on["agents"] if a["id"] == "car1")
+    check("jammer on: car1's floor rises above baseline",
+          car1_on["rf"]["noise_floor_dbm"] > car1_on["rf"]["baseline_dbm"])
+    check("jammer on: car1 reads as jammed", car1_on["rf"]["jammed"])
+    check("jammer on: it is listed as an active emitter",
+          any(e["id"] == "jam1" for e in on["attacks_active"]))
+    worst_off = min(l["pdr"] for l in blue_off)
+    worst_on = min(l["pdr"] for l in on["links"] if l["network"] == "blue")
+    check("jammer on: blue link quality falls", worst_on < worst_off)
+    # At least one hub link is down, so at least one car loses its decider.
+    lost = [a for a in on["agents"]
+            if a["network"] == "blue"
+            and a["platform"] != "ground_station"
+            and not a["authority"]["reachable"]]
+    check("jammer on: at least one blue agent loses command authority",
+          len(lost) >= 1, f"{[a['id'] for a in lost]}")
+
+
+def test_jamming_respects_band_separation():
+    """Band separation is a real (first-order) defence: a jammer off the
+    victim's band contributes nothing. Frequency-hopping work depends on
+    the model honouring this."""
+    print("\nCONTESTED - OFF-BAND JAMMING DOES NOTHING")
+    arena, agents, links = st.load_scenario(
+        {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"]})
+    poses = _poses_for(agents)
+    jam1 = next(a for a in agents if a["id"] == "jam1")
+    jam1["armed"] = True
+    jam1["jammer"]["band"] = {"value": 5800}    # blue is on 2400
+    import random
+    f = st.frame(0.0, 0.1, 0, arena, agents, links, poses, random.Random(1))
+    car1 = next(a for a in f["agents"] if a["id"] == "car1")
+    check("off-band jammer leaves car1 at the baseline",
+          not car1["rf"]["jammed"]
+          and car1["rf"]["noise_floor_dbm"] == car1["rf"]["baseline_dbm"])
+    check("all blue links stay up",
+          all(l["state"] == "up" for l in f["links"]
+              if l["network"] == "blue" and l["active"]))
+
+
+def test_scene_baseline_feeds_rf():
+    """The RF model reads the SCENE's declared numbers, not function
+    defaults. Two roles, both checked:
+      - the noise floor is the REFERENCE the jamming delta is measured from
+        (in this SINR model sensitivity is an absolute rx threshold, so the
+        floor governs interference, not clean-link PDR - which is honest,
+        and why a raised floor alone leaves a clean link untouched);
+      - the path-loss exponent governs received power, so a lossier scene
+        genuinely shortens clean-link range."""
+    print("\nCONTESTED - THE SCENE OWNS THE BASELINE")
+    rf = st.scene_rf(st.load_scenario(
+        {"scene": "lab_box", "fleet": "3_roboracer"})[0])
+    check("scene_rf reads lab_box's -95 dBm floor", rf["noise_dbm"] == -95.0)
+
+    # Path-loss exponent: a lossier scene drops a long link that a
+    # free-space scene holds. 80 m so the exponent actually bites.
+    def link_state_at(exp):
+        d = {"spec_version": 0.1, "name": "x",
+             "arena": {"type": "box", "extent": {"x": 200, "y": 200, "z": 5},
+                       "propagation": {"path_loss_exponent": {"value": exp}}},
+             "agents": [{"id": "a", "network": "blue",
+                         "pose": {"x": 0, "y": 0, "z": 0}},
+                        {"id": "b", "network": "blue",
+                         "pose": {"x": 80, "y": 0, "z": 0}}],
+             "networks": {"blue": {"topology": "decentralized"}}}
+        arena_x, agents_x, links_x = st.load_scenario(d)
+        poses_x = _poses_for(agents_x)
+        import random
+        fx = st.frame(0.0, 0.1, 0, arena_x, agents_x, links_x, poses_x,
+                      random.Random(1))
+        return next(l for l in fx["links"])
+    free = link_state_at(2.0)
+    lossy = link_state_at(3.5)
+    check("scene path-loss exponent feeds rf_link (free space holds the "
+          "80 m link)", free["state"] == "up", str(free["state"]))
+    check("a lossier scene exponent drops the same link",
+          lossy["pdr"] < free["pdr"], f"{lossy['pdr']} vs {free['pdr']}")
+
+    # Noise floor as the jamming REFERENCE: the same jammer power reads as a
+    # bigger delta above a quiet floor than above an already-noisy one.
+    def floor_delta(base_floor):
+        d = {"spec_version": 0.1, "name": "x",
+             "arena": {"type": "box", "extent": {"x": 20, "y": 20, "z": 5},
+                       "spectrum": {"noise_floor": {"value": base_floor}}},
+             "networks": {"blue": {"topology": "decentralized", "band": 2400},
+                          "red": {"topology": "decentralized", "band": 2400}},
+             "agents": [{"id": "a", "network": "blue",
+                         "pose": {"x": 0, "y": 0, "z": 0}},
+                        {"id": "j", "network": "red",
+                         "pose": {"x": 3, "y": 0, "z": 0},
+                         "jammer": {"tx_power": {"value": 5},
+                                    "band": {"value": 2400}}}]}
+        arena_x, agents_x, links_x = st.load_scenario(d)
+        for ag in agents_x:
+            if ag["id"] == "j":
+                ag["armed"] = True
+        poses_x = _poses_for(agents_x)
+        import random
+        fx = st.frame(0.0, 0.1, 0, arena_x, agents_x, links_x, poses_x,
+                      random.Random(1))
+        a = next(ag for ag in fx["agents"] if ag["id"] == "a")
+        return a["rf"]["noise_floor_dbm"] - a["rf"]["baseline_dbm"]
+    check("a fixed jammer reads as a larger rise above a quiet floor",
+          floor_delta(-95) > floor_delta(-55),
+          f"{floor_delta(-95)} vs {floor_delta(-55)}")
+
+
+def test_two_fleets_compose_and_stay_separate():
+    """Blue and red are spawned as separate fleets and both survive the
+    merge - neither erases the other's network. See docs/vocabulary.md and
+    the Setup tab's two pickers."""
+    print("\nTWO FLEETS - BLUE AND RED, SEPARATE")
+    both = st.load_scenario(
+        {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"]})
+    arena, agents, links = both
+    ids = {a["id"] for a in agents}
+    check("both fleets' agents present", {"gcs", "car1", "jam1"} <= ids)
+    check("both networks survive the overlay",
+          {"blue", "red"} <= set(arena["networks"]))
+    jam1 = next(a for a in agents if a["id"] == "jam1")
+    check("jam1 is on the red network", jam1["network"] == "red")
+    check("jam1 spawns opposite the gcs (far +y side)",
+          jam1["start"]["y"] > 0)
+    # order independence: red-then-blue keeps blue too
+    other = st.resolve_doc({"scene": "lab_box",
+                            "fleets": ["red_jammer", "3_roboracer"]})
+    check("fleet order does not drop a network",
+          {"blue", "red"} <= set(other["networks"]))
+
+
+def test_jam_command_tunes_live():
+    """JAM <id> power <dBm> retunes a running jammer; the victim's floor
+    follows. On/off stays the LAUNCH/HALT machine."""
+    print("\nJAM COMMAND - LIVE JAMMER TUNING")
+    arena, agents, links = st.load_scenario(
+        {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"]})
+    abid = {a["id"]: a for a in agents}
+    poses = _poses_for(agents)
+    import random
+
+    def car1_floor():
+        f = st.frame(0.0, 0.1, 0, arena, agents, links, poses,
+                     random.Random(1))
+        return next(a for a in f["agents"]
+                    if a["id"] == "car1")["rf"]["noise_floor_dbm"]
+
+    def drain(line):
+        qd = Path(tempfile.mkdtemp())
+        _queue_with(qd, line)
+        st.drain_retasks(qd, abid, arena, links, poses)
+
+    drain("LAUNCH red\n")
+    lo = car1_floor()
+    check("armed jammer raises car1's floor", lo > -95.0)
+    drain("JAM jam1 power 30\n")
+    hi = car1_floor()
+    check("JAM power 30 raises the floor further", hi > lo, f"{hi} vs {lo}")
+    drain("JAM jam1 power -30\n")
+    back = car1_floor()
+    check("JAM power -30 drops the floor back toward baseline", back < hi)
+    drain("HALT red\n")
+    check("HALT red returns car1 to the scene baseline",
+          car1_floor() == -95.0)
+    # a non-jammer target is rejected, not crashed
+    drain("JAM car1 power 10\n")
+    check("JAM on a non-jammer is a no-op", abid["car1"].get("jammer") is None)
+
+
+def test_jammer_range_helper():
+    """The influence radius grows with power and shrinks with a higher J/N
+    threshold - and is the value the range ring draws. See
+    docs/jamming-model-justification.md."""
+    print("\nJAMMER RANGE - THE INFLUENCE RADIUS")
+    r10 = st.jammer_range_m(10, 2400, -95, 2.8)
+    r20 = st.jammer_range_m(20, 2400, -95, 2.8)
+    core = st.jammer_range_m(10, 2400, -95, 2.8, jn_db=20)
+    check("more power reaches further", r20 > r10)
+    check("the denial core (J/N=20 dB) is inside the influence boundary",
+          core < r10)
+    check("a quieter floor is reached from further away",
+          st.jammer_range_m(10, 2400, -110, 2.8)
+          > st.jammer_range_m(10, 2400, -80, 2.8))
+
+
 def test_origin_passthrough():
     print("\nGEODETIC ORIGIN - SCHEMA SEAM, NO CONVERSION")
     arena, _, _ = st.load_scenario(str(REPO / "scenes" / "lab_box.yaml"))
@@ -721,6 +934,11 @@ if __name__ == "__main__":
                test_setmission_gated_by_reachability,
                test_setmission_out_of_bounds,
                test_phase_t0_clean_launch,
+               test_jamming_raises_floor_drops_links_and_strips_authority,
+               test_jamming_respects_band_separation,
+               test_scene_baseline_feeds_rf,
+               test_two_fleets_compose_and_stay_separate,
+               test_jam_command_tunes_live, test_jammer_range_helper,
                test_retask_spool_is_one_file_per_command,
                test_retask_claim_failure_is_never_silent_and_not_lost,
                test_origin_passthrough):

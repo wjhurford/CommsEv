@@ -195,6 +195,18 @@ break the simulator. Order is roughly dependency order.
       so the order can be staged before the sim starts, instead of the spool
       wipe eating it. Until then the order is: Play, SETMISSION, blue launch.
 
+- [ ] **Processing gain / spread spectrum** (1 Sep) - the jamming model has
+      no DSSS/FHSS margin, so it UNDERSTATES a spread-spectrum radio's
+      resilience. Biggest gap before any "anti-jam radio" claim. See
+      docs/jamming-model-justification.md.
+- [ ] **Command interception** (1 Sep) - a cell hears commands on its band
+      (plaintext / encrypted-traffic-only), reusing the rf_link verdict; the
+      sensing half of a reactive jammer. Designed in
+      docs/interception-design.md; builds with the cell terminals.
+- [ ] **Jammer levels ladder** - constant (done) -> reactive -> random ->
+      deceptive -> follow-on/smart, the survey's taxonomy and the README's
+      ladder. Behaviours on the jammer agent.
+
 ## Later
 
 - [ ] Spectrum waterfall — frequency across, time down, power as colour. Makes

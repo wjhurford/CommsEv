@@ -137,12 +137,23 @@ def _overlay(base, doc):
     """
     merged = dict(base)
     for key, val in doc.items():
-        if key in ("map", "scene", "fleet", "agents"):
+        if key in ("map", "scene", "fleet", "fleets", "agents"):
             continue
-        merged[key] = val
+        # Dict-valued sections that COLLECT across layers (a blue fleet and a
+        # red fleet each contribute their own networks; neither should erase
+        # the other). Union by key, upper layer wins a genuine clash.
+        if key in ("networks", "radios", "points") and isinstance(val, dict) \
+                and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **val}
+        else:
+            merged[key] = val
 
     base_agents = {a.get("id"): a for a in (base.get("agents") or [])}
     doc_agents = {a.get("id"): a for a in (doc.get("agents") or [])}
+    # Agents the doc introduces via its own `agents:` list are legitimate
+    # (a fleet defining its side); only a bare `objectives:` entry with no
+    # body anywhere is a phantom worth warning about.
+    bodied = set(base_agents) | set(doc_agents)
 
     for aid, obj in (doc.get("objectives") or {}).items():
         if not isinstance(obj, dict):
@@ -166,9 +177,10 @@ def _overlay(base, doc):
     for aid, task in doc_agents.items():
         if aid in seen:
             continue
-        if base_agents:
-            print(f"layer names agent '{aid}' not present in its base "
-                  f"- adding it", file=sys.stderr)
+        # A phantom = named only by objectives, with a body nowhere.
+        if base_agents and aid not in bodied:
+            print(f"mission names agent '{aid}' with no body - ignoring",
+                  file=sys.stderr)
         out_agents.append(dict(task, id=aid))
     merged["agents"] = out_agents
     return merged
@@ -201,14 +213,18 @@ def resolve_doc(doc):
     composes a run as {scene: ..., fleet: ..., agents: [pose overrides]}
     without a file ever existing."""
     scene_ref = doc.get("scene") or doc.get("map")
-    fleet_ref = doc.get("fleet")
-    if not scene_ref and not fleet_ref:
+    # One `fleet:` or a `fleets:` list (blue + red spawned as separate sides,
+    # composed by the Setup tab). Overlaid in listed order onto the scene.
+    fleet_refs = doc.get("fleets")
+    if fleet_refs is None:
+        fleet_refs = [doc["fleet"]] if doc.get("fleet") else []
+    if not scene_ref and not fleet_refs:
         return doc                          # self-contained: the old shape
     base = {}
     if scene_ref:
         base = resolve_mission(_base_path("scene", scene_ref))
-    if fleet_ref:
-        base = _overlay(base, resolve_mission(_base_path("fleet", fleet_ref)))
+    for fref in fleet_refs:
+        base = _overlay(base, resolve_mission(_base_path("fleet", fref)))
     return _overlay(base, doc)
 
 
@@ -247,6 +263,12 @@ def load_scenario(path):
         # Networks, carried so command_authority() can read each one's
         # architecture while building a frame.
         "networks": doc.get("networks") or {},
+        # The scene's contested-environment BASELINE (propagation, spectrum,
+        # gnss, wind), carried whole so the RF model reads the SCENE's
+        # numbers, not function defaults. docs/contested-background.md.
+        "background": {k: arena[k] for k in
+                       ("propagation", "spectrum", "gnss", "wind")
+                       if k in arena},
         "origin": origin,
     }
 
@@ -287,6 +309,11 @@ def load_scenario(path):
             "phase_t0": 0.0,
             "ghost": bool(a.get("ghost", False)),
             "speed": _num((a.get("performance") or {}).get("max_speed"), 1.5),
+            # A jammer is an ORDINARY agent that happens to transmit noise:
+            # {tx_power, band} quantities. Armed = transmitting - the same
+            # LAUNCH/HALT state machine as everything else, so `red launch`
+            # is what turns the jamming on.
+            "jammer": a.get("jammer"),
         })
 
     for a in agents:
@@ -997,7 +1024,8 @@ def publications_for(agent):
     return out
 
 
-def command_authority(agent, arena, links, poses, networks):
+def command_authority(agent, arena, links, poses, networks,
+                      link_states=None):
     """Who decides for this agent right now, and can it be reached?
 
     ARCHITECTURE is not a label - it is the answer to "when the link to whoever
@@ -1036,9 +1064,18 @@ def command_authority(agent, arena, links, poses, networks):
     aid = agent["id"]
 
     def _reaches(other):
-        """Is there a usable link between aid and other, right now?"""
+        """Is there a usable link between aid and other, right now?
+
+        When the caller has already scored the links (frame() computes them
+        WITH jamming and the scene baseline), that verdict is used - so
+        authority genuinely degrades when the spectrum does. The fallback
+        re-derives from clean-spectrum geometry, for callers with no frame
+        in hand."""
         if other is None or other == aid:
             return True
+        if link_states is not None:
+            st_ = link_states.get(frozenset((aid, other)))
+            return st_ is not None and st_ != "down"
         for l in links:
             if {l["a"], l["b"]} == {aid, other}:
                 return link_state(poses[l["a"]], poses[l["b"]])["state"] != "down"
@@ -1078,7 +1115,83 @@ def command_authority(agent, arena, links, poses, networks):
     # centralized (the default)
     hub = net.get("coordinator")
     return {"decider": hub, "reachable": _reaches(hub), "tier": "coordinator"}
-def apply_routing(links, agents, networks, poses):
+def _qty(node, default=None):
+    """Unwrap a {value, unit, source} quantity - or a plain number - to float."""
+    if isinstance(node, dict):
+        node = node.get("value")
+    try:
+        return float(node)
+    except (TypeError, ValueError):
+        return default
+
+
+def scene_rf(world):
+    """The scene's declared RF baseline, falling back to rf_link()'s own
+    defaults where the scene declares nothing. The point: the BASELINE is the
+    scene's to own (docs/contested-background.md); the defaults are only a
+    stand-in for scenes written before the background existed."""
+    bg = (world or {}).get("background") or {}
+    return {
+        "plexp": _qty((bg.get("propagation") or {})
+                      .get("path_loss_exponent"), 2.8),
+        "noise_dbm": _qty((bg.get("spectrum") or {})
+                          .get("noise_floor"), -95.0),
+    }
+
+
+def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=()):
+    """Total jamming power (mW) arriving at `pos` on `band_mhz`.
+
+    Each armed jammer's transmit power travels the SAME log-distance path
+    loss as a legitimate signal - a jammer is not special physics, just an
+    unwanted transmitter - and lands in the receiver's noise denominator
+    (rf_link's interference_mw). Off-band jammers contribute nothing: band
+    separation is a real (first-order) defence, and later frequency-hopping
+    work depends on the model honouring it.
+    """
+    total = 0.0
+    for j in jammers:
+        if j["id"] in exclude:
+            continue
+        jcfg = j.get("jammer") or {}
+        jband = _qty(jcfg.get("band"), 2400.0)
+        if band_mhz and abs(jband - band_mhz) > 0.5:
+            continue
+        tx = _qty(jcfg.get("tx_power"), 20.0)
+        jp = poses.get(j["id"])
+        if not jp:
+            continue
+        d = max(0.1, math.dist((pos["x"], pos["y"], pos["z"]),
+                               (jp["x"], jp["y"], jp["z"])))
+        pl_d0 = 20.0 * math.log10(jband) + 20.0 * math.log10(0.001) + 32.44
+        rx_dbm = tx - (pl_d0 + 10.0 * plexp * math.log10(d))
+        total += 10.0 ** (rx_dbm / 10.0)
+    return total
+
+
+def jammer_range_m(tx_dbm, band_mhz, noise_dbm, plexp, jn_db=0.0):
+    """Nominal influence radius of an omnidirectional jammer: the distance at
+    which its received power falls to `jn_db` above the ambient noise floor
+    (J/N = jn_db). At jn_db = 0 this is the classic jammed-area boundary
+    (Tedeschi & Di Pietro, SpaCCS 2021: the RSS "at the boundary of the jammed
+    area"). It is a NOMINAL contour for a point omni source - real jammed
+    areas are ragged ("effect is not uniform", Baltic Sea trial, sensors
+    2024), and a directional jammer is not a circle at all.
+
+        rx(d) = tx - (PL(d0) + 10*n*log10(d))   set equal to noise + jn_db
+        => d = 10 ** ((tx - (noise+jn_db) - PL(d0)) / (10*n))
+    """
+    pl_d0 = 20.0 * math.log10(band_mhz) + 20.0 * math.log10(0.001) + 32.44
+    exponent = (tx_dbm - (noise_dbm + jn_db) - pl_d0) / (10.0 * max(plexp, 0.1))
+    return 10.0 ** exponent
+
+
+def active_jammers(agents):
+    """The jammers currently transmitting: a jammer block AND armed."""
+    return [a for a in agents if a.get("jammer") and a.get("armed")]
+
+
+def apply_routing(links, agents, networks, poses, world=None):
     """Decide which physically-reachable candidates are actually USED.
 
     Reachability says who CAN hear whom; routing says who DOES relay for whom.
@@ -1108,6 +1221,8 @@ def apply_routing(links, agents, networks, poses):
             for m in list((spec or {}).get("members") or []) + ([leader] if leader else []):
                 squads_of[m] = (sq, leader)
 
+    _rf = scene_rf(world)
+    _jam = active_jammers(agents)
     out = []
     for l in links:
         net = (networks or {}).get(l["network"]) or {}
@@ -1128,16 +1243,22 @@ def apply_routing(links, agents, networks, poses):
         else:
             active = True
 
-        # No interference_mw passed - every link is scored as if it were
-        # the only transmission in the air. Self-jamming (a dense fleet's
-        # OWN transmitters raising each other's noise floor, separate from
-        # any external jammer) is real and not modelled yet: this is the
-        # hook for it later, deliberately not built now - sum the received
-        # power at (a, b) from every OTHER currently-active same-spectrum
-        # transmitter and pass it here as interference_mw. rf_link() already
-        # takes the parameter; nothing about this loop needs to change to
-        # wire it in, since every link is already scored independently.
-        state = rf_link(poses[a], poses[b])
+        # Score the link against the SCENE's baseline (path loss exponent,
+        # noise floor), with every armed same-band jammer's power summed
+        # into the receiver's denominator. The worse endpoint governs: a
+        # link is only as good as its more-jammed end. Self-jamming (the
+        # fleet's OWN transmitters raising each other's floor) remains
+        # unmodelled - it would sum here identically when built.
+        band = _qty(net.get("band"), 2400.0)
+        interf = 0.0
+        if _jam:
+            interf = max(
+                jammer_rx_mw(poses[a], _jam, poses, _rf["plexp"], band,
+                             exclude=(a, b)),
+                jammer_rx_mw(poses[b], _jam, poses, _rf["plexp"], band,
+                             exclude=(a, b)))
+        state = rf_link(poses[a], poses[b], plexp=_rf["plexp"],
+                        noise_dbm=_rf["noise_dbm"], interference_mw=interf)
         out.append({**l, **state,
                     "routing": routing,
                     "active": active,
@@ -1324,9 +1445,31 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     """One telemetry frame. THIS DICTIONARY IS THE CONTRACT."""
     contacts = step(agents, poses, t, dt, arena)
 
+    # Score the links FIRST - against the scene's declared baseline, with
+    # every armed jammer in the denominator - so that command authority
+    # below judges reachability from the links as they actually are, jammed
+    # and all, not from clean-spectrum geometry.
+    links_out = apply_routing(links, agents, arena.get("networks") or {},
+                              poses, world=arena)
+    _states = {frozenset((l["a"], l["b"])): l["state"] for l in links_out}
+    _rf = scene_rf(arena)
+    _jam = active_jammers(agents)
+    _noise_mw = 10.0 ** (_rf["noise_dbm"] / 10.0)
+    _nets = arena.get("networks") or {}
+
     agents_out = []
     for a in agents:
         lidars = [s for s in a["sensors"] if s["type"] == "ust10lx"]
+        # The noise floor THIS agent actually experiences, on its own
+        # network's band, jammers included. The gap between this and the
+        # scene's baseline is jamming, as a number, per agent.
+        band = _qty((_nets.get(a["network"]) or {}).get("band"), 2400.0)
+        interf = jammer_rx_mw(poses[a["id"]], _jam, poses, _rf["plexp"],
+                              band, exclude=(a["id"],)) if _jam else 0.0
+        eff_dbm = 10.0 * math.log10(_noise_mw + interf)
+        rf_out = {"noise_floor_dbm": round(eff_dbm, 1),
+                  "baseline_dbm": round(_rf["noise_dbm"], 1),
+                  "jammed": (eff_dbm - _rf["noise_dbm"]) > 3.0}
         agents_out.append({
             "id": a["id"],
             "platform": a["platform"],
@@ -1340,11 +1483,20 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # Assigned vs active - the whole point of this patch. An agent
             # can hold a fully-formed objective and still not be armed.
             "armed": bool(a.get("armed", False)),
+            "rf": rf_out,
+            # A jammer's own emitter, for the Contested tab.
+            "jammer": ({"tx_dbm": _qty((a.get("jammer") or {})
+                                       .get("tx_power"), 20.0),
+                        "band_mhz": _qty((a.get("jammer") or {})
+                                         .get("band"), 2400.0),
+                        "on": bool(a.get("armed", False))}
+                       if a.get("jammer") else None),
             # Who decides for this agent right now, and whether they are
-            # reachable. This is what makes 'architecture' a behaviour rather
-            # than a label in a file.
+            # reachable - judged from the SCORED links, so jamming that
+            # kills a link kills the authority that flowed over it.
             "authority": command_authority(a, arena, links, poses,
-                                           arena.get("networks") or {}),
+                                           arena.get("networks") or {},
+                                           link_states=_states),
             "dimensions": a["dimensions"],
             "pose": poses[a["id"]],
             "scan": scan_for(a, lidars[0], poses, agents, arena, rng) if lidars else None,
@@ -1364,8 +1516,6 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     _LAST_SCANS.clear()
     _LAST_SCANS.update({a["id"]: a["scan"] for a in agents_out if a["scan"]})
 
-    links_out = apply_routing(links, agents, arena.get("networks") or {}, poses)
-
     return {
         "seq": seq,
         "sim_time_s": round(t, 3),
@@ -1378,7 +1528,12 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         # What the topology MEASURES as, independent of what it was declared
         # to be. The gap between this and the declared routing is the finding.
         "topology": observed_topology(links_out),
-        "attacks_active": [],
+        # Jammers currently transmitting - the Contested tab's "what is
+        # degrading the spectrum right now" list.
+        "attacks_active": [
+            {"id": a["id"], "network": a["network"],
+             "tx_dbm": a["jammer"]["tx_dbm"], "band_mhz": a["jammer"]["band_mhz"]}
+            for a in agents_out if a.get("jammer") and a["jammer"]["on"]],
         "contacts": [{"agent": i, "with": w} for i, w in contacts],
     }
 
@@ -1544,6 +1699,8 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                                     objectives, gated by command authority
                                     (an unreachable agent is not retasked),
                                     and title the run with its name
+        JAM <id> power <dBm>        tune a running jammer's emission live
+        JAM <id> band <MHz>         (on/off is LAUNCH/HALT, e.g. red launch)
     """
     changed = []
     if not retask_dir.exists():
@@ -1626,6 +1783,35 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                     a["phase_t0"] = t
             print(f"{verb0}: {scope} ({len(targets)} agent"
                   f"{'s' if len(targets) != 1 else ''})", file=sys.stderr)
+            continue
+
+        if verb0 == "JAM" and len(head) == 2:
+            # Live jammer edit: JAM <id> power <dBm> | JAM <id> band <MHz>.
+            # On/off is the ordinary LAUNCH/HALT state machine (red launch),
+            # so this only tunes an existing jammer's emission. Editing the
+            # jammer from the Console, not baked into a file.
+            parts = head[1].split()
+            if len(parts) == 3 and parts[1].lower() in ("power", "band"):
+                jid, what, valtxt = parts
+                tgt = agents_by_id.get(jid)
+                if not tgt or not tgt.get("jammer"):
+                    print(f"JAM: '{jid}' is not a jammer", file=sys.stderr)
+                    continue
+                try:
+                    v = float(valtxt)
+                except ValueError:
+                    print(f"JAM: '{valtxt}' is not a number", file=sys.stderr)
+                    continue
+                key = "tx_power" if what.lower() == "power" else "band"
+                cur = tgt["jammer"].get(key)
+                if isinstance(cur, dict):
+                    cur["value"] = v
+                else:
+                    tgt["jammer"][key] = {"value": v}
+                print(f"JAM: {jid} {what} -> {v}", file=sys.stderr)
+            else:
+                print("JAM: usage JAM <id> power <dBm> | JAM <id> band <MHz>",
+                      file=sys.stderr)
             continue
 
         if verb0 == "SETMISSION" and len(head) == 2:

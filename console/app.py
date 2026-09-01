@@ -53,7 +53,8 @@ from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QComboBox, QDialog, QLineEdit, QMenu, QSizePolicy, QSlider, QSplitter,
+    QComboBox, QDialog, QInputDialog, QLineEdit, QMenu, QSizePolicy,
+    QSlider, QSplitter,
     QVBoxLayout, QWidget,
 )
 
@@ -66,12 +67,14 @@ from deadband import spec
 try:
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     from stub_telemetry import resolve_mission as _resolve_mission
+    from stub_telemetry import jammer_range_m as _jammer_range_m
     # Same tokenizer the sim's own retask grammar uses, so a parenthesized
     # coordinate typed here and re-parsed there is the same one line, not
     # two tokenizers that can drift apart.
     from stub_telemetry import _tokenize_args
 except Exception:
     _resolve_mission = None
+    _jammer_range_m = None
     _tokenize_args = None
 
 # Round-trip YAML keeps the comments in a scenario file alive across an edit.
@@ -278,6 +281,10 @@ class Viewport(QWidget):
         self.mode = self.TOP
         self.arena = None
         self.agents = []
+        # Scene RF baseline (noise floor dBm, path-loss exponent) for the
+        # jammer range ring. Set by the Console on load; defaults match
+        # rf_link()'s own until a scene declares otherwise.
+        self.scene_rf = (-95.0, 2.8)
         self.links = []
         self.selected = set()   # highlighted agent ids
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
@@ -374,6 +381,7 @@ class Viewport(QWidget):
                 self._grid(p)
                 self._bounds(p)
             self._scan_fan(p)
+            self._range_rings(p)
             self._link_lines(p)
             for a in self.agents:
                 self._agent(p, a)
@@ -632,6 +640,87 @@ class Viewport(QWidget):
         p.setPen(QPen(QColor(C_TEXT if selected else C_DIM)))
         p.setFont(QFont("Consolas", 8))
         p.drawText(self.to_screen(x, y, z) + QPointF(9, -7), str(agent.get("id", "")))
+
+    def _jammer_range(self, agent):
+        """Nominal influence radius (m) of a jammer agent, from whichever
+        jammer-power shape is present (live frame: tx_dbm/band_mhz; pre-run
+        fleet: tx_power/band quantities)."""
+        if _jammer_range_m is None:
+            return None
+        j = agent.get("jammer")
+        if not j:
+            return None
+        def val(*keys, default=None):
+            for k in keys:
+                v = j.get(k)
+                if isinstance(v, dict):
+                    v = v.get("value")
+                if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            return default
+        tx = val("tx_dbm", "tx_power", default=20.0)
+        band = val("band_mhz", "band", default=2400.0)
+        noise, plexp = self.scene_rf
+        return _jammer_range_m(tx, band, noise, plexp)
+
+    def _range_rings(self, p):
+        """Ring the influence area of a SELECTED jammer (TOP view only - a
+        2-D contour only reads on the plan). Two rings: the J/N=0 influence
+        boundary (dashed) and the J/N=20 dB denial core (solid). A NOMINAL
+        omni contour - real jammed areas are ragged (sensors 2024)."""
+        if self.mode != self.TOP:
+            return
+        s = self.scale()
+        for a in self.agents:
+            if a.get("id") not in self.selected:
+                continue
+            if not a.get("jammer"):
+                continue
+            r0 = self._jammer_range(a)
+            if not r0 or r0 <= 0:
+                continue
+            pose = a.get("pose", {})
+            c = self.to_screen(_num(pose.get("x")), _num(pose.get("y")),
+                               _num(pose.get("z")))
+            col = QColor(NETWORK_COLOURS["red"])
+            # denial core (J/N=20 dB): a tenth the radius per 20 dB / (10*n)...
+            # recompute directly for honesty rather than scaling.
+            core = self._core_range(a)
+            if core and core > 0:
+                p.setPen(QPen(col, 1.4))
+                p.setBrush(QBrush(QColor(col.red(), col.green(), col.blue(), 40)))
+                p.drawEllipse(c, core * s, core * s)
+            pen = QPen(col, 1.2, Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(c, r0 * s, r0 * s)
+            p.setFont(QFont("Consolas", 7))
+            p.setPen(QPen(col))
+            p.drawText(c + QPointF(r0 * s * 0.7, -r0 * s * 0.7),
+                       f"influence ~{r0:.0f} m (nominal)")
+
+    def _core_range(self, agent):
+        if _jammer_range_m is None or not agent.get("jammer"):
+            return None
+        j = agent.get("jammer")
+        def val(*keys, default=None):
+            for k in keys:
+                v = j.get(k)
+                if isinstance(v, dict):
+                    v = v.get("value")
+                if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            return default
+        tx = val("tx_dbm", "tx_power", default=20.0)
+        band = val("band_mhz", "band", default=2400.0)
+        noise, plexp = self.scene_rf
+        return _jammer_range_m(tx, band, noise, plexp, jn_db=20.0)
 
     def agent_at(self, pos):
         """Which agent is under this screen point? Nearest within a tolerance."""
@@ -1296,6 +1385,9 @@ class ShellPanel(QWidget):
         if head and head[0].upper() in ("REOBJECTIVE", "SETMISSION"):
             self._retask(head)
             return
+        if head and head[0].upper() == "JAM":
+            self._send_queue_line(cmd + "\n", cmd)
+            return
 
         full = (f"cd {self.cwd} 2>/dev/null; "
                 f"source /opt/ros/humble/setup.bash 2>/dev/null; "
@@ -1414,9 +1506,9 @@ class SpawnDialog(QDialog):
     offered, not presumed.
     """
 
-    def __init__(self, agents, parent=None):
+    def __init__(self, agents, parent=None, title="Spawn the fleet"):
         super().__init__(parent)
-        self.setWindowTitle("Spawn the fleet")
+        self.setWindowTitle(title)
         lay = QVBoxLayout(self)
         lab = QLabel("Where does each agent start? Defaults are the fleet's "
                      "own. x/y in metres, yaw in radians.")
@@ -1502,7 +1594,11 @@ class Console(QMainWindow):
         # terminal, SETMISSION <name> -> blue launch. File > Open remains
         # for legacy self-contained files only.
         self._setup_scene = None
-        self._setup_fleet = None
+        self._setup_fleet = None       # blue fleet name
+        self._setup_red = None         # red fleet name
+        self._spawns = {}              # {agent_id: {x,y,z,yaw}} across sides
+        self._blue_ids = set()
+        self._red_ids = set()
         self.statusBar().showMessage(
             "Setup: choose a scene, then a fleet")
 
@@ -1657,14 +1753,22 @@ class Console(QMainWindow):
                                     "named points. scenes/*.yaml")
         self.scene_combo.activated.connect(self.on_scene_chosen)
         slay.addWidget(self.scene_combo)
-        slay.addWidget(QLabel("Fleet"))
+        slay.addWidget(QLabel("Blue fleet (friendly)"))
         self.fleet_combo = QComboBox()
-        self.fleet_combo.setToolTip("The agents and their wiring. "
+        self.fleet_combo.setToolTip("The friendly agents and their wiring. "
                                     "fleets/*.yaml. Choosing one asks where "
                                     "to spawn them.")
         self.fleet_combo.setEnabled(False)
-        self.fleet_combo.activated.connect(self.on_fleet_chosen)
+        self.fleet_combo.activated.connect(lambda i: self.on_fleet_chosen(i, "blue"))
         slay.addWidget(self.fleet_combo)
+        slay.addWidget(QLabel("Red fleet (adversary)"))
+        self.red_combo = QComboBox()
+        self.red_combo.setToolTip("The adversary side - jammers, spoofers - "
+                                  "spawned SEPARATELY from blue and never the "
+                                  "same file. Optional.")
+        self.red_combo.setEnabled(False)
+        self.red_combo.activated.connect(lambda i: self.on_fleet_chosen(i, "red"))
+        slay.addWidget(self.red_combo)
         self.lbl_mission = QLabel("Mission: UNASSIGNED")
         self.lbl_mission.setToolTip(
             "Set from the terminal once the run is started:\n"
@@ -1681,17 +1785,17 @@ class Console(QMainWindow):
         slay.addWidget(self.tab_env, 1)
         self._refresh_setup_lists()
 
-        contested = QLabel(
-            "Not built yet.\n\n"
-            "Everything that degrades the spectrum, in one place: the\n"
-            "scene's background (noise floor, GNSS quality, wind), jammers\n"
-            "as agents, spoofing, and the attack injection panel - pick a\n"
-            "target, pick a class, set parameters, fire it mid-run.\n\n"
-            "The contested tree is the next step."
-        )
-        contested.setObjectName("hint")
-        contested.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        contested.setWordWrap(True)
+        # CONTESTED - everything degrading the spectrum, in one tree:
+        # the scene's declared BASELINE, the EMITTERS transmitting into it
+        # right now (jammers as agents), and the noise floor each agent
+        # ACTUALLY experiences. The gap between baseline and experienced is
+        # jamming, as a number. Attack injection (spoofing, mobile jammers)
+        # hangs off this next. See docs/contested-background.md.
+        self.tab_contested = QTreeWidget()
+        self.tab_contested.setHeaderHidden(True)
+        self.tab_contested.setIndentation(12)
+        self.tab_contested.itemDoubleClicked.connect(self.on_contested_edit)
+        contested = self.tab_contested
 
         # Results: tick series to plot them. Populated from the recorded run.
         results = QWidget()
@@ -1895,7 +1999,8 @@ class Console(QMainWindow):
         """(Re)list scenes/ and fleets/ into the Setup dropdowns."""
         for combo, folder, placeholder in (
                 (self.scene_combo, "scenes", "(choose a scene)"),
-                (self.fleet_combo, "fleets", "(choose a fleet)")):
+                (self.fleet_combo, "fleets", "(choose a blue fleet)"),
+                (self.red_combo, "fleets", "(none)")):
             current = combo.currentText()
             combo.blockSignals(True)
             combo.clear()
@@ -1914,17 +2019,29 @@ class Console(QMainWindow):
         # A new scene invalidates any placed fleet - spawns are coordinates
         # in the OLD world. Ask again rather than silently carrying them.
         self._setup_fleet = None
+        self._setup_red = None
+        self._spawns = {}
         self.fleet_combo.setEnabled(True)
         self.fleet_combo.setCurrentIndex(0)
-        self._compose_setup(spawns=None)
+        self.red_combo.setEnabled(True)
+        self.red_combo.setCurrentIndex(0)
+        self._compose_setup()
         self.statusBar().showMessage(
-            f"Scene {self._setup_scene} - now choose a fleet")
+            f"Scene {self._setup_scene} - now choose a blue fleet")
 
-    def on_fleet_chosen(self, index):
-        if index <= 0 or not self._setup_scene:
+    def on_fleet_chosen(self, index, side):
+        combo = self.red_combo if side == "red" else self.fleet_combo
+        if not self._setup_scene:
             return
-        fleet = self.fleet_combo.currentText()
-        # The scene is in view; ask where the agents spawn in it.
+        if index <= 0:                      # "(none)" - clear this side
+            self._clear_side(side)
+            self._compose_setup()
+            return
+        fleet = combo.currentText()
+        if side == "red" and fleet == self._setup_fleet:
+            self.say("Red and blue fleets must be different files.")
+            combo.setCurrentIndex(0)
+            return
         defaults = []
         if _resolve_mission is not None:
             try:
@@ -1934,35 +2051,56 @@ class Console(QMainWindow):
             except Exception as exc:
                 self.say(f"cannot read fleet {fleet}: {exc}")
                 return
-        dlg = SpawnDialog(defaults, self)
+        dlg = SpawnDialog(defaults, self, title=f"Spawn the {side} fleet")
         if dlg.exec() != QDialog.Accepted:
-            self.fleet_combo.setCurrentIndex(0)
+            combo.setCurrentIndex(0)
             return
-        self._setup_fleet = fleet
-        self._compose_setup(spawns=dlg.spawns())
+        # Replace this side's spawns; keep the other side's.
+        self._clear_side(side)
+        new_spawns = dlg.spawns()
+        if side == "red":
+            self._setup_red = fleet
+            self._red_ids = set(new_spawns)
+        else:
+            self._setup_fleet = fleet
+            self._blue_ids = set(new_spawns)
+        self._spawns.update(new_spawns)
+        self._compose_setup()
+        both = " + ".join(x for x in (self._setup_fleet, self._setup_red) if x)
         self.statusBar().showMessage(
-            f"{self._setup_scene} + {fleet} - press Play, then "
-            f"SETMISSION <name> and blue launch in the terminal")
+            f"{self._setup_scene} + {both} - press Play, then "
+            f"SETMISSION <name> and blue launch")
 
-    def _compose_setup(self, spawns):
-        """Write the composed run (scene + fleet + spawn overrides) to
-        runs/current_setup.yaml and load it. A FILE, deliberately: the whole
-        existing pipeline (Play, ROS launch, save, reload) takes a path, and
-        a composed run should be as diffable and re-runnable as any other.
-        """
+    def _clear_side(self, side):
+        ids = getattr(self, "_red_ids" if side == "red" else "_blue_ids", set())
+        for aid in ids:
+            self._spawns.pop(aid, None)
+        if side == "red":
+            self._setup_red = None
+            self._red_ids = set()
+        else:
+            self._setup_fleet = None
+            self._blue_ids = set()
+
+    def _compose_setup(self):
+        """Write the composed run (scene + blue fleet + red fleet + spawn
+        overrides) to runs/current_setup.yaml and load it. A FILE,
+        deliberately: the whole existing pipeline (Play, ROS launch, save,
+        reload) takes a path, and a composed run should be as diffable and
+        re-runnable as any other."""
         import yaml as _yaml
-        doc = {"spec_version": 0.1,
-               "name": (f"{self._setup_scene} + {self._setup_fleet}"
-                        if self._setup_fleet else self._setup_scene),
+        fleets = [f for f in (self._setup_fleet, self._setup_red) if f]
+        parts = [self._setup_scene] + fleets
+        doc = {"spec_version": 0.1, "name": " + ".join(p for p in parts if p),
                "scene": self._setup_scene}
-        if self._setup_fleet:
-            doc["fleet"] = self._setup_fleet
-        if spawns:
+        if fleets:
+            doc["fleets"] = fleets
+        if self._spawns:
             doc["agents"] = [{"id": aid, "pose": pose}
-                             for aid, pose in spawns.items()]
+                             for aid, pose in self._spawns.items()]
         path = REPO_ROOT / "runs" / "current_setup.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
-        header = ("# Composed by the Console's Setup tab - scene + fleet + "
+        header = ("# Composed by the Console's Setup tab - scene + fleets + "
                   "spawn overrides.\n# Regenerated on every Setup change; "
                   "safe to delete.\n")
         path.write_text(header + _yaml.safe_dump(doc, sort_keys=False),
@@ -2107,6 +2245,7 @@ class Console(QMainWindow):
         # both from one helper keeps them from drifting apart.
         self._build_agent_tree(self.tab_scn, leaf="equipment")
         self._build_agent_tree(self.tab_msn, leaf="objective")
+        self._build_contested_baseline()
 
     def _systems(self, networks):
         """Group networks into systems. A SYSTEM is a side - one or more
@@ -2225,13 +2364,69 @@ class Console(QMainWindow):
         self.viewport.agents = [
             {"id": a.get("id"), "colour": a.get("colour"),
              "dimensions": a.get("dimensions", {}), "pose": a.get("pose", {}),
-             "sensors": a.get("sensors", [])}
+             "sensors": a.get("sensors", []),
+             "platform": a.get("platform"), "jammer": a.get("jammer")}
             for a in (view.get("agents") or [])
         ]
+        self._push_scene_rf()
         self.viewport.links = []
         self.viewport.update()
         self.fill_publications_from_scenario()
         self.fill_comms()
+
+    def on_contested_edit(self, item, _col):
+        """Double-click an active emitter to tune its transmit power live.
+        Writes a JAM command on the same channel the terminal uses, so the
+        jammer is edited from the Console, not from a file."""
+        data = item.data(0, Qt.UserRole)
+        if not (isinstance(data, tuple) and data[0] == "jammer"):
+            return
+        if not getattr(self, "_retask_dir", None):
+            self.say("Start the run first, then double-click to tune a jammer.")
+            return
+        jid = data[1]
+        cur = 20.0
+        live = (self.latest or {}).get(jid) or {}
+        if live.get("jammer"):
+            cur = _num(live["jammer"].get("tx_dbm"), 20.0)
+        val, ok = QInputDialog.getDouble(
+            self, "Tune jammer", f"{jid} transmit power (dBm):", cur,
+            -30.0, 60.0, 1)
+        if ok:
+            line = f"JAM {jid} power {val}\n"
+            self._send_queue_line_console(line, f"JAM {jid} power {val}")
+
+    def _send_queue_line_console(self, line, summary):
+        """Write one command file into the running sim's retask spool - the
+        Console's own copy of the terminal's _send_queue_line, for controls
+        that are not the terminal (the Contested editor)."""
+        try:
+            qdir = self._retask_dir
+            qdir.mkdir(parents=True, exist_ok=True)
+            name = f"cmd_{time.monotonic_ns():020d}.txt"
+            tmp = qdir / (name + ".tmp")
+            tmp.write_text(line, encoding="utf-8")
+            tmp.rename(qdir / name)
+            self.say(f"[sent: {summary}]")
+        except OSError as exc:
+            self.say(f"[send failed: {exc}]")
+
+    def _push_scene_rf(self):
+        """Hand the viewport the scene's noise floor and path-loss exponent so
+        it can size the jammer range ring. Read from the resolved background,
+        falling back to rf_link()'s defaults."""
+        bg = ((getattr(self, "resolved", None) or self.doc or {})
+              .get("arena") or {})
+        def q(sec, key, default):
+            v = ((bg.get(sec) or {}).get(key))
+            if isinstance(v, dict):
+                v = v.get("value")
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+        self.viewport.scene_rf = (q("spectrum", "noise_floor", -95.0),
+                                  q("propagation", "path_loss_exponent", 2.8))
 
     def on_overview_double_click(self, item, _column):
         """Popup a short description of an agent's objective on double-click."""
@@ -2779,6 +2974,72 @@ class Console(QMainWindow):
             self.say(f"Recorded {len(self.frames)} frames to runs/{target.name}")
         except OSError as exc:
             self.say(f"ERROR  could not write run log: {exc}")
+
+    def _build_contested_baseline(self):
+        """The scene's declared contested BASELINE - the half of the
+        Contested tree that is known before a run and does not move. The
+        live half (emitters, per-agent experienced noise) is filled by
+        _refresh_contested from telemetry."""
+        tree = getattr(self, "tab_contested", None)
+        if tree is None:
+            return
+        tree.clear()
+        bg = (self._view().get("arena") or {})
+        base = QTreeWidgetItem(tree, ["Scene baseline"])
+        def q(node, key, unit):
+            v = (node or {}).get(key)
+            if isinstance(v, dict):
+                v = v.get("value")
+            return "not declared" if v is None else f"{v} {unit}".strip()
+        prop = bg.get("propagation") or {}
+        spec_ = bg.get("spectrum") or {}
+        gnss = bg.get("gnss") or {}
+        QTreeWidgetItem(base, [f"noise floor: {q(spec_, 'noise_floor', 'dBm')}"])
+        QTreeWidgetItem(base, [f"path-loss exponent: "
+                               f"{q(prop, 'path_loss_exponent', '')}"])
+        QTreeWidgetItem(base, [f"GNSS: {gnss.get('availability', 'not declared')}"])
+        base.setExpanded(True)
+        # Placeholders the live refresh will fill; kept as headers so the
+        # shape of the tree is stable whether or not a run is going.
+        self._c_emitters = QTreeWidgetItem(tree, ["Emitters (none - run to see)"])
+        self._c_spectrum = QTreeWidgetItem(tree, ["Experienced spectrum"])
+        self._c_emitters.setExpanded(True)
+        self._c_spectrum.setExpanded(True)
+
+    def _refresh_contested(self, frame):
+        """The live half: who is transmitting into the spectrum right now,
+        and the noise floor each agent actually sees. Called every frame."""
+        if getattr(self, "tab_contested", None) is None:
+            return
+        emitters = frame.get("attacks_active") or []
+        em = getattr(self, "_c_emitters", None)
+        if em is not None:
+            em.takeChildren()
+            em.setText(0, f"Emitters ({len(emitters)} active)"
+                          if emitters else "Emitters (none active)")
+            for e in emitters:
+                row = QTreeWidgetItem(
+                    em, [f"{e['id']} [{e['network']}]  "
+                         f"{e['tx_dbm']:.0f} dBm @ {e['band_mhz']:.0f} MHz"
+                         f"   (double-click to edit)"])
+                row.setData(0, Qt.UserRole, ("jammer", e["id"]))
+        sp = getattr(self, "_c_spectrum", None)
+        if sp is not None:
+            sp.takeChildren()
+            for a in frame.get("agents", []):
+                rf = a.get("rf") or {}
+                if not rf:
+                    continue
+                floor = rf.get("noise_floor_dbm")
+                base = rf.get("baseline_dbm")
+                tag = "  JAMMED" if rf.get("jammed") else ""
+                delta = ("" if floor is None or base is None
+                         else f"  (+{floor - base:.0f} dB)"
+                         if floor - base > 0.5 else "")
+                row = QTreeWidgetItem(
+                    sp, [f"{a['id']}: {floor:.0f} dBm{delta}{tag}"])
+                if rf.get("jammed"):
+                    row.setForeground(0, QBrush(QColor(NETWORK_COLOURS["red"])))
 
     def fill_comms(self, links=None):
         """Emitters from the scenario; link state from the run if there is one."""
@@ -3359,6 +3620,7 @@ class Console(QMainWindow):
             self.plots.refresh()
         self.fill_publications_from_telemetry(agents)
         self.fill_comms(frame.get("links", []))
+        self._refresh_contested(frame)
 
         down = sum(1 for l in self.viewport.links if l.get("state") != "up")
         source = "ROS 2" if frame.get("source") == "ros2" else "stub"

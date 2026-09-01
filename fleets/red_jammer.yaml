@@ -1,0 +1,49 @@
+# =============================================================================
+# Deadband FLEET (RED) — red_jammer
+# =============================================================================
+# A RED (adversary) fleet, spawned SEPARATELY from the blue fleet - the Setup
+# tab has one picker for each side, and they are never the same file. This one
+# is a single static jammer, jam1, on its own red network.
+#
+# It sits on the OPPOSITE side of the arena from the lab's ground station
+# (gcs is at y = -3.4; jam1 at y = +3.0), so it threatens the fleet from the
+# far side rather than sitting on top of the GCS.
+#
+# The jammer's PARAMETERS (tx power, band, on/off) are meant to be edited LIVE
+# in the Console's Contested tab - this file only declares a sensible default.
+# A jammer is an ordinary agent with a `jammer:` block; `red launch` arms it.
+# See docs/jamming-model-justification.md and docs/contested-background.md.
+# =============================================================================
+
+spec_version: 0.1
+name: red_jammer
+kind: fleet
+
+description: >
+  One static red jammer (jam1) on the far side of the arena from the GCS.
+  Arm with `red launch`; edit its power/band live in the Contested tab.
+
+networks:
+  red:
+    system: adversary
+    authority: decentralized
+    routing: mesh
+    topology: decentralized
+    band: 2400              # same band as blue - that is the whole point
+
+agents:
+  - id: jam1
+    platform: jammer
+    network: red
+    colour: "#C4685A"
+    pose: {x: 0.0, y: 3.0, z: 0.0, yaw: 0.0}   # opposite the GCS
+    dimensions:
+      length: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      width:  {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      height: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+    jammer:
+      # 10 dBm gives a visible GRADIENT across the blue links in an 8 m room
+      # (some hold, some degrade, some drop) rather than a uniform wall. Edit
+      # it live in the Contested tab; 30 dBm (1 W) is total denial.
+      tx_power: {value: 10, unit: dBm, source: ""}   # <-- module datasheet
+      band:     {value: 2400, unit: MHz, source: "Configured to blue's band"}
