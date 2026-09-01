@@ -1,20 +1,26 @@
 # =============================================================================
-# Deadband scenario — formation keeping (the FIRST hand-written mission rig)
+# Deadband scenario - wall following, one car, nothing in the way
 # =============================================================================
-# The rig for missions/my_first.py. Cars 1 and 2 shuttle in their lanes exactly
-# as in three_car_fleet.yaml. Car 3 does NOT shuttle - it runs your mission,
-# holding station off car 1's flank as car 1 drives back and forth.
+# A rig for developing and watching ONE behaviour. Everything that is not the
+# wall follower has deliberately been taken out of its way:
 #
-# This is where you watch your own mission drive for the first time. Open it,
-# press Play, watch car 3 sit beside car 1. Then change ONE number in car 3's
-# mission block below and press Play again:
+#   * Cars 1 and 2 are STATIC and parked mid-arena. They are still real
+#     obstacles - the lidar sees them and collision applies - but they are not
+#     driving into the follower's lane. Set them shuttling again and it is a
+#     much harder problem, which is a fair next experiment.
 #
-#   offset: 2.0 -> 3.5     the gap opens
-#   side: left -> right    it swaps flanks
-#   follow: car1 -> car2   it picks a different lead
+#   * The ground station is SUSPENDED at 1.5 m. Not a trick: pose.z is an
+#     agent's BASE, so the gcs occupies [1.5, 2.5] m while the car's lidar
+#     scans a plane at 0.18 m. It is therefore invisible to the scan, which is
+#     exactly the out-of-plane case the sensor model exists to get right.
+#     Drop it back to z: 0.0 and it reappears in the scan.
 #
-# three_car_fleet.yaml stays the untouched benchmark; this is the copy you play
-# with. Everything else - arena, radios, provenance - is identical to it.
+# Everything else - arena, radios, provenance - is the benchmark scenario
+# unchanged, so runs here are comparable with three_car_fleet.yaml.
+#
+# Open this file, press Play, then type "blue launch" in the Terminal tab -
+# Play alone only starts the sim, every agent (including car 3's wall
+# follower) sits idle until launched, on every file, this one included.
 #
 # THE PROVENANCE RULE: every physical quantity is {value, unit, source}.
 # An empty source is allowed but it gets counted and flagged. Never invent one.
@@ -25,10 +31,11 @@
 # =============================================================================
 
 spec_version: 0.1
-name: formation_demo
+name: wall_follow_demo
 description: >
-  Cars 1 and 2 shuttle; car 3 runs missions/my_first.py and keeps station off
-  car 1's flank. The development rig for the first hand-written mission.
+  Car 3 follows the right-hand wall using its lidar. Cars 1 and 2 are parked as
+  static obstacles and the ground station is suspended above the scan plane.
+  The development rig for missions/wall_follow.py.
 
 # -----------------------------------------------------------------------------
 # ARENA
@@ -104,7 +111,7 @@ agents:
     platform: ground_station
     network: blue
     colour: "#6B7B85"
-    pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
+    pose: {x: 0.0, y: -3.4, z: 1.5, yaw: 1.5708}   # SUSPENDED above the scan plane
     dimensions:
       length: {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
       width:  {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
@@ -118,7 +125,7 @@ agents:
     platform: roboracer
     network: blue
     colour: "#2E6FB0"
-    pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
+    pose: {x: -1.2, y: 1.4, z: 0.0, yaw: 0.0}
     dimensions:
       length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
       width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
@@ -142,16 +149,13 @@ agents:
     radios: [wifi_2g4]
     controller: controllers/car1_shuttle.py
     on_link_loss: hold
-    mission:
-      type: shuttle
-      from: {x: -3.0, y: 2.0}
-      to:   {x: 3.0, y: 2.0}
+    mission: {type: static}      # parked obstacle, not traffic
 
   - id: car2
     platform: roboracer
     network: blue
     colour: "#2E6FB0"
-    pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
+    pose: {x: 1.4, y: -0.6, z: 0.0, yaw: 1.5708}
     dimensions:
       length: {value: 0.55, unit: m, source: "Measured, car #2, 2026-07-21"}
       width:  {value: 0.30, unit: m, source: "Measured, car #2, 2026-07-21"}
@@ -175,16 +179,13 @@ agents:
     radios: [wifi_2g4]
     controller: controllers/car2_shuttle.py
     on_link_loss: hold
-    mission:                     # parallel lane, in step with the others
-      type: shuttle
-      from: {x: -3.0, y: 0.0}
-      to:   {x: 3.0, y: 0.0}
+    mission: {type: static}      # parked obstacle, not traffic
 
   - id: car3
     platform: roboracer
     network: blue
     colour: "#2E6FB0"
-    pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}
+    pose: {x: -3.0, y: -3.0, z: 0.0, yaw: 0.0}   # beside the y_min wall
     dimensions:
       length: {value: 0.55, unit: m, source: "Measured, car #3, 2026-07-21"}
       width:  {value: 0.30, unit: m, source: "Measured, car #3, 2026-07-21"}
@@ -208,24 +209,13 @@ agents:
     radios: [wifi_2g4]
     controller: controllers/car3_shuttle.py
     on_link_loss: hold
-    mission:                     # YOUR mission - keep station off car1's flank
+    mission:
       type: script
-      file: missions/my_first.py
-      follow: car1               # whose flank to hold
-      offset: 2.0                # metres out to the side
-      side: left                 # left | right of the lead's nose
-
-    # --- other missions for car 3. Exactly ONE `mission:` block may be
-    # --- uncommented at a time. See docs/writing-a-mission.md. For the wall
-    # --- follower there is a whole scenario built round it:
-    # --- scenarios/wall_follow_demo.yaml
-    #
-    # mission:                              # patrol until the link degrades,
-    #   type: script                        # then come home - uses the NETWORK
-    #   file: missions/return_on_link_loss.py
-    #   coordinator: gcs
-    #   degraded_below: 0.45
-    #   recovered_above: 0.65
+      file: missions/wall_follow.py
+      side: right                # right | left
+      standoff: 0.8              # metres to hold off the wall
+      lookahead: 1.2             # metres ahead to aim
+      gain: 0.9                  # rad of steering per metre of distance error
 
 # -----------------------------------------------------------------------------
 # RADIO DEFINITIONS
@@ -256,22 +246,18 @@ logging:
   output_dir: runs/
 
 # =============================================================================
-# ON COMPARING THIS WITH f1tenth_gym
+# WHAT TO WATCH
 #
-# Worth being precise, because the comparison is easy to overclaim.
+# Car 3 should settle onto the standoff within a couple of metres and stay
+# there, corners included. What it must NOT do is bounce - close on the wall,
+# over-correct, swing out, come back. That is the failure mode a one-beam wall
+# follower has by construction, and it is why this one reads two beams and
+# steers on where it WILL be rather than where it is.
 #
-# f1tenth_gym is better at, and this does not attempt: vehicle dynamics (tyre
-# model, slip, actual drivetrain), full-resolution lidar, racing lines,
-# lap timing, and any question about how a car handles.
-#
-# This is better at, and f1tenth_gym cannot do: more than two agents, the
-# network as a modelled object, link quality as a measured signal, a bounded
-# arena matching a real room, heterogeneous platforms in one world, and
-# parameters that carry their sources.
-#
-# So the honest claim is not "better simulator". It is: the two answer
-# different questions, and nothing open answers the second one for a mixed
-# air/ground fleet. Run both, and the comparison that means something is
-# whether the network-layer effects seen here are absent there - because that
-# absence is the gap this exists to fill.
+# Worth changing, in rising order of difficulty:
+#   side: left            - the mirror case; catches sign errors immediately
+#   standoff: 0.4         - tighter line, less margin at the corners
+#   gain: 2.5             - deliberately too high; watch it start to hunt
+#   cars 1 and 2 shuttling again - a moving obstacle in the lane
+#   gcs pose z: 0.0       - the ground station drops into the scan plane
 # =============================================================================

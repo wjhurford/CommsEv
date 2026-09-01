@@ -1,0 +1,46 @@
+# =============================================================================
+# Deadband SCENE — demo_field
+# =============================================================================
+# A SCENE is the WORLD ONLY: arena, the radio medium and contested-environment
+# background, and named points. NO agents, NO networks, NO tasking. This is the
+# canonical example of the three-layer model (see docs/vocabulary.md):
+#
+#     scene demo_field  <-  scenario demo_patrol_fleet  <-  mission demo_patrol
+#
+# A scenario drops a fleet onto this scene; a mission then commands that fleet.
+# =============================================================================
+
+spec_version: 0.1
+name: demo_field
+kind: scene
+
+description: >
+  A 20x20 m open field with four corner points, a raised background noise floor
+  and a declared (unsourced) GNSS quality. The world half of the demo triple.
+
+arena:
+  type: box
+  extent: {x: 20.0, y: 20.0, z: 5.0}
+  surface_reflectivity: low
+  boundaries: {north: open, south: open, east: open, west: open}
+
+# The contested-environment BACKGROUND belongs to the scene: it is a property of
+# the world, not of any agent. Every physical quantity carries provenance; these
+# are declared free parameters (empty source) until measured — counted, flagged,
+# never invented. This is the block the Console's "Contested" tab will read.
+background:
+  propagation:
+    path_loss_exponent: {value: 2.8, unit: "", source: ""}
+    noise_floor: {value: -95.0, unit: dBm, source: ""}
+  spectrum:
+    band: {value: 2400.0, unit: MHz, source: ""}
+  gnss:
+    quality: {value: 1.0, unit: "fraction 0-1", source: ""}
+  wind:
+    speed: {value: 0.0, unit: "m/s", source: ""}
+
+points:
+  A: {x: -8.0, y:  8.0, z: 0.0}
+  B: {x:  8.0, y:  8.0, z: 0.0}
+  C: {x: -8.0, y: -8.0, z: 0.0}
+  D: {x:  8.0, y: -8.0, z: 0.0}

@@ -21,13 +21,20 @@ Console never notices the difference.
 import argparse
 import json
 import math
+import os
+import re
 import sys
 import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SCENARIO = REPO_ROOT / "scenarios" / "three_car_fleet.yaml"
+DEFAULT_SCENARIO = REPO_ROOT / "default_run.yaml"
 RATE_HZ = 10.0
+
+# Keeps a shuttle lane off the literal wall. Shared by mission_target()'s
+# default endpoints AND validate_objective()'s bounds check, so "in bounds"
+# means the same thing everywhere in this file - see docs/PATCH-07-CHECKS.md.
+WALL_MARGIN_M = 0.6
 
 
 def _num(v, default=0.0):
@@ -46,6 +53,44 @@ def wrap_pi(a):
 
 
 # ---------------------------------------------------------------------------
+# Coordinate grammar for the terminal: (x,y) or (x,y,z), field-grid style.
+# ---------------------------------------------------------------------------
+
+_POS_TOKEN_RE = re.compile(r"\([^)]*\)|\S+")
+
+
+def _tokenize_args(text):
+    """Split a retask argument string into tokens, keeping a parenthesized
+    coordinate like '(-3, 3, 0)' as ONE token even though it has spaces in
+    it. Anything else splits on whitespace exactly like str.split() would.
+    """
+    return _POS_TOKEN_RE.findall(text)
+
+
+def _parse_position_token(tok):
+    """A bare word is a point name; '(x,y[,z])' is an absolute literal.
+
+    Returns the token unchanged (str) for a point name - resolved later
+    against the map's points - or a {"x","y","z"} dict for a literal, with z
+    defaulting to 0.0 when only two numbers are given. Raises ValueError on
+    a malformed parenthesized token, so the caller rejects the whole command
+    rather than silently mis-parsing it.
+    """
+    if tok.startswith("("):
+        inner = tok.strip("()")
+        parts = [p.strip() for p in inner.split(",")]
+        if len(parts) not in (2, 3):
+            raise ValueError(f"'{tok}' needs (x,y) or (x,y,z)")
+        try:
+            x, y = float(parts[0]), float(parts[1])
+            z = float(parts[2]) if len(parts) == 3 else 0.0
+        except ValueError:
+            raise ValueError(f"'{tok}' is not a valid coordinate")
+        return {"x": x, "y": y, "z": z}
+    return tok
+
+
+# ---------------------------------------------------------------------------
 # Scenario
 # ---------------------------------------------------------------------------
 
@@ -55,93 +100,136 @@ def _load_yaml(path):
         return yaml.safe_load(fh) or {}
 
 
-def resolve_mission(path):
-    """Read a mission file and merge in its map, if it names one.
+def _base_path(kind, ref):
+    """Turn a bare base name into a path. A fleet name resolves under fleets/,
+    a scene name under scenes/ (maps/ still searched for older files). A path
+    with a suffix or directory is taken as given."""
+    p = Path(ref)
+    if not p.suffix:
+        p = p.with_suffix(".yaml")
+    if p.is_absolute():
+        return p
+    if p.parent != Path("."):
+        return REPO_ROOT / p
+    if kind == "fleet":
+        cand = REPO_ROOT / "fleets" / p
+        return cand if cand.exists() else (REPO_ROOT / p)
+    # kind == "scene"
+    cand = REPO_ROOT / "scenes" / p
+    return cand if cand.exists() else (REPO_ROOT / "maps" / p)
 
-    A mission file describes WHAT the agents are doing (their objectives). It
-    MAY carry the world inline - arena, agents, radios - exactly as the old
-    scenario files did, and then it is self-contained. OR it may say
 
-        map: lab_box
+def _overlay(base, doc):
+    """Overlay one layer (`doc`) onto a resolved base dict.
 
-    and the world is read from maps/lab_box.yaml instead, so the same mission
-    can be dropped onto any map. The merge rule is simple and one-directional:
-    the MAP owns the world (arena, radios, and each agent's body and spawn); the
-    MISSION owns the objectives (each agent's `mission:` block) and may add
-    points of interest. Where a mission also specifies world keys, the mission
-    wins - so a mission can nudge a map without editing it.
+    One merge rule serves every layer of scene < fleet < mission: the upper
+    layer's top-level keys win, EXCEPT agents, which are merged per-id so the
+    lower layer keeps each agent's body and the upper layer supplies whatever it
+    adds (a fleet introduces the agents onto a bare scene; a mission adds
+    objectives). A top-level `objectives:` map keyed by agent id is translated
+    into each agent's `mission:` block, so a file can speak in objectives while
+    the machinery underneath is unchanged (`do:` becomes `type:`).
 
-    Everything downstream still receives one merged dict shaped exactly like the
-    old scenario, so nothing else in the pipeline had to change.
+    Agents the upper layer names that the base does not have are surfaced
+    loudly rather than dropped: a fleet defining agents on an agent-less scene
+    is the normal case (kept, silent); a mission naming an agent its fleet does
+    not have is almost always a typo (kept, warned).
     """
-    doc = _load_yaml(path)
-    # SCENE is the term: the world a mission is dropped into. `map:` is kept as
-    # a silent alias so nothing already written breaks.
-    map_ref = doc.get("scene") or doc.get("map")
-    if not map_ref:
-        return doc                          # self-contained: the old shape
-
-    map_path = Path(map_ref)
-    if not map_path.suffix:
-        map_path = map_path.with_suffix(".yaml")
-    if not map_path.is_absolute():
-        # A bare name means scenes/<name>.yaml (maps/ still searched for older
-        # files); a path is taken as given.
-        if map_path.parent == Path("."):
-            cand = REPO_ROOT / "scenes" / map_path
-            map_path = cand if cand.exists() else (REPO_ROOT / "maps" / map_path)
-        else:
-            map_path = REPO_ROOT / map_path
-    world_doc = _load_yaml(map_path)
-
-    merged = dict(world_doc)                 # start from the scene's world
-    # The mission's own top-level keys win, EXCEPT agents, which are merged
-    # per-id so the scene keeps the bodies and the mission supplies the objectives.
+    merged = dict(base)
     for key, val in doc.items():
-        if key in ("map", "scene", "agents"):
+        if key in ("map", "scene", "fleet", "agents"):
             continue
         merged[key] = val
 
-    map_agents = {a.get("id"): a for a in (world_doc.get("agents") or [])}
-    mission_agents = {a.get("id"): a for a in (doc.get("agents") or [])}
+    base_agents = {a.get("id"): a for a in (base.get("agents") or [])}
+    doc_agents = {a.get("id"): a for a in (doc.get("agents") or [])}
 
-    # A mission may task agents two ways. The preferred, readable one is a top-
-    # level `objectives:` map keyed by agent id, each value {do: <verb>, ...}.
-    # That is translated here into the per-agent `mission:` block the rest of
-    # the pipeline already understands, so the file speaks in objectives and the
-    # machinery underneath is unchanged. `do:` becomes `type:`.
     for aid, obj in (doc.get("objectives") or {}).items():
         if not isinstance(obj, dict):
             continue
         block = {("type" if k == "do" else k): v for k, v in obj.items()}
         block.setdefault("type", "static")
-        mission_agents.setdefault(aid, {"id": aid})["mission"] = block
+        doc_agents.setdefault(aid, {"id": aid})["mission"] = block
 
     out_agents = []
-    for aid, body in map_agents.items():
+    seen = set()
+    for aid, body in base_agents.items():
         agent = dict(body)
-        task = mission_agents.get(aid)
+        task = doc_agents.get(aid)
         if task:
             for k, v in task.items():
                 if k == "id":
                     continue
-                agent[k] = v                 # objective (and any override) wins
+                agent[k] = v
         out_agents.append(agent)
-    # Agents the mission names that the map does not have are an error worth
-    # surfacing loudly rather than silently dropping.
-    for aid in mission_agents:
-        if aid not in map_agents:
-            print(f"mission names agent '{aid}' with no body in the map "
-                  f"'{map_ref}' - it will not appear", file=sys.stderr)
+        seen.add(aid)
+    for aid, task in doc_agents.items():
+        if aid in seen:
+            continue
+        if base_agents:
+            print(f"layer names agent '{aid}' not present in its base "
+                  f"- adding it", file=sys.stderr)
+        out_agents.append(dict(task, id=aid))
     merged["agents"] = out_agents
     return merged
 
 
+def resolve_mission(path):
+    """Read a file and merge in whatever it sits on, producing one flat dict
+    shaped exactly like the old self-contained scenario.
+
+    Three layers (see docs/vocabulary.md), composed by the top one:
+
+        scene    - the world only: arena, radio medium, points. Terminal.
+        fleet    - the agents: bodies, sensors, radios, networks, authority.
+                   Carries no scene of its own.
+        mission  - the command: names `scene:` AND `fleet:`, then issues
+                   objectives (or a fleet-wide order at runtime).
+
+    Merge order is scene, then fleet, then the file itself, so a mission can
+    nudge either lower layer without editing it. A file that names no base is
+    self-contained - the old shape, world+fleet+tasking in one file - and is
+    returned unchanged, so every legacy file still loads. `map:` remains a
+    silent alias for `scene:`. Everything downstream receives one merged dict,
+    so nothing else in the pipeline had to change.
+    """
+    return resolve_doc(_load_yaml(path))
+
+
+def resolve_doc(doc):
+    """resolve_mission for an in-memory dict - the Console's Setup tab
+    composes a run as {scene: ..., fleet: ..., agents: [pose overrides]}
+    without a file ever existing."""
+    scene_ref = doc.get("scene") or doc.get("map")
+    fleet_ref = doc.get("fleet")
+    if not scene_ref and not fleet_ref:
+        return doc                          # self-contained: the old shape
+    base = {}
+    if scene_ref:
+        base = resolve_mission(_base_path("scene", scene_ref))
+    if fleet_ref:
+        base = _overlay(base, resolve_mission(_base_path("fleet", fleet_ref)))
+    return _overlay(base, doc)
+
+
 def load_scenario(path):
-    doc = resolve_mission(path)
+    """Accepts a path, or an already-composed dict (the Setup flow)."""
+    doc = resolve_doc(dict(path)) if isinstance(path, dict) \
+        else resolve_mission(path)
 
     arena = doc.get("arena") or {}
     extent = arena.get("extent") or {}
+
+    # lat/lon/alt of this scene's local (0,0,0) - a schema seam only, no
+    # conversion happens yet. See docs/maps-missions-and-retasking.md.
+    origin_doc = arena.get("origin")
+    origin = None
+    if origin_doc:
+        origin = {"lat": _num(origin_doc.get("lat")),
+                  "lon": _num(origin_doc.get("lon")),
+                  "alt": _num(origin_doc.get("alt")),
+                  "heading": _num(origin_doc.get("heading"))}
+
     world = {
         "type": arena.get("type", "box"),
         "extent": {k: _num(extent.get(k), 8.0) for k in ("x", "y", "z")},
@@ -159,6 +247,7 @@ def load_scenario(path):
         # Networks, carried so command_authority() can read each one's
         # architecture while building a frame.
         "networks": doc.get("networks") or {},
+        "origin": origin,
     }
 
     agents = []
@@ -184,6 +273,18 @@ def load_scenario(path):
             "start": {"x": _num(pose.get("x")), "y": _num(pose.get("y")),
                       "z": _num(pose.get("z")), "yaw": _num(pose.get("yaw"))},
             "mission": a.get("mission") or {"type": "static"},
+            # Assigning an objective never arms it - only LAUNCH/HALT do. See
+            # "The state machine" in docs/PATCH-07-CHECKS.md.
+            "armed": False,
+            "last_rejection": None,
+            # The sim time this agent's CURRENT objective became active -
+            # reset on every (re)launch and every (re)assignment. shuttle/
+            # patrol/orbit phase is measured from t - phase_t0, never from
+            # raw absolute t, so an agent armed at t=30s starts its cycle
+            # cleanly from that moment instead of jumping to wherever a
+            # 30-second-old clock would put it. See "Bug fix: the launch
+            # hiccup" in docs/PATCH-07-CHECKS.md.
+            "phase_t0": 0.0,
             "ghost": bool(a.get("ghost", False)),
             "speed": _num((a.get("performance") or {}).get("max_speed"), 1.5),
         })
@@ -191,6 +292,19 @@ def load_scenario(path):
     for a in agents:
         # One collision radius per agent, from its own footprint.
         a["radius"] = max(a["dimensions"]["length"], a["dimensions"]["width"]) / 2.0
+
+    # A scene or a legacy self-contained scenario can bake a mission straight
+    # onto an agent. Validate it exactly like a live REOBJECTIVE would - an
+    # unresolvable or out-of-bounds shuttle at load time gets rejected loudly
+    # and the agent holds static, rather than silently doing the wrong thing
+    # for the whole run. See "Bug fix" in docs/PATCH-07-CHECKS.md.
+    for a in agents:
+        ok, err = validate_objective(a["mission"], world["points"], world)
+        if not ok:
+            print(f"{a['id']}: initial objective rejected - {err} - "
+                  f"holding static", file=sys.stderr)
+            a["last_rejection"] = err
+            a["mission"] = {"type": "static"}
 
     # Reachability is EMERGENT, not declared. Every same-network pair is a
     # CANDIDATE; whether it is usable is decided each tick by the RF model, and
@@ -230,6 +344,10 @@ _SCRIPTS = {}
 # subscriber gets: you act on the reading you have, not the one that has not
 # happened yet. A mission written against this will behave the same on a car.
 _LAST_SCANS = {}
+
+# The mission NAME set by the last successful SETMISSION, carried into every
+# frame so results and bags can be titled by mission. None until one is set.
+CURRENT_MISSION = {"name": None}
 
 
 class World:
@@ -412,6 +530,74 @@ def load_mission_script(path):
     return mod
 
 
+def resolve_waypoint(spec, points):
+    """Turn a waypoint spec into (ok, x, y, z, error). No fallback, ever.
+
+    `spec` is a point name (str, looked up in `points`) or a {x, y[, z]}
+    dict - a literal coordinate, from YAML or the retask grammar's
+    `(x,y[,z])` parser. This is the fix for the bug where an unresolved
+    point silently substituted the arena half-width: the caller decides
+    what "no valid waypoint" means, and it is never this function's job to
+    make one up.
+    """
+    if isinstance(spec, str):
+        p = (points or {}).get(spec)
+        if p is None:
+            return False, 0.0, 0.0, 0.0, f"no point '{spec}' on this map"
+        return True, _num(p.get("x")), _num(p.get("y")), _num(p.get("z")), None
+    if isinstance(spec, dict):
+        return True, _num(spec.get("x")), _num(spec.get("y")), _num(spec.get("z")), None
+    return False, 0.0, 0.0, 0.0, f"not a point name or coordinate: {spec!r}"
+
+
+def _in_bounds(x, y, arena):
+    """Is (x, y) inside the arena, with the same wall clearance
+    mission_target()'s own shuttle defaults use? Returns (ok, hx, hy) so a
+    caller can report the usable range, not just pass/fail."""
+    hx = arena["extent"]["x"] / 2 - WALL_MARGIN_M
+    hy = arena["extent"]["y"] / 2 - WALL_MARGIN_M
+    return (-hx <= x <= hx and -hy <= y <= hy), hx, hy
+
+
+def validate_objective(mission_dict, points, arena):
+    """Can this objective actually be ACCEPTED onto an agent right now?
+
+    Checked at the moment an objective is set - REOBJECTIVE, SETMISSION,
+    or the initial scene+mission merge - never at tick time.
+    Only 'shuttle' has anything to check today: its endpoints must resolve
+    (named point exists, or a literal was given) AND land inside the arena.
+    Every other objective type is accepted as-is. See "Bug fix" and
+    "Out-of-bounds decisions" in docs/PATCH-07-CHECKS.md.
+    """
+    if not isinstance(mission_dict, dict):
+        return False, "not an objective"
+    if mission_dict.get("type") != "shuttle":
+        return True, None
+
+    between = mission_dict.get("between")
+    if isinstance(between, (list, tuple)) and len(between) == 2:
+        specs = list(between)
+    else:
+        specs = [mission_dict.get("from"), mission_dict.get("to")]
+        if specs[0] is None and specs[1] is None:
+            return True, None      # no endpoints given yet; nothing to check
+
+    resolved = []
+    for spec in specs:
+        ok, x, y, z, err = resolve_waypoint(spec, points)
+        if not ok:
+            return False, err
+        resolved.append((x, y, z))
+
+    for x, y, _z in resolved:
+        ok, hx, hy = _in_bounds(x, y, arena)
+        if not ok:
+            return False, (f"endpoint ({x:.2f}, {y:.2f}) is outside the "
+                           f"arena - usable range is x ±{hx:.2f} m, "
+                           f"y ±{hy:.2f} m")
+    return True, None
+
+
 def mission_target(agent, t, poses, arena):
     """Where the mission WANTS this agent to be at time t.
 
@@ -425,8 +611,16 @@ def mission_target(agent, t, poses, arena):
     kind = m.get("type", "static")
     start = agent["start"]
     speed = max(agent["speed"], 0.05)
-    hx = arena["extent"]["x"] / 2 - 0.6
-    hy = arena["extent"]["y"] / 2 - 0.6
+    hx = arena["extent"]["x"] / 2 - WALL_MARGIN_M
+    hy = arena["extent"]["y"] / 2 - WALL_MARGIN_M
+    # Cyclic objectives (shuttle/patrol/orbit) measure their phase from HERE,
+    # not from the run's absolute clock - phase_t0 resets to "now" on every
+    # (re)launch and every (re)assignment (see drain_retasks). Without this,
+    # an agent armed at t=30s computes its phase as if it had been shuttling
+    # since t=0, so its target snaps to wherever a 30-second-old cycle would
+    # be - often nowhere near where the agent actually is - and it lurches
+    # off to catch up before settling into the real oscillation.
+    t_eff = t - _num(agent.get("phase_t0"))
 
     if kind == "script":
         # A researcher's own file decides. Errors are reported, not swallowed:
@@ -446,30 +640,33 @@ def mission_target(agent, t, poses, arena):
         # are what make the objective portable: the same "shuttle between A and
         # B" runs on any map that defines A and B. Raw coordinates still work
         # for a one-off welded to this arena.
+        #
+        # Objectives are VALIDATED (named points resolve, endpoints are in
+        # bounds) at the moment they are ASSIGNED - see validate_objective().
+        # What follows is a defence-in-depth backstop only, for a path that
+        # somehow skipped that gate: on failure it holds the agent at its
+        # CURRENT pose, never a fabricated point (the arena half-width used
+        # to sneak in here silently - that was the bug), and warns once per
+        # agent rather than every tick.
         pts = arena.get("points") or {}
-
-        def _resolve(spec, fallback):
-            if isinstance(spec, str):            # a point name like "A"
-                p = pts.get(spec)
-                if p is None:
-                    print(f"objective for {agent['id']}: no point '{spec}' on "
-                          f"this map", file=sys.stderr)
-                    return fallback
-                return (p["x"], p["y"])
-            if isinstance(spec, dict):           # raw {x, y}
-                return (_num(spec.get("x")), _num(spec.get("y")))
-            return fallback
-
         between = m.get("between")
-        if isinstance(between, (list, tuple)) and len(between) == 2:
-            ax, ay = _resolve(between[0], (-hx, start["y"]))
-            bx, by = _resolve(between[1], (hx, start["y"]))
-        else:
-            ax, ay = _resolve(m.get("from"), (-hx, start["y"]))
-            bx, by = _resolve(m.get("to"), (hx, start["y"]))
+        specs = (list(between) if isinstance(between, (list, tuple))
+                 and len(between) == 2 else [m.get("from"), m.get("to")])
+
+        ok_a, ax, ay, _az, err_a = resolve_waypoint(specs[0], pts)
+        ok_b, bx, by, _bz, err_b = resolve_waypoint(specs[1], pts)
+        if not (ok_a and ok_b):
+            if not agent.get("_warned_bad_shuttle"):
+                agent["_warned_bad_shuttle"] = True
+                print(f"objective for {agent['id']}: {err_a or err_b} - "
+                      f"holding position, not the arena edge", file=sys.stderr)
+            here = poses.get(agent["id"]) or start
+            return (here["x"], here["y"])
+        agent["_warned_bad_shuttle"] = False
+
         leg = math.hypot(bx - ax, by - ay) or 1.0
         period = 2.0 * leg / speed
-        phase = ((t + _num(m.get("offset"))) % period) / period
+        phase = ((t_eff + _num(m.get("offset"))) % period) / period
         u = phase * 2.0 if phase < 0.5 else (1.0 - phase) * 2.0
         return (ax + (bx - ax) * u, ay + (by - ay) * u)
 
@@ -480,7 +677,7 @@ def mission_target(agent, t, poses, arena):
         pts = [(_num(w.get("x")), _num(w.get("y"))) for w in wps]
         segs = [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
         lengths = [math.dist(a, b) for a, b in segs]
-        d = (t * speed + _num(m.get("offset"))) % (sum(lengths) or 1.0)
+        d = (t_eff * speed + _num(m.get("offset"))) % (sum(lengths) or 1.0)
         for (p0, p1), L in zip(segs, lengths):
             if d <= L:
                 u = d / (L or 1.0)
@@ -499,7 +696,7 @@ def mission_target(agent, t, poses, arena):
     if kind == "orbit":
         r = _num(m.get("radius"), 2.0)
         period = max(2.0 * math.pi * r / speed, 1.0)
-        ang = 2.0 * math.pi * (t / period) + _num(m.get("phase"))
+        ang = 2.0 * math.pi * (t_eff / period) + _num(m.get("phase"))
         return (r * math.cos(ang), r * math.sin(ang))
 
     return (start["x"], start["y"])
@@ -560,7 +757,11 @@ def step(agents, poses, t, dt, arena):
     for a in agents:
         p = poses[a["id"]]
         px0, py0 = p["x"], p["y"]
-        if a["mission"].get("type", "static") == "static":
+        # Unarmed means idle regardless of what the objective is - this is
+        # the assign/inspect/launch gate. An armed agent with a static
+        # objective is already covered by the same check.
+        if (a["mission"].get("type", "static") == "static"
+                or not a.get("armed", False)):
             p["speed"] = 0.0
             continue
         # Look one tick AHEAD. Without this the target advances at exactly the
@@ -927,6 +1128,15 @@ def apply_routing(links, agents, networks, poses):
         else:
             active = True
 
+        # No interference_mw passed - every link is scored as if it were
+        # the only transmission in the air. Self-jamming (a dense fleet's
+        # OWN transmitters raising each other's noise floor, separate from
+        # any external jammer) is real and not modelled yet: this is the
+        # hook for it later, deliberately not built now - sum the received
+        # power at (a, b) from every OTHER currently-active same-spectrum
+        # transmitter and pass it here as interference_mw. rf_link() already
+        # takes the parameter; nothing about this loop needs to change to
+        # wire it in, since every link is already scored independently.
         state = rf_link(poses[a], poses[b])
         out.append({**l, **state,
                     "routing": routing,
@@ -1127,6 +1337,9 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # "pursue car3" rather than a bare "pursuit" - and so a retask is
             # visible in the tree the moment it takes effect.
             "objective": a["mission"],
+            # Assigned vs active - the whole point of this patch. An agent
+            # can hold a fully-formed objective and still not be armed.
+            "armed": bool(a.get("armed", False)),
             # Who decides for this agent right now, and whether they are
             # reachable. This is what makes 'architecture' a behaviour rather
             # than a label in a file.
@@ -1142,7 +1355,9 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
                 for s in a["sensors"]
             ],
             "health": {"ok": True,
-                       "warnings": [w for i, w in contacts if i == a["id"]]},
+                       "warnings": [w for i, w in contacts if i == a["id"]] +
+                                   ([a["last_rejection"]] if a.get("last_rejection")
+                                    else [])},
         })
 
     # Keep the scans so the next tick's missions can read them. See _LAST_SCANS.
@@ -1156,6 +1371,7 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         "sim_time_s": round(t, 3),
         "wall_time": time.time(),
         "run_state": "running",
+        "mission": CURRENT_MISSION["name"],
         "arena": arena,
         "agents": agents_out,
         "links": links_out,
@@ -1167,6 +1383,40 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     }
 
 
+def _parse_objective_verb(verb, args):
+    """The verb+args grammar behind an agent-scoped REOBJECTIVE (via
+    parse_retask, below): turns 'shuttle A B', 'pursue car3', etc. into a
+    mission dict.
+
+    Returns the mission dict, or None for a verb this grammar does not know
+    (the caller reports that). Raises ValueError on a malformed coordinate
+    literal, so the caller can reject the whole command explicitly rather
+    than silently mis-parsing it.
+    """
+    verb = verb.lower()
+    if verb in ("stop", "static", "hold"):
+        return {"type": "static"}
+    if verb in ("pursuit", "pursue"):
+        return {"type": "pursuit", "target": args[0] if args else "car1"}
+    if verb == "shuttle":
+        # 'shuttle between A B', 'shuttle A B', or literal points:
+        # 'shuttle (-3,3,0) (3,3,0)', 'shuttle A (3,2,0)' (named + literal mix)
+        toks = [p for p in args if p.lower() != "between"]
+        if len(toks) >= 2:
+            return {"type": "shuttle",
+                    "between": [_parse_position_token(toks[0]),
+                                _parse_position_token(toks[1])]}
+        return {"type": "shuttle"}
+    if verb in ("wall_follow", "wall"):
+        return {"type": "script", "file": "missions/wall_follow.py",
+                "side": args[0] if args else "right"}
+    if verb == "orbit":
+        return {"type": "orbit", "radius": float(args[0]) if args else 2.0}
+    if verb == "script":
+        return {"type": "script", "file": args[0]} if args else None
+    return None
+
+
 def parse_retask(text, agents_by_id):
     """Turn a line like 'car3: pursue car1' into a new objective dict.
 
@@ -1174,73 +1424,241 @@ def parse_retask(text, agents_by_id):
 
         car3: pursue car1
         car3: shuttle between E F
+        car3: shuttle (-3,3,0) (3,3,0)
         car3: wall_follow right
         car3: stop                 (alias for static - hold position)
         car3: script missions/return_on_link_loss.py
 
     Returns (agent_id, mission_dict) or None if it does not parse. Kept
     forgiving on purpose: a fat-fingered command should be ignored with a note,
-    never crash a running mission.
+    never crash a running mission. Note this only PARSES the objective - it is
+    not validated against the map here; see validate_objective() and
+    drain_retasks() below, which is what actually decides whether it takes
+    effect.
     """
     if ":" not in text:
         return None
     aid, rest = text.split(":", 1)
-    aid, parts = aid.strip(), rest.split()
+    aid, parts = aid.strip(), _tokenize_args(rest)
     if aid not in agents_by_id or not parts:
         return None
-    verb, args = parts[0].lower(), parts[1:]
-
-    if verb in ("stop", "static", "hold"):
-        return aid, {"type": "static"}
-    if verb == "pursuit" or verb == "pursue":
-        return aid, {"type": "pursuit", "target": args[0] if args else "car1"}
-    if verb == "shuttle":
-        # 'shuttle between A B' or 'shuttle A B'
-        pts = [p for p in args if p.lower() != "between"]
-        if len(pts) >= 2:
-            return aid, {"type": "shuttle", "between": [pts[0], pts[1]]}
-        return aid, {"type": "shuttle"}
-    if verb in ("wall_follow", "wall"):
-        return aid, {"type": "script", "file": "missions/wall_follow.py",
-                     "side": args[0] if args else "right"}
-    if verb == "orbit":
-        return aid, {"type": "orbit",
-                     "radius": float(args[0]) if args else 2.0}
-    if verb == "script":
-        return aid, {"type": "script", "file": args[0]} if args else None
-    # Bare verb we do not know: report it, change nothing.
-    print(f"retask: don't understand '{verb}' for {aid}", file=sys.stderr)
-    return None
+    verb, args = parts[0], parts[1:]
+    try:
+        block = _parse_objective_verb(verb, args)
+    except ValueError as exc:
+        print(f"retask: {exc}", file=sys.stderr)
+        return None
+    if block is None:
+        print(f"retask: don't understand '{verb}' for {aid}", file=sys.stderr)
+        return None
+    return aid, block
 
 
-def drain_retasks(retask_dir, agents_by_id):
-    """Apply any pending retask commands and return a list of what changed.
+# ---------------------------------------------------------------------------
+# SETMISSION - the run's mission: a file of per-agent objectives applied as
+# one command, gated by command authority. See "SETMISSION"
+# in docs/PATCH-07-CHECKS.md for the full reasoning; summary here.
+# ---------------------------------------------------------------------------
 
-    A command is one line in a file dropped into retask_dir (or appended to
-    retask_dir/queue). Reading a file consumes it, so a command fires once.
-    File-based rather than a socket because the same channel then works from a
-    terminal (`echo 'car3: pursue car1' > retask/queue`), from the Console, and
-    later from a ROS service, with no protocol to agree on.
+def apply_mission_file(path, agents_by_id, points, arena,
+                       links=None, poses=None):
+    """SETMISSION: distribute a mission file's per-agent objectives onto the
+    currently running agent set, gated by command authority.
+
+    A mission is a COMMAND, and a command has to reach an agent to task it:
+    when `links`/`poses` are given, each agent's decider chain is checked with
+    command_authority(), and an agent its decider cannot currently reach is
+    SKIPPED (reported, mission unchanged) rather than silently retasked. This
+    keeps the property REMISSION existed for - contested comms gate what you
+    can command - inside the one remaining order verb. Pass links/poses as
+    None to apply verbatim (pre-run, nothing is jammed yet).
+
+    Returns (changed, messages, mission_name).
+    """
+    try:
+        doc = _load_yaml(path)
+    except OSError as exc:
+        return [], [f"SETMISSION: cannot read {path}: {exc}"], None
+
+    mission_name = doc.get("name") or Path(path).stem
+    networks = (arena or {}).get("networks") or {}
+    changed, messages = [], []
+    for aid, obj in (doc.get("objectives") or {}).items():
+        if not isinstance(obj, dict):
+            continue
+        block = {("type" if k == "do" else k): v for k, v in obj.items()}
+        block.setdefault("type", "static")
+        if aid not in agents_by_id:
+            messages.append(f"SETMISSION: '{aid}' is not in the running "
+                            f"scene - it will not appear")
+            continue
+        if links is not None and poses is not None:
+            auth = command_authority(agents_by_id[aid], arena, links, poses,
+                                     networks)
+            if not auth.get("reachable", True):
+                messages.append(
+                    f"SETMISSION: {aid} unreachable (decider "
+                    f"{auth.get('decider')}) - not retasked")
+                continue
+        ok, err = validate_objective(block, points, arena)
+        if not ok:
+            messages.append(f"SETMISSION: {aid} rejected - {err}")
+            agents_by_id[aid]["last_rejection"] = err
+            continue
+        agents_by_id[aid]["mission"] = block
+        agents_by_id[aid]["last_rejection"] = None
+        changed.append((aid, block))
+    return changed, messages, mission_name
+
+
+def _resolve_scope(token, agents_by_id, networks):
+    """A LAUNCH/HALT scope: a network name, or an agent id. (None, None) if
+    it's neither."""
+    if token in (networks or {}):
+        return "network", token
+    if token in agents_by_id:
+        return "agent", token
+    return None, None
+
+
+def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
+    """Apply any pending commands from the retask queue and return what
+    changed.
+
+    A command is one file, `cmd_*.txt`, one line, in retask_dir - see
+    "Bug fix: the retask race" in docs/PATCH-08-CHECKS.md for why it isn't
+    one shared file any more. Claiming a file (by renaming it) consumes it,
+    so a command fires once. File-based rather than a socket because the
+    same channel then works from a terminal, from the Console, and later
+    from a ROS service, with no protocol to agree on. `t` is the current
+    sim time - every place an objective is (re)assigned or an agent is
+    (re)armed also resets that agent's `phase_t0` to it, so a shuttle/
+    patrol/orbit phase is always measured from "since this became active,"
+    never from the run's absolute clock - see "Bug fix: the launch hiccup"
+    in docs/PATCH-07-CHECKS.md. Recognises, per line:
+
+        <agent>: <verb> <args>      REOBJECTIVE, one agent (parse_retask)
+        LAUNCH <network-or-agent>   arm - see "The state machine"
+        HALT <network-or-agent>     un-arm, freezes at current pose
+        SETMISSION <name-or-path>   set the run's mission: apply the file's
+                                    objectives, gated by command authority
+                                    (an unreachable agent is not retasked),
+                                    and title the run with its name
     """
     changed = []
     if not retask_dir.exists():
         return changed
-    queue = retask_dir / "queue"
+
+    # ONE FILE PER COMMAND, not one shared file. A shared file that the
+    # Console appends to and this function reads-then-clears is a genuine
+    # cross-process race on Windows: Python's open() doesn't request
+    # FILE_SHARE_DELETE, so while the Console's handle is open (even
+    # briefly) THIS function's attempt to claim the file by renaming it can
+    # fail outright - and failing to claim it meant reading nothing that
+    # poll, not even commands already sitting there from earlier. That
+    # failure used to be swallowed silently (`except OSError: pass`), which
+    # is exactly the class of bug this whole patch series exists to
+    # remove: it looked like "type it again and it works," but what
+    # actually happened was several appends piling up unread until a LATER
+    # poll finally got in and processed all of them together - which is
+    # also why a mistyped command could ride along with its correction.
+    #
+    # One file per command removes the contention instead of racing it: the
+    # Console never reopens an existing path (each command gets a brand new
+    # filename, written to a temp name and atomically renamed into place),
+    # so nothing here is ever contending with a writer that still has the
+    # file open. A claim failure is now genuinely rare, and NEVER silent -
+    # see the print() below - and a file that fails to be claimed is left
+    # in place for the next poll rather than lost.
     lines = []
-    if queue.exists():
+    for path in sorted(retask_dir.glob("cmd_*.txt")):
+        pending = retask_dir / f"{path.name}.{os.getpid()}.reading"
         try:
-            lines = queue.read_text(encoding="utf-8").splitlines()
-            queue.unlink()                    # consume: each command fires once
-        except OSError:
-            pass
+            path.rename(pending)
+        except OSError as exc:
+            print(f"drain_retasks: could not claim {path.name}: {exc}",
+                  file=sys.stderr)
+            continue
+        try:
+            lines += pending.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            print(f"drain_retasks: could not read {pending.name}: {exc}",
+                  file=sys.stderr)
+        finally:
+            try:
+                pending.unlink()
+            except OSError as exc:
+                print(f"drain_retasks: could not remove {pending.name}: "
+                      f"{exc}", file=sys.stderr)
+
+    networks = (arena or {}).get("networks") or {}
+    points = (arena or {}).get("points") or {}
+
     for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        head = line.split(None, 1)
+        verb0 = head[0].upper() if head else ""
+
+        if verb0 in ("LAUNCH", "HALT") and len(head) == 2:
+            scope_kind, scope = _resolve_scope(head[1], agents_by_id, networks)
+            if scope_kind is None:
+                print(f"{verb0}: '{head[1]}' is not a network or agent id",
+                      file=sys.stderr)
+                continue
+            armed = verb0 == "LAUNCH"
+            if scope_kind == "network":
+                # Ground stations aren't vehicles, so a network-wide
+                # LAUNCH/HALT does too now, for the same reason. Naming one
+                # explicitly (`gcs launch`) still works - that's a deliberate
+                # per-agent action, not this bulk one.
+                targets = [a for a in agents_by_id.values()
+                          if a["network"] == scope
+                          and a.get("platform") != "ground_station"]
+            else:
+                targets = [agents_by_id[scope]]
+            for a in targets:
+                a["armed"] = armed
+                if armed:
+                    # Start cleanly from now, not from wherever the run's
+                    # absolute clock happens to be - see the docstring above.
+                    a["phase_t0"] = t
+            print(f"{verb0}: {scope} ({len(targets)} agent"
+                  f"{'s' if len(targets) != 1 else ''})", file=sys.stderr)
+            continue
+
+        if verb0 == "SETMISSION" and len(head) == 2:
+            ref = head[1].strip()
+            mpath = Path(ref)
+            if mpath.parent == Path(".") and not mpath.suffix:
+                mpath = REPO_ROOT / "missions" / f"{ref}.yaml"
+            elif not mpath.is_absolute():
+                mpath = REPO_ROOT / mpath
+            file_changed, messages, mission_name = apply_mission_file(
+                mpath, agents_by_id, points, arena, links=links, poses=poses)
+            for msg in messages:
+                print(msg, file=sys.stderr)
+            if mission_name and file_changed:
+                CURRENT_MISSION["name"] = mission_name
+                print(f"SETMISSION: mission '{mission_name}' set "
+                      f"({len(file_changed)} agents tasked)", file=sys.stderr)
+            for aid, _mission in file_changed:
+                agents_by_id[aid]["phase_t0"] = t
+            changed += file_changed
+            continue
+
         result = parse_retask(line, agents_by_id)
         if result:
             aid, block = result
+            ok, err = validate_objective(block, points, arena)
+            if not ok:
+                print(f"retask: {aid} rejected - {err}", file=sys.stderr)
+                agents_by_id[aid]["last_rejection"] = err
+                continue
             agents_by_id[aid]["mission"] = block
+            agents_by_id[aid]["last_rejection"] = None
+            agents_by_id[aid]["phase_t0"] = t
             changed.append((aid, block))
     return changed
 
@@ -1275,7 +1693,8 @@ def stream(arena, agents, links, duration=None, out=sys.stdout, seed=1,
             # mission dict every tick, swapping that dict here is all it takes -
             # the very next frame the agent is doing the new thing.
             if retask_dir is not None:
-                for aid, block in drain_retasks(retask_dir, agents_by_id):
+                for aid, block in drain_retasks(retask_dir, agents_by_id,
+                                                arena, links, poses, t):
                     print(f"retask: {aid} -> {block.get('type')} "
                           f"{block.get('target') or block.get('between') or block.get('file') or ''}",
                           file=sys.stderr)

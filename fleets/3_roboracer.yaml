@@ -1,0 +1,176 @@
+# =============================================================================
+# Deadband FLEET — 3_roboracer
+# =============================================================================
+# A FLEET is the AGENTS and their wiring, with no world and no tasking: bodies,
+# sensors, radios, the networks they belong to, and each network's authority /
+# routing / squads. It says nothing about WHERE (a scene) or WHAT (a mission).
+# A mission composes the two:  scene: lab_box  +  fleet: 3_roboracer.
+# See docs/vocabulary.md.
+#
+# Will's definition: the fleet configuration.
+#
+# NOTE ON POSES: spawn poses are coordinates, which couples this fleet to
+# scenes shaped like the lab (8x8, lanes at y = +2/0/-2). The portable form -
+# spawning at a scene's named points - is queued; until then this fleet
+# declares the coupling honestly instead of hiding it.
+# =============================================================================
+
+spec_version: 0.1
+name: 3_roboracer
+kind: fleet
+
+description: >
+  The lab fleet as it actually is: three 1:10 RoboRacer cars and a ground
+  station on one centralized 2.4 GHz blue network.
+
+# -----------------------------------------------------------------------------
+# NETWORKS
+# -----------------------------------------------------------------------------
+networks:
+  blue:
+    # AUTHORITY - who decides. centralized | decentralized | hierarchical
+    authority: centralized
+    # ROUTING - how packets travel. star | mesh | tiered
+    # Deliberately a SEPARATE key from authority: a mesh can carry centralized
+    # decision-making, and then the mesh survives the hub dying while the
+    # decision-making does not. That gap is the thing worth measuring.
+    routing: star
+    coordinator: gcs
+    # SQUADS - one, because three cars is what this lab actually has. A squad
+    # is a leader plus members; a leader with nobody to lead is not a squad,
+    # it is a car wired to the coordinator with a label on it. For genuine
+    # two-squad hierarchy see scenes/squad_hall.yaml, which has the agents for
+    # it. This scene stays faithful to the real fleet.
+    squads:
+      alpha: {leader: car1, members: [car2, car3]}
+    topology: centralized      # legacy alias for authority; still read
+    encrypted: true
+    band: 2400                 # MHz
+    qos:
+      reliability: reliable
+      deadline_ms: 100
+
+# -----------------------------------------------------------------------------
+# AGENTS
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# AGENTS
+# -----------------------------------------------------------------------------
+agents:
+
+  - id: gcs
+    platform: ground_station
+    network: blue
+    colour: "#6B7B85"
+    pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
+    dimensions:
+      length: {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
+      width:  {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
+      height: {value: 1.00, unit: m, source: "Nominal - measure the actual bench"}
+    radios: [wifi_2g4]
+    ghost: true                # furniture for now: drawn and visible to lidar,
+                               # but nothing collides with it
+
+  - id: car1
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+      mass:   {value: , unit: kg, source: ""}            # <-- weigh it
+    performance:
+      max_speed:       {value: 1.5, unit: m/s,   source: "Chosen for indoor safety - not a platform limit"}
+      max_accel:       {value: , unit: m/s^2, source: ""}
+      min_turn_radius: {value: , unit: m,     source: ""}
+    sensors:
+      - id: lidar
+        type: ust10lx
+        mount:
+          offset: {x: 0.12, y: 0.0, z: 0.18}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.05}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+    radios: [wifi_2g4]
+    controller: controllers/car1_shuttle.py
+    on_link_loss: hold
+  - id: car2
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #2, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #2, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #2, 2026-07-21"}
+      mass:   {value: , unit: kg, source: ""}
+    performance:
+      max_speed:       {value: 1.5, unit: m/s, source: "Chosen for indoor safety"}
+      max_accel:       {value: , unit: m/s^2, source: ""}
+      min_turn_radius: {value: , unit: m,     source: ""}
+    sensors:
+      - id: lidar
+        type: ust10lx
+        mount:
+          offset: {x: 0.12, y: 0.0, z: 0.18}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.05}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+    radios: [wifi_2g4]
+    controller: controllers/car2_shuttle.py
+    on_link_loss: hold
+  - id: car3
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #3, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #3, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #3, 2026-07-21"}
+      mass:   {value: , unit: kg, source: ""}
+    performance:
+      max_speed:       {value: 1.5, unit: m/s, source: "Chosen for indoor safety"}
+      max_accel:       {value: , unit: m/s^2, source: ""}
+      min_turn_radius: {value: , unit: m,     source: ""}
+    sensors:
+      - id: lidar
+        type: ust10lx
+        mount:
+          offset: {x: 0.12, y: 0.0, z: 0.18}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+      - id: imu
+        type: generic_imu
+        mount:
+          offset: {x: 0.0, y: 0.0, z: 0.05}
+          rpy: {r: 0.0, p: 0.0, y: 0.0}
+    radios: [wifi_2g4]
+    controller: controllers/car3_shuttle.py
+    on_link_loss: hold
+# -----------------------------------------------------------------------------
+# POINTS OF INTEREST — named landmarks a mission can refer to
+# -----------------------------------------------------------------------------
+# The three lanes run left-right at y = +2, 0, -2. A/B top, C/D middle, E/F
+# bottom. A mission says "shuttle between A and B"; this map says where they are.
+
+# -----------------------------------------------------------------------------
+# RADIO DEFINITIONS
+# -----------------------------------------------------------------------------
+radios:
+  wifi_2g4:
+    band:         {value: 2400, unit: MHz, source: "Configured"}
+    tx_power:     {value: , unit: dBm,  source: ""}    # <-- module datasheet
+    sensitivity:  {value: , unit: dBm,  source: ""}    # <-- module datasheet
+    bandwidth:    {value: , unit: MHz,  source: ""}
+    data_rate:    {value: , unit: Mbps, source: ""}
+    antenna_gain: {value: , unit: dBi,  source: ""}
+    link_type: rf_omni

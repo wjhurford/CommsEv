@@ -1,7 +1,7 @@
 """
 Command line entry point.
 
-    python3 -m deadband validate scenarios/lab_box_two_agents.yaml
+    python3 -m deadband validate default_run.yaml
 
 Exit code 0 if the file is structurally valid, 1 if not. Unsourced parameters
 are reported but do NOT fail the check — an honest empty source is a legitimate

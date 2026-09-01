@@ -61,4 +61,4 @@ def load_sim_core():
 
 
 def default_scenario():
-    return str(repo_root() / "scenarios" / "three_car_fleet.yaml")
+    return str(repo_root() / "default_run.yaml")

@@ -1,18 +1,11 @@
 # =============================================================================
-# Deadband MAP — lab_box
+# Deadband SCENE — lab_box
 # =============================================================================
-# A MAP is the WORLD, with no tasking in it: the arena, the radios, the agents'
-# bodies and spawn points, and named POINTS OF INTEREST. It says nothing about
-# what the agents are trying to do - that is a MISSION, and any mission that
-# refers only to points this map defines can be run here.
-#
-# A mission loads a map by name:   map: lab_box   ->   maps/lab_box.yaml
-#
-# POINTS are the bridge that makes a mission portable. A mission says "shuttle
-# between A and B"; this map says where A and B actually are. Drop the same
-# mission on a different map that also defines A and B, and it runs there with
-# no edit. Points are named in UPPER CASE by convention so they read as
-# landmarks, not variables.
+# A SCENE is the WORLD ONLY: the arena, the radio medium and contested
+# background (propagation, spectrum, GNSS, wind), and named POINTS a mission
+# can refer to. NO agents, NO networks, NO tasking — the fleet is a FLEET file
+# (fleets/3_roboracer.yaml) and the tasking is a MISSION (missions/test.yaml).
+# See docs/vocabulary.md.
 #
 # THE PROVENANCE RULE still applies: every physical quantity is {value, unit,
 # source}. An empty source is allowed but counted and flagged. Never invent one.
@@ -22,11 +15,12 @@
 
 spec_version: 0.1
 name: lab_box
-kind: map
-description: >
-  The lab: an 8x8 bounded indoor box, three RoboRacer bodies plus a ground
-  station, one 2.4 GHz network. Points A-F mark the ends of the three lanes.
+kind: scene
 
+description: >
+  The lab: an 8x8 bounded indoor box. Clean spectrum, GNSS denied (indoors).
+  Points A-F mark the ends of the three lanes; HOME is the ground-station
+  bench. The world half of the lab setup - drop a fleet on it with a mission.
 
 # -----------------------------------------------------------------------------
 # ARENA
@@ -73,6 +67,15 @@ arena:
   spectrum:
     model: clean               # the control condition: nothing else transmitting
     background_emitters: []
+    # The resting noise power every receiver integrates - the denominator of
+    # every SINR before anyone transmits, which is why the SCENE owns it:
+    # jamming and congestion are measured as departures from THIS. -95 dBm is
+    # the defensible indoor default rf_link() currently assumes; measuring it
+    # in the actual room replaces the assumption everywhere at once.
+    noise_floor:
+      value: -95
+      unit: dBm
+      source: ""               # <-- NEEDS A MEASUREMENT: spectrum analyser, quiet room
 
   gnss:
     availability: denied       # indoors, no sky view
@@ -83,132 +86,7 @@ arena:
 # -----------------------------------------------------------------------------
 # NETWORKS
 # -----------------------------------------------------------------------------
-networks:
-  blue:
-    # AUTHORITY - who decides. centralized | decentralized | hierarchical
-    authority: centralized
-    # ROUTING - how packets travel. star | mesh | tiered
-    # Deliberately a SEPARATE key from authority: a mesh can carry centralized
-    # decision-making, and then the mesh survives the hub dying while the
-    # decision-making does not. That gap is the thing worth measuring.
-    routing: star
-    coordinator: gcs
-    # SQUADS - one, because three cars is what this lab actually has. A squad
-    # is a leader plus members; a leader with nobody to lead is not a squad,
-    # it is a car wired to the coordinator with a label on it. For genuine
-    # two-squad hierarchy see scenes/squad_hall.yaml, which has the agents for
-    # it. This scene stays faithful to the real fleet.
-    squads:
-      alpha: {leader: car1, members: [car2, car3]}
-    topology: centralized      # legacy alias for authority; still read
-    encrypted: true
-    band: 2400                 # MHz
-    qos:
-      reliability: reliable
-      deadline_ms: 100
 
-# -----------------------------------------------------------------------------
-# AGENTS
-# -----------------------------------------------------------------------------
-agents:
-
-  - id: gcs
-    platform: ground_station
-    network: blue
-    colour: "#6B7B85"
-    pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
-    dimensions:
-      length: {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
-      width:  {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}
-      height: {value: 1.00, unit: m, source: "Nominal - measure the actual bench"}
-    radios: [wifi_2g4]
-    ghost: true                # furniture for now: drawn and visible to lidar,
-                               # but nothing collides with it
-
-  - id: car1
-    platform: roboracer
-    network: blue
-    colour: "#2E6FB0"
-    pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
-    dimensions:
-      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
-      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
-      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
-      mass:   {value: , unit: kg, source: ""}            # <-- weigh it
-    performance:
-      max_speed:       {value: 1.5, unit: m/s,   source: "Chosen for indoor safety - not a platform limit"}
-      max_accel:       {value: , unit: m/s^2, source: ""}
-      min_turn_radius: {value: , unit: m,     source: ""}
-    sensors:
-      - id: lidar
-        type: ust10lx
-        mount:
-          offset: {x: 0.12, y: 0.0, z: 0.18}
-          rpy: {r: 0.0, p: 0.0, y: 0.0}
-      - id: imu
-        type: generic_imu
-        mount:
-          offset: {x: 0.0, y: 0.0, z: 0.05}
-          rpy: {r: 0.0, p: 0.0, y: 0.0}
-    radios: [wifi_2g4]
-    controller: controllers/car1_shuttle.py
-    on_link_loss: hold
-  - id: car2
-    platform: roboracer
-    network: blue
-    colour: "#2E6FB0"
-    pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
-    dimensions:
-      length: {value: 0.55, unit: m, source: "Measured, car #2, 2026-07-21"}
-      width:  {value: 0.30, unit: m, source: "Measured, car #2, 2026-07-21"}
-      height: {value: 0.20, unit: m, source: "Measured, car #2, 2026-07-21"}
-      mass:   {value: , unit: kg, source: ""}
-    performance:
-      max_speed:       {value: 1.5, unit: m/s, source: "Chosen for indoor safety"}
-      max_accel:       {value: , unit: m/s^2, source: ""}
-      min_turn_radius: {value: , unit: m,     source: ""}
-    sensors:
-      - id: lidar
-        type: ust10lx
-        mount:
-          offset: {x: 0.12, y: 0.0, z: 0.18}
-          rpy: {r: 0.0, p: 0.0, y: 0.0}
-      - id: imu
-        type: generic_imu
-        mount:
-          offset: {x: 0.0, y: 0.0, z: 0.05}
-          rpy: {r: 0.0, p: 0.0, y: 0.0}
-    radios: [wifi_2g4]
-    controller: controllers/car2_shuttle.py
-    on_link_loss: hold
-  - id: car3
-    platform: roboracer
-    network: blue
-    colour: "#2E6FB0"
-    pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}
-    dimensions:
-      length: {value: 0.55, unit: m, source: "Measured, car #3, 2026-07-21"}
-      width:  {value: 0.30, unit: m, source: "Measured, car #3, 2026-07-21"}
-      height: {value: 0.20, unit: m, source: "Measured, car #3, 2026-07-21"}
-      mass:   {value: , unit: kg, source: ""}
-    performance:
-      max_speed:       {value: 1.5, unit: m/s, source: "Chosen for indoor safety"}
-      max_accel:       {value: , unit: m/s^2, source: ""}
-      min_turn_radius: {value: , unit: m,     source: ""}
-    sensors:
-      - id: lidar
-        type: ust10lx
-        mount:
-          offset: {x: 0.12, y: 0.0, z: 0.18}
-          rpy: {r: 0.0, p: 0.0, y: 0.0}
-      - id: imu
-        type: generic_imu
-        mount:
-          offset: {x: 0.0, y: 0.0, z: 0.05}
-          rpy: {r: 0.0, p: 0.0, y: 0.0}
-    radios: [wifi_2g4]
-    controller: controllers/car3_shuttle.py
-    on_link_loss: hold
 # -----------------------------------------------------------------------------
 # POINTS OF INTEREST — named landmarks a mission can refer to
 # -----------------------------------------------------------------------------
@@ -226,12 +104,3 @@ points:
 # -----------------------------------------------------------------------------
 # RADIO DEFINITIONS
 # -----------------------------------------------------------------------------
-radios:
-  wifi_2g4:
-    band:         {value: 2400, unit: MHz, source: "Configured"}
-    tx_power:     {value: , unit: dBm,  source: ""}    # <-- module datasheet
-    sensitivity:  {value: , unit: dBm,  source: ""}    # <-- module datasheet
-    bandwidth:    {value: , unit: MHz,  source: ""}
-    data_rate:    {value: , unit: Mbps, source: ""}
-    antenna_gain: {value: , unit: dBi,  source: ""}
-    link_type: rf_omni

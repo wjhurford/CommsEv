@@ -1,0 +1,12 @@
+# =============================================================================
+# Deadband DEFAULT RUN — scene + fleet, no mission
+# =============================================================================
+# What headless tools (stub, netcheck, ROS launch) load when nothing else is
+# named: the lab scene with the lab fleet, untasked. In the Console this same
+# composition is made in the Setup tab, and the mission is then set from the
+# terminal:  SETMISSION test  ->  blue launch.
+# =============================================================================
+spec_version: 0.1
+name: default_run
+scene: lab_box
+fleet: 3_roboracer

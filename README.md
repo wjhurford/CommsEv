@@ -39,7 +39,7 @@ Nothing but Python is needed yet.
 
 ```bash
 pip install pyyaml
-python3 -m deadband validate scenarios/lab_box_two_agents.yaml
+python3 -m deadband validate default_run.yaml
 python3 tools/stub_telemetry.py
 ```
 
@@ -50,7 +50,9 @@ can be developed with no simulator installed.
 
 | Path | What it is |
 | --- | --- |
-| `scenarios/` | Experiment definitions. The user-facing surface. |
+| `scenes/` | Worlds: arena, radio background, named points. |
+| `fleets/` | Agents and their wiring: bodies, sensors, radios, networks. |
+| `missions/` | Commands: a scene + a fleet + tasking. The user-facing surface. |
 | `deadband/` | The framework package. |
 | `tools/` | Standalone utilities with no framework dependency. |
 | `console/` | The GUI. Not started. |

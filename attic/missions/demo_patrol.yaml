@@ -1,0 +1,23 @@
+# =============================================================================
+# Deadband MISSION — demo_patrol
+# =============================================================================
+# A MISSION is a SCENARIO plus the COMMAND. It names a scenario (the fleet and
+# its scene) and issues tasking — here a plain per-agent objectives map. The
+# mission half of the demo triple.
+#
+# Will's definition: a system/fleet-wide command.
+# =============================================================================
+
+spec_version: 0.1
+name: demo_patrol
+kind: mission
+
+description: >
+  The demo_patrol_fleet shuttling opposite edges of demo_field. Tasking only —
+  the world and the fleet come from the scenario it names.
+
+scenario: demo_patrol_fleet
+
+objectives:
+  car1: {do: shuttle, between: [A, B]}
+  car2: {do: shuttle, between: [C, D]}

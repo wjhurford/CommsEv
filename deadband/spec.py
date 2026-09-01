@@ -104,9 +104,32 @@ def _walk(node, path, report: Report) -> None:
             _walk(item, f"{path}[{label}]", report)
 
 
+def _required_for(doc: dict) -> list[str]:
+    """Which top-level sections THIS file must carry, by its layer.
+
+    The three-layer model (docs/vocabulary.md): a SCENE owns the world, a
+    FLEET owns the agents, a MISSION names both and owns the command - so a
+    mission is not missing an arena, its scene has it. A file with no `kind`
+    and no base reference is a legacy self-contained scenario and still owes
+    everything.
+    """
+    kind = doc.get("kind")
+    has_base = bool(doc.get("scene") or doc.get("map") or doc.get("fleet"))
+    required = ["spec_version", "name"]
+    if kind == "scene":
+        required.append("arena")
+    elif kind == "fleet":
+        required.append("agents")
+    elif kind == "mission" or has_base:
+        pass                    # world and fleet arrive through the chain
+    else:
+        required += ["arena", "agents"]
+    return required
+
+
 def _check_structure(doc: dict, report: Report) -> None:
     """Structural rules. Add to this as the schema settles."""
-    for key in REQUIRED_TOP_LEVEL:
+    for key in _required_for(doc):
         if key not in doc:
             report.errors.append(f"missing required top-level section: '{key}'")
 

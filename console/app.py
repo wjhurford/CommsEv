@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -52,7 +53,7 @@ from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QComboBox, QLineEdit, QMenu, QSizePolicy, QSlider, QSplitter,
+    QComboBox, QDialog, QLineEdit, QMenu, QSizePolicy, QSlider, QSplitter,
     QVBoxLayout, QWidget,
 )
 
@@ -65,8 +66,13 @@ from deadband import spec
 try:
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     from stub_telemetry import resolve_mission as _resolve_mission
+    # Same tokenizer the sim's own retask grammar uses, so a parenthesized
+    # coordinate typed here and re-parsed there is the same one line, not
+    # two tokenizers that can drift apart.
+    from stub_telemetry import _tokenize_args
 except Exception:
     _resolve_mission = None
+    _tokenize_args = None
 
 # Round-trip YAML keeps the comments in a scenario file alive across an edit.
 # Those comments are half the value of the file as a research artefact, so
@@ -159,29 +165,56 @@ def _num(v, default=0.0):
         return default
 
 
-def _objective_label(obj):
+def _point_label(p):
+    """A waypoint as it should read to a human: a point name as-is, or a
+    literal {x,y[,z]} as 'x,y' / 'x,y,z' rather than a dict repr - the
+    (x,y[,z]) retask grammar and REMISSION decomposition both produce
+    literals now, not just named points."""
+    if isinstance(p, dict):
+        x, y, z = p.get("x", 0), p.get("y", 0), p.get("z", 0)
+        if z:
+            return f"{x:g},{y:g},{z:g}"
+        return f"{x:g},{y:g}"
+    return str(p)
+
+
+def _objective_label(obj, armed=None):
     """A one-line label for an objective, for the tree.
 
     e.g. {'type': 'shuttle', 'between': ['A','B']} -> "shuttle A-B"
+
+    `armed` is the assign/inspect/launch state - see docs/PATCH-07-CHECKS.md
+    - and is appended as a tag so the tree row itself answers "is this what
+    I meant, and will it move": None (not known - a file that hasn't run
+    yet) omits the tag, False shows "assigned, not launched", True shows
+    "armed".
     """
     if not isinstance(obj, dict):
-        return "static"
-    kind = obj.get("type", "static")
-    if kind == "shuttle":
-        bt = obj.get("between")
-        if isinstance(bt, (list, tuple)) and len(bt) == 2:
-            return f"shuttle {bt[0]}-{bt[1]}"
-        return "shuttle"
-    if kind == "pursuit":
-        return f"pursue {obj.get('target', '?')}"
-    if kind == "patrol":
-        return "patrol"
-    if kind == "orbit":
-        return f"orbit r={obj.get('radius', '?')}"
-    if kind == "script":
-        f = str(obj.get("file", "")).split("/")[-1]
-        return f"script {f}" if f else "script"
-    return kind
+        label = "static"
+    else:
+        kind = obj.get("type", "static")
+        if kind == "shuttle":
+            bt = obj.get("between")
+            if isinstance(bt, (list, tuple)) and len(bt) == 2:
+                label = f"shuttle {_point_label(bt[0])}-{_point_label(bt[1])}"
+            else:
+                label = "shuttle"
+        elif kind == "pursuit":
+            label = f"pursue {obj.get('target', '?')}"
+        elif kind == "patrol":
+            label = "patrol"
+        elif kind == "orbit":
+            label = f"orbit r={obj.get('radius', '?')}"
+        elif kind == "script":
+            f = str(obj.get("file", "")).split("/")[-1]
+            label = f"script {f}" if f else "script"
+        else:
+            label = kind
+    if armed is True:
+        return f"{label}  [armed]"
+    if armed is False:
+        return f"{label}  [assigned, not launched]"
+    return label
 
 
 def _objective_description(agent):
@@ -194,28 +227,36 @@ def _objective_description(agent):
     obj = (agent or {}).get("mission") or {"type": "static"}
     kind = obj.get("type", "static")
     aid = agent.get("id", "this agent")
+    armed = agent.get("armed")
+    armed_note = ""
+    if armed is False:
+        armed_note = " It is assigned but not launched, so it will not move yet."
+    elif armed is True:
+        armed_note = " It is armed and acting on this now."
 
     if kind == "static":
         return f"{aid} holds position. It is not tasked to move."
     if kind == "shuttle":
         bt = obj.get("between")
         if isinstance(bt, (list, tuple)) and len(bt) == 2:
-            return (f"{aid} drives back and forth between points {bt[0]} and "
-                    f"{bt[1]}, repeating until retasked. The points are defined "
-                    f"by the map, so the same objective moves with the map.")
-        return f"{aid} shuttles between two points, repeating until retasked."
+            return (f"{aid} drives back and forth between "
+                    f"{_point_label(bt[0])} and {_point_label(bt[1])}, "
+                    f"repeating until retasked.{armed_note}")
+        return (f"{aid} shuttles between two points, repeating until "
+                f"retasked.{armed_note}")
     if kind == "pursuit":
         return (f"{aid} chases {obj.get('target', 'another agent')}, holding a "
-                f"standoff of {obj.get('standoff', 1.2)} m behind it.")
+                f"standoff of {obj.get('standoff', 1.2)} m behind it.{armed_note}")
     if kind == "patrol":
-        return f"{aid} loops a fixed circuit of waypoints until retasked."
+        return f"{aid} loops a fixed circuit of waypoints until retasked.{armed_note}"
     if kind == "orbit":
         return (f"{aid} circles the arena centre at radius "
-                f"{obj.get('radius', 2.0)} m.")
+                f"{obj.get('radius', 2.0)} m.{armed_note}")
     if kind == "script":
         return (f"{aid} runs the mission script {obj.get('file', '?')}. It "
-                f"decides its own target each tick - open the file to see how.")
-    return f"{aid}: {kind}."
+                f"decides its own target each tick - open the file to see "
+                f"how.{armed_note}")
+    return f"{aid}: {kind}.{armed_note}"
 
 
 # ---------------------------------------------------------------------------
@@ -746,8 +787,11 @@ class SensorView(QWidget):
                                f"speed {_num(pose.get('speed')):5.2f} m/s")
             obj = self.state.get("objective")
             if isinstance(obj, dict):
-                # The full objective - "pursue car3", not a bare "pursuit".
-                p.drawText(10, 60, f"objective  {_objective_label(obj)}")
+                # The full objective - "pursue car3", not a bare "pursuit" -
+                # tagged with armed state, since assigned-but-not-launched is
+                # the whole point of the inspect step.
+                p.drawText(10, 60, "objective  " +
+                          _objective_label(obj, armed=self.state.get("armed")))
             elif self.state.get("mission"):
                 p.drawText(10, 60, f"objective  {self.state.get('mission')}")
             top = 66
@@ -1210,6 +1254,14 @@ class ShellPanel(QWidget):
         if not cmd:
             return
         self.inp.clear()
+        # A pasted shell transcript often carries its own "$ " prompt. Strip
+        # ONE leading occurrence so a paste of "$ REOBJECTIVE car1 shuttle
+        # (-3,3,0) (3,3,0)" parses as the command, not as literal text that
+        # sends "$" (and its parentheses) straight to bash.
+        if cmd.startswith("$"):
+            cmd = cmd[1:].lstrip()
+            if not cmd:
+                return
         self.out.appendPlainText(f"$ {cmd}")
 
         # Only a BARE cd. "cd ros2 && colcon build" is a compound command and
@@ -1222,17 +1274,26 @@ class ShellPanel(QWidget):
             self.out.clear()
             return
 
-        # REOBJECTIVE / REMISSION - retasking, handled here rather than sent to
-        # the shell. Grammar:
+        # Mission commands - handled here rather than sent to the shell, all
+        # writing one line to the run's retask queue, which the running sim
+        # reads on its next tick:
+        #     <network-or-agent> launch      arm - objective(s) start acting
+        #     <network-or-agent> halt        un-arm - freezes at current pose
         #     REOBJECTIVE <agent> <objective> <args...>
-        #     e.g.  REOBJECTIVE car1 pursue car3
-        #           REOBJECTIVE car3 shuttle A B
-        #           REOBJECTIVE car2 stop
-        # It writes one line to the run's retask queue, which the running sim
-        # reads on its next tick. The queue line format is what parse_retask in
-        # the stub already understands: "<agent>: <objective> <args>".
-        head = cmd.split()
-        if head and head[0].upper() in ("REOBJECTIVE", "REMISSION"):
+        #         e.g.  REOBJECTIVE car1 pursue car3
+        #               REOBJECTIVE car3 shuttle A B
+        #               REOBJECTIVE car3 shuttle (-3,3,0) (3,3,0)
+        #     SETMISSION <name>   - set the run's mission: applies
+        #         missions/<name>.yaml's objectives (gated by command
+        #         authority - an unreachable agent is not retasked) and
+        #         titles the run. Do this after Play, before `blue launch`.
+        # Tokenizing keeps a parenthesized "(-3, 3, 0)" as one token even with
+        # the internal spaces - see docs/maps-missions-and-retasking.md.
+        head = _tokenize_args(cmd) if _tokenize_args else cmd.split()
+        if len(head) == 2 and head[1].lower() in ("launch", "halt"):
+            self._launch_halt(head[1].lower(), head[0])
+            return
+        if head and head[0].upper() in ("REOBJECTIVE", "SETMISSION"):
             self._retask(head)
             return
 
@@ -1256,19 +1317,33 @@ class ShellPanel(QWidget):
                 "[cannot start wsl.exe - is WSL installed and on PATH?]")
 
     def _retask(self, tokens):
-        """Write a retask command to the running sim's queue.
+        """Write a retask/order command to the running sim's queue.
 
-        tokens[0] is REOBJECTIVE or REMISSION (already upper-checked).
+        tokens[0] is REOBJECTIVE, REMISSION or LOADMISSION (already
+        upper-checked in run()):
+
             REOBJECTIVE <agent> <objective> <args...>
-        becomes the queue line "<agent>: <objective> <args>", which the stub's
-        parse_retask understands. REMISSION (retask a whole system at once) is
-        recognised but not built yet - it says so rather than failing silently.
+                -> "<agent>: <objective> <args>" - parse_retask's grammar,
+                one agent.
+            REMISSION <network> <objective> <args...>
+                -> forwarded verbatim as "REMISSION <network> <objective>
+                <args>" - a system order the running sim decomposes into
+                per-agent objectives, gated by that network's authority. See
+                docs/maps-missions-and-retasking.md.
+            LOADMISSION <mission-file>
+                -> forwarded as "LOADMISSION <path>" - that file's own
+                per-agent objectives, applied verbatim, no decomposition.
         """
         verb = tokens[0].upper()
-        if verb == "REMISSION":
-            self.out.appendPlainText(
-                "[REMISSION - retasking a whole system - is not built yet. "
-                "Use REOBJECTIVE per agent for now.]")
+        if verb == "SETMISSION":
+            if len(tokens) != 2:
+                self.out.appendPlainText(
+                    "[usage: SETMISSION <name>   e.g. SETMISSION test   "
+                    "(missions/<name>.yaml; set it after Play, before "
+                    "`blue launch`)]")
+                return
+            self._send_queue_line(f"SETMISSION {tokens[1]}\n",
+                                  f"SETMISSION {tokens[1]}")
             return
         if len(tokens) < 3:
             self.out.appendPlainText(
@@ -1277,23 +1352,117 @@ class ShellPanel(QWidget):
             return
         agent = tokens[1]
         rest = " ".join(tokens[2:])
-        line = f"{agent}: {rest}\n"
-        # runs/retask/queue - the fixed path start_run() launches the sim with.
-        # Console and stub are both Windows-side Python sharing REPO_ROOT, so
-        # writing here is the file the sim is watching.
+        self._send_queue_line(f"{agent}: {rest}\n", f"{agent} -> {rest}")
+
+    def _launch_halt(self, verb, scope):
+        """`<scope> launch` / `<scope> halt` -> "LAUNCH <scope>" / "HALT
+        <scope>" on the queue. Scope is a network name or an agent id; the
+        running sim resolves which one - see "The state machine" in
+        docs/PATCH-07-CHECKS.md."""
+        self._send_queue_line(f"{verb.upper()} {scope}\n", f"{verb} {scope}")
+
+    def _send_queue_line(self, line, summary):
+        """Write one command as its own brand-new file in the sim's retask
+        directory - the channel LAUNCH/HALT, REOBJECTIVE, REMISSION and
+        LOADMISSION all share.
+
+        Used to append this line to one shared "queue" file. On Windows
+        that raced the sim's reader: Python's open() doesn't request
+        FILE_SHARE_DELETE, so while this file handle was open (even
+        briefly) the sim's attempt to claim the file by renaming it could
+        fail outright - and that failure meant the sim read NOTHING that
+        poll, not even the earlier commands already sitting in the file. A
+        command then needing to be typed twice wasn't a second attempt
+        succeeding where the first failed; it was the first attempt still
+        sitting there, waiting for a poll that could finally get in.
+
+        Fixed by never touching an existing path at all: each command gets
+        its own new filename (monotonic, so read order matches send order),
+        written to a temp name and atomically renamed into place, so the
+        sim never sees a partial write either. Nothing else ever reopens
+        this path once it exists, so there is nothing left for the sim's
+        reader to contend with. See "Bug fix: the retask race" in
+        docs/PATCH-08-CHECKS.md.
+        """
         try:
             qdir = REPO_ROOT / "runs" / "retask"
             qdir.mkdir(parents=True, exist_ok=True)
-            with open(qdir / "queue", "a", encoding="utf-8") as fh:
-                fh.write(line)
-            self.out.appendPlainText(f"[retask sent: {agent} -> {rest}]")
+            name = f"cmd_{time.monotonic_ns():020d}.txt"
+            tmp = qdir / (name + ".tmp")
+            tmp.write_text(line, encoding="utf-8")
+            tmp.rename(qdir / name)
+            self.out.appendPlainText(f"[sent: {summary}]")
         except OSError as exc:
-            self.out.appendPlainText(f"[retask failed: {exc}]")
+            self.out.appendPlainText(f"[send failed: {exc}]")
 
     def stop_all(self):
         for proc in list(self.procs):
             proc.kill()
             proc.waitForFinished(1000)
+
+
+# ---------------------------------------------------------------------------
+# Spawn dialog - where does this fleet start, in THIS scene?
+# ---------------------------------------------------------------------------
+
+class SpawnDialog(QDialog):
+    """Asked the moment a fleet is chosen, with the scene already in view.
+
+    A fleet file carries default poses, but those are coordinates from
+    whatever scene it was written against - so placing the fleet is a
+    per-setup decision, made looking at the actual room. Defaults are
+    offered, not presumed.
+    """
+
+    def __init__(self, agents, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Spawn the fleet")
+        lay = QVBoxLayout(self)
+        lab = QLabel("Where does each agent start? Defaults are the fleet's "
+                     "own. x/y in metres, yaw in radians.")
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        self.table = QTableWidget(len(agents), 5)
+        self.table.setHorizontalHeaderLabels(["Agent", "x", "y", "z", "yaw"])
+        self.table.verticalHeader().setVisible(False)
+        self._ids = []
+        for r, a in enumerate(agents):
+            pose = a.get("pose") or {}
+            aid = str(a.get("id", f"agent{r}"))
+            self._ids.append(aid)
+            item = QTableWidgetItem(aid)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(r, 0, item)
+            # z is a real column, not carried silently: an aerial fleet
+            # spawns AT altitude, and the suspended-gcs trick (out of the
+            # lidar scan plane) is exactly a z decision.
+            for c, key in ((1, "x"), (2, "y"), (3, "z"), (4, "yaw")):
+                self.table.setItem(
+                    r, c, QTableWidgetItem(str(_num(pose.get(key)))))
+        self.table.resizeColumnsToContents()
+        lay.addWidget(self.table)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        ok = QPushButton("Spawn here")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        lay.addLayout(row)
+
+    def spawns(self):
+        """{agent_id: {x, y, z, yaw}} - every component the operator's, with
+        the fleet's own pose as the offered default."""
+        out = {}
+        for r, aid in enumerate(self._ids):
+            def val(c, fallback=0.0):
+                try:
+                    return float(self.table.item(r, c).text())
+                except (TypeError, ValueError):
+                    return fallback
+            out[aid] = {"x": val(1), "y": val(2), "z": val(3), "yaw": val(4)}
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -1308,10 +1477,14 @@ class Console(QMainWindow):
         self.report = None
         self.doc = None          # the round-trip document we edit and save
         self.path = None
+        self.doc = None          # nothing loaded yet - Setup composes a run
+        self.resolved = None
+        self.report = None
         self.proc = None
         self.ws = None
         self.dirty = False
         self.selected_agent = None
+        self._mission_name = None   # None -> Mission tree header reads UNASSIGNED
         self.latest = {}         # newest telemetry frame, by agent id
         self.frames = []         # every frame of the current run, for Results
         self._known_series = []
@@ -1323,11 +1496,15 @@ class Console(QMainWindow):
         self._build_docks()
         self._build_menu()
 
-        default = REPO_ROOT / "scenarios" / "three_car_fleet.yaml"
-        if default.exists():
-            self.load_scenario(default)
-        else:
-            self.statusBar().showMessage("No scenario loaded")
+        # Deliberately BLANK at startup. A run is COMPOSED, not opened:
+        # Setup tab -> choose a scene (the world appears) -> choose a fleet
+        # (a spawn dialog places the agents) -> press Play -> in the
+        # terminal, SETMISSION <name> -> blue launch. File > Open remains
+        # for legacy self-contained files only.
+        self._setup_scene = None
+        self._setup_fleet = None
+        self.statusBar().showMessage(
+            "Setup: choose a scene, then a fleet")
 
     # -- construction -------------------------------------------------------
 
@@ -1466,17 +1643,55 @@ class Console(QMainWindow):
         self.tab_scn.itemDoubleClicked.connect(self.on_overview_double_click)
         self.tab_msn.itemDoubleClicked.connect(self.on_overview_double_click)
 
-        cyber = QLabel(
+        # SETUP - where a run is composed. Scene first (the world appears),
+        # then fleet (a spawn dialog places the agents). The mission is NOT
+        # set here: a mission is a COMMAND, issued from the terminal
+        # (SETMISSION <name>) once the run is up, before `blue launch`.
+        setup = QWidget()
+        slay = QVBoxLayout(setup)
+        slay.setContentsMargins(6, 6, 6, 6)
+        slay.setSpacing(4)
+        slay.addWidget(QLabel("Scene"))
+        self.scene_combo = QComboBox()
+        self.scene_combo.setToolTip("The world: arena, radio background, "
+                                    "named points. scenes/*.yaml")
+        self.scene_combo.activated.connect(self.on_scene_chosen)
+        slay.addWidget(self.scene_combo)
+        slay.addWidget(QLabel("Fleet"))
+        self.fleet_combo = QComboBox()
+        self.fleet_combo.setToolTip("The agents and their wiring. "
+                                    "fleets/*.yaml. Choosing one asks where "
+                                    "to spawn them.")
+        self.fleet_combo.setEnabled(False)
+        self.fleet_combo.activated.connect(self.on_fleet_chosen)
+        slay.addWidget(self.fleet_combo)
+        self.lbl_mission = QLabel("Mission: UNASSIGNED")
+        self.lbl_mission.setToolTip(
+            "Set from the terminal once the run is started:\n"
+            "    SETMISSION <name>     (missions/<name>.yaml)\n"
+            "then `blue launch`. Results are titled by this name.")
+        slay.addWidget(self.lbl_mission)
+        hint = QLabel("Play, then in the terminal:\n"
+                      "  SETMISSION <name>\n  blue launch")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        slay.addWidget(hint)
+        # The scene tree (arena + background conditions) lives under the
+        # pickers - it describes what Setup composed.
+        slay.addWidget(self.tab_env, 1)
+        self._refresh_setup_lists()
+
+        contested = QLabel(
             "Not built yet.\n\n"
-            "This is where attacks live: pick a target (an agent, a link, a\n"
-            "region or a whole network), pick a class, set its parameters,\n"
-            "and fire it while the run is going.\n\n"
-            "Deliberately last. An attack panel over a simulator that has no\n"
-            "radio model yet would only be able to fake its own results."
+            "Everything that degrades the spectrum, in one place: the\n"
+            "scene's background (noise floor, GNSS quality, wind), jammers\n"
+            "as agents, spoofing, and the attack injection panel - pick a\n"
+            "target, pick a class, set parameters, fire it mid-run.\n\n"
+            "The contested tree is the next step."
         )
-        cyber.setObjectName("hint")
-        cyber.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        cyber.setWordWrap(True)
+        contested.setObjectName("hint")
+        contested.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        contested.setWordWrap(True)
 
         # Results: tick series to plot them. Populated from the recorded run.
         results = QWidget()
@@ -1534,22 +1749,21 @@ class Console(QMainWindow):
 
         clay.addWidget(QLabel("  Links"))
         self.linktable = QTableWidget(0, 5)
-        self.linktable.setHorizontalHeaderLabels(["From", "To", "Dist m", "PDR", "State"])
+        self.linktable.setHorizontalHeaderLabels(["From", "To", "Dist m", "Quality", "State"])
         self.linktable.horizontalHeader().setStretchLastSection(True)
         self.linktable.verticalHeader().setVisible(False)
         clay.addWidget(self.linktable, 1)
 
         self.tabs = QTabWidget()
-        # Order top-to-bottom down the left edge, as Will laid it out: the
-        # analysis tabs first, then the two build trees, then tasking.
-        # The sidebar renders in the order added, top to bottom: Environment
-        # (where you are), Overview (what things are), Mission (what they are
-        # doing), then the analysis tabs Comms, Cyber, Results.
-        self.tabs.addTab(self.tab_env, "Environment")
+        # The sidebar renders in the order added, top to bottom: Setup
+        # (compose the run: scene, fleet, spawns), Overview (what things
+        # are), Mission (what they are doing), then the analysis tabs
+        # Comms, Contested, Results.
+        self.tabs.addTab(setup, "Setup")
         self.tabs.addTab(self.tab_scn, "Overview")
         self.tabs.addTab(self.tab_msn, "Mission")
         self.tabs.addTab(comms, "Comms")
-        self.tabs.addTab(cyber, "Cyber")
+        self.tabs.addTab(contested, "Contested")
         self.tabs.addTab(results, "Results")
         self.tabs.currentChanged.connect(self.on_tab_changed)
         # Tabs down the left edge rather than across the top: the labels stack
@@ -1633,7 +1847,7 @@ class Console(QMainWindow):
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
-        for label, fn in (("&Open scenario...", self.open_dialog),
+        for label, fn in (("&Open file (advanced)...", self.open_dialog),
                           ("&Save", self.save_scenario),
                           ("&Reload", self.reload_scenario)):
             a = QAction(label, self)
@@ -1643,6 +1857,117 @@ class Console(QMainWindow):
         a = QAction("E&xit", self)
         a.triggered.connect(self.close)
         m.addAction(a)
+
+    # -- setup: compose a run ----------------------------------------------
+
+    def _run_stem(self):
+        """The title every kept result carries: scene_fleet_mission - all of
+        what the run WAS, so a results folder needs no decoder. Fields that
+        do not exist yet are simply absent; characters Windows filenames
+        cannot hold are replaced. The caller appends the date-time."""
+        doc = self.doc or {}
+        scene = self._setup_scene or doc.get("scene") or doc.get("map") \
+            or (self.path.stem if self.path else None)
+        fleet = self._setup_fleet or doc.get("fleet")
+        mission = self._mission_name
+        if mission == "assigned (live)":
+            mission = None
+        parts = [str(x) for x in (scene, fleet, mission) if x]
+        stem = "_".join(parts) or "run"
+        return "".join(c if c.isalnum() or c in "-_" else "_" for c in stem)
+
+    def _lock_setup(self, locked):
+        """The Setup tab is how a run is COMPOSED; while one is actually
+        running, recomposing under it is a crash waiting to happen (the sim
+        holds the old world, the Console loads a new one). Lock the tab for
+        the duration; everything else stays live."""
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Setup":
+                if locked and self.tabs.currentIndex() == i:
+                    self.tabs.setCurrentIndex(i + 1)   # step off it first
+                self.tabs.setTabEnabled(i, not locked)
+                self.tabs.setTabToolTip(
+                    i, "Locked while a run is up - Stop to recompose"
+                       if locked else "")
+                break
+
+    def _refresh_setup_lists(self):
+        """(Re)list scenes/ and fleets/ into the Setup dropdowns."""
+        for combo, folder, placeholder in (
+                (self.scene_combo, "scenes", "(choose a scene)"),
+                (self.fleet_combo, "fleets", "(choose a fleet)")):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(placeholder)
+            for f in sorted((REPO_ROOT / folder).glob("*.yaml")):
+                combo.addItem(f.stem)
+            i = combo.findText(current)
+            if i > 0:
+                combo.setCurrentIndex(i)
+            combo.blockSignals(False)
+
+    def on_scene_chosen(self, index):
+        if index <= 0:
+            return
+        self._setup_scene = self.scene_combo.currentText()
+        # A new scene invalidates any placed fleet - spawns are coordinates
+        # in the OLD world. Ask again rather than silently carrying them.
+        self._setup_fleet = None
+        self.fleet_combo.setEnabled(True)
+        self.fleet_combo.setCurrentIndex(0)
+        self._compose_setup(spawns=None)
+        self.statusBar().showMessage(
+            f"Scene {self._setup_scene} - now choose a fleet")
+
+    def on_fleet_chosen(self, index):
+        if index <= 0 or not self._setup_scene:
+            return
+        fleet = self.fleet_combo.currentText()
+        # The scene is in view; ask where the agents spawn in it.
+        defaults = []
+        if _resolve_mission is not None:
+            try:
+                fdoc = _resolve_mission(
+                    str(REPO_ROOT / "fleets" / f"{fleet}.yaml"))
+                defaults = fdoc.get("agents") or []
+            except Exception as exc:
+                self.say(f"cannot read fleet {fleet}: {exc}")
+                return
+        dlg = SpawnDialog(defaults, self)
+        if dlg.exec() != QDialog.Accepted:
+            self.fleet_combo.setCurrentIndex(0)
+            return
+        self._setup_fleet = fleet
+        self._compose_setup(spawns=dlg.spawns())
+        self.statusBar().showMessage(
+            f"{self._setup_scene} + {fleet} - press Play, then "
+            f"SETMISSION <name> and blue launch in the terminal")
+
+    def _compose_setup(self, spawns):
+        """Write the composed run (scene + fleet + spawn overrides) to
+        runs/current_setup.yaml and load it. A FILE, deliberately: the whole
+        existing pipeline (Play, ROS launch, save, reload) takes a path, and
+        a composed run should be as diffable and re-runnable as any other.
+        """
+        import yaml as _yaml
+        doc = {"spec_version": 0.1,
+               "name": (f"{self._setup_scene} + {self._setup_fleet}"
+                        if self._setup_fleet else self._setup_scene),
+               "scene": self._setup_scene}
+        if self._setup_fleet:
+            doc["fleet"] = self._setup_fleet
+        if spawns:
+            doc["agents"] = [{"id": aid, "pose": pose}
+                             for aid, pose in spawns.items()]
+        path = REPO_ROOT / "runs" / "current_setup.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = ("# Composed by the Console's Setup tab - scene + fleet + "
+                  "spawn overrides.\n# Regenerated on every Setup change; "
+                  "safe to delete.\n")
+        path.write_text(header + _yaml.safe_dump(doc, sort_keys=False),
+                        encoding="utf-8")
+        self.load_scenario(path)
 
     # -- scenario -----------------------------------------------------------
 
@@ -1662,6 +1987,22 @@ class Console(QMainWindow):
 
     def load_scenario(self, path: Path):
         self.path = path
+        # A new scenario is a fresh run. Old output sitting there - retask
+        # confirmations, LAUNCH/HALT/REMISSION log lines, errors - from
+        # whatever was open before is actively misleading once it's next to
+        # a different scenario, not just clutter: it reads as evidence about
+        # THIS run when it's actually about the last one. Clear the Log and
+        # every open Terminal tab before loading.
+        self.log.clear()
+        for shell in getattr(self, "shells", []):
+            shell.out.clear()
+        # A fresh file means nothing has been ASSIGNED yet - even if the
+        # file bakes objectives straight onto its agents (every legacy
+        # scenarios/ file does), that isn't a runtime assignment. The
+        # Mission tree header reads UNASSIGNED until SETMISSION names it.
+        self._mission_name = None
+        if hasattr(self, "lbl_mission"):
+            self.lbl_mission.setText("Mission: UNASSIGNED")
         # Validate with the framework's own loader...
         self.report = spec.load(path)
         # ...but hold an editable copy that keeps the file's comments intact.
@@ -1741,15 +2082,23 @@ class Console(QMainWindow):
                                        f" x {_num((arena.get('extent') or {}).get('y')):.0f}"
                                        f" x {_num((arena.get('extent') or {}).get('z')):.0f} m)"])
         room.setData(0, Qt.UserRole, ("node", ["arena"]))
-        for label in ("Map builder", "Import topography"):
-            it = QTreeWidgetItem(scene, [f"{label}   (not built)"])
-            it.setDisabled(True)
 
+        # BACKGROUND - the contested-environment conditions the SCENE owns.
+        # These live on the scene (not the fleet, not an attack) because they
+        # are properties of the world that exist before anyone hostile does:
+        # the propagation the walls impose, the spectrum's resting state, the
+        # sky's GNSS view, the air the airframes push against. The Contested
+        # tab will later act ON these; the scene declares their baseline.
+        # Undeclared ones are shown greyed so a scene author can see what a
+        # scene CAN declare - see docs/contested-background.md.
         background = QTreeWidgetItem(self.tab_env, ["Background"])
         for key in ("propagation", "spectrum", "gnss", "wind"):
             if key in arena:
                 n = QTreeWidgetItem(background, [key])
                 n.setData(0, Qt.UserRole, ("node", ["arena", key]))
+            else:
+                n = QTreeWidgetItem(background, [f"{key}   (not declared)"])
+                n.setDisabled(True)
         self.tab_env.expandAll()
 
         # OVERVIEW and MISSION share one hierarchy - system > network > agents -
@@ -1784,8 +2133,21 @@ class Console(QMainWindow):
         if leaf == "objective":
             self._objective_rows = {}
             self._history_rows = {}
+            self._last_objective_label = {}
         mission_name = view.get("name") or (self.path.stem if self.path else "")
-        root = QTreeWidgetItem(tree, [f"Mission: {mission_name}"])
+        if leaf == "objective":
+            # Mission is tasking, not the file - a scenario can carry
+            # baked-in objectives (every legacy scenarios/ file does) and
+            # this still reads UNASSIGNED, because nothing has been
+            # ASSIGNED at runtime yet. See _refresh_live_objectives(),
+            # which is what actually flips this once something changes.
+            root = QTreeWidgetItem(tree, [f"Mission: {self._mission_name or 'UNASSIGNED'}"])
+            self._mission_root_item = root
+        else:
+            # Overview is equipment - what's in this scenario, not what it's
+            # tasked to do. Was headed "Mission: X" too, which is backwards:
+            # tasking has no business labelling the equipment view.
+            root = QTreeWidgetItem(tree, [f"Scenario: {mission_name or 'Custom'}"])
         agents = view.get("agents") or []
         networks = view.get("networks") or {}
         placed = set()
@@ -1822,6 +2184,7 @@ class Console(QMainWindow):
                         h = QTreeWidgetItem(a, ["history"])
                         h.setData(0, Qt.UserRole, ("history", ["agents", i]))
                         self._history_rows[agent.get("id")] = h
+                        self._last_objective_label[agent.get("id")] = _objective_label(obj)
                         first = QTreeWidgetItem(
                             h, [f"t=0.0  {_objective_label(obj)}   (initial)"])
                         first.setDisabled(True)
@@ -2315,6 +2678,8 @@ class Console(QMainWindow):
 
     def on_tab_changed(self, index):
         """Results shows the plots; every other tab shows the world."""
+        if self.tabs.tabText(index) == "Setup":
+            self._refresh_setup_lists()
         self.stack.setCurrentIndex(1 if self.tabs.tabText(index) == "Results" else 0)
 
     def refresh_series_tree(self, frame):
@@ -2375,8 +2740,12 @@ class Console(QMainWindow):
         if not self.frames:
             self.say("Nothing recorded yet.")
             return
+        stem = self._run_stem()
+        from datetime import datetime
+        stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export run", str(REPO_ROOT / "runs" / "run.csv"), "CSV (*.csv)")
+            self, "Export run",
+            str(REPO_ROOT / "runs" / f"{stem}_{stamp}.csv"), "CSV (*.csv)")
         if not path:
             return
         import csv
@@ -2437,8 +2806,14 @@ class Console(QMainWindow):
         self.linktable.setRowCount(len(links))
         for i, l in enumerate(links):
             state = l.get("state", "-")
+            # As a percentage, not a bare 0..1 fraction - "1.00" at 2dp
+            # flattens a genuinely-computed 0.998 into looking perfect,
+            # which is exactly the "comms look perfect and shouldn't" gap.
+            # 2dp of a PERCENTAGE keeps the precision rf_link() already
+            # computes (pdr is rounded to 3dp) visible instead of rounded
+            # away.
             vals = [l.get("a"), l.get("b"), f"{l.get('distance_m', 0):.2f}",
-                    f"{l.get('pdr', 0):.2f}", state]
+                    f"{l.get('pdr', 0) * 100:.2f}%", state]
             for c, text in enumerate(vals):
                 it = QTableWidgetItem(str(text))
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
@@ -2514,6 +2889,11 @@ class Console(QMainWindow):
         run fail in a way that looked like it had worked. Owning the processes
         means they are cleaned up when the run stops.
         """
+        if not self.path:
+            self.say("Nothing to run - use the Setup tab: choose a scene, "
+                     "then a fleet.")
+            return
+        self._lock_setup(True)
         # Anything left from a previous run holds the port and wins the race.
         self.say("Clearing any previous ROS processes...")
         # [d]eadband is not a typo. pkill -f matches against the FULL command
@@ -2623,12 +3003,17 @@ class Console(QMainWindow):
         the only thing that changes — the Console never learns what is behind
         the pipe, which is the whole point of the boundary.
         """
+        if not self.path:
+            self.say("Nothing to run - use the Setup tab: choose a scene, "
+                     "then a fleet.")
+            return
         script = REPO_ROOT / "tools" / "stub_telemetry.py"
         if not script.exists():
             self.say(f"ERROR  cannot find {script}")
             return
         self._buf = ""
         self.frames = []
+        self._lock_setup(True)
         self.proc = QProcess(self)
         self.proc.readyReadStandardOutput.connect(self.on_telemetry)
         self.proc.readyReadStandardError.connect(
@@ -2647,9 +3032,12 @@ class Console(QMainWindow):
         self._retask_dir = REPO_ROOT / "runs" / "retask"
         try:
             self._retask_dir.mkdir(parents=True, exist_ok=True)
-            queue = self._retask_dir / "queue"
-            if queue.exists():
-                queue.unlink()          # start clean; no stale command fires
+            # Start clean; no stale command fires. Clears the current
+            # cmd_*.txt spool plus any leftover *.reading/*.tmp/legacy
+            # "queue" file from an older run or an older format.
+            for stale in self._retask_dir.iterdir():
+                if stale.name == "queue" or stale.name.startswith("cmd_"):
+                    stale.unlink()
         except OSError:
             pass
         argv += ["--retask", str(self._retask_dir)]
@@ -2758,10 +3146,20 @@ class Console(QMainWindow):
             self.say(f"Discarded {name}")
             return
 
+        # Title the kept bag with everything the run was -
+        # runs/<scene>_<fleet>_<mission>_<timestamp> - instead of an
+        # anonymous bag_<timestamp>. Same scheme as the CSV export, one
+        # _run_stem() rule for both. mv and ls in ONE shell so they cannot
+        # race.
+        stem = self._run_stem()
+        titled = (f"{stem}_{name[4:]}" if name.startswith("bag_")
+                  else f"{stem}_{name}")
+        self.wsl(f"mv {REPO_WSL_PATH}/runs/{name} "
+                 f"{REPO_WSL_PATH}/runs/{titled} && "
+                 f"ls -la {REPO_WSL_PATH}/runs/{titled} | tail -n +2",
+                 "bag")
+        name = titled
         self.say(f"Kept runs/{name}")
-        # List it. "Did the recording actually save?" should be answerable from
-        # the log rather than by going and looking.
-        self.wsl(f"ls -la {REPO_WSL_PATH}/runs/{name} | tail -n +2", "bag")
         if QMessageBox.question(
                 self, "Deadband Console", "Open it in PlotJuggler now?",
                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
@@ -2841,6 +3239,7 @@ class Console(QMainWindow):
         dlg.exec()
 
     def on_stopped(self):
+        self._lock_setup(False)
         self.run_button.setText("\u25b6")
         self.run_button.setToolTip("Run")
         self.plots.live = False
@@ -2873,14 +3272,19 @@ class Console(QMainWindow):
         """Update the Mission tree's objective rows from live telemetry.
 
         A retask changes what an agent is DOING; without this the tree keeps
-        showing what the file SAID, which makes it actively misleading. Only
-        rows whose text actually changed are touched, so this costs nothing on
-        a normal frame.
+        showing what the file SAID, which makes it actively misleading. The
+        displayed text also carries the armed/assigned tag (see
+        _objective_label), which can change on its own via LAUNCH/HALT with
+        no change to the objective itself - that must repaint the row
+        immediately, but must NOT write a new history entry, since a launch
+        is not a new objective. The two are tracked separately: `text`
+        (what's shown) vs `label` (what's logged).
         """
         rows = getattr(self, "_objective_rows", None)
         if not rows:
             return
         hist = getattr(self, "_history_rows", {})
+        last = getattr(self, "_last_objective_label", {})
         now = 0.0
         if self.frames:
             now = _num(self.frames[-1].get("sim_time_s"))
@@ -2890,22 +3294,43 @@ class Console(QMainWindow):
             if not isinstance(obj, dict):
                 continue
             label = _objective_label(obj)
-            text = f"objective: {label}"
+            text = f"objective: {_objective_label(obj, armed=live.get('armed'))}"
             if item.text(0) != text:
                 item.setText(0, text)
-                # The objective changed - log it. Only on change, so a 20 Hz
-                # stream does not write 20 identical rows a second.
+            if last.get(aid) != label:
+                # The objective itself changed - log it. Only on change, so
+                # a 20 Hz stream does not write 20 identical rows a second.
+                last[aid] = label
                 h = hist.get(aid)
                 if h is not None:
                     row = QTreeWidgetItem(h, [f"t={now:.1f}  {label}"])
                     row.setDisabled(True)
                     h.setExpanded(True)
+                # This is a genuine runtime assignment - the FIRST one,
+                # since the header only flips once. Baked-in file
+                # objectives never trigger this (nothing "changed" from
+                # what the file already said on the first live frame).
+                if self._mission_name is None:
+                    self._mission_name = "assigned (live)"
+                    root = getattr(self, "_mission_root_item", None)
+                    if root is not None:
+                        root.setText(0, f"Mission: {self._mission_name}")
 
     def consume_frame(self, frame):
         """One telemetry frame, from whichever source. The only place the
         Console turns numbers into what is on screen."""
         agents = frame.get("agents", [])
         self.latest = {a.get("id"): a for a in agents}
+        # The run's mission name, set by SETMISSION, rides in every frame.
+        # It titles the Mission tree, the Setup tab and any kept results.
+        mname = frame.get("mission")
+        if mname and mname != self._mission_name:
+            self._mission_name = mname
+            root = getattr(self, "_mission_root_item", None)
+            if root is not None:
+                root.setText(0, f"Mission: {mname}")
+            if hasattr(self, "lbl_mission"):
+                self.lbl_mission.setText(f"Mission: {mname}")
         self._refresh_live_objectives()
         # Keep the run for the Results tab. Capped so a forgotten overnight run
         # cannot quietly eat all the memory on the machine.

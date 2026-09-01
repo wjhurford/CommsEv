@@ -134,8 +134,19 @@ Point a scenario at it. In `scenarios/three_car_fleet.yaml`, replace car3's
       offset: 2.0
 ```
 
-Press **Play** in the Console. Car 3 should sit off car 1's left flank and stay
-there while car 1 shuttles.
+Press **Play** in the Console. Every agent spawns and sits still, however its
+objective is set - Play only starts the sim, it never starts the moving. Type
+`blue launch` in the Terminal tab (or whichever network the fleet is on) to
+arm the fleet. Car 3 should then sit off car 1's left flank and stay there
+while car 1 shuttles.
+
+This gap between Play and launch is deliberate, not a delay to get past: it
+is the point in the run where you can inspect what every agent has actually
+been assigned - open the Mission tab and check each objective reads what you
+meant - before anything moves. Confirming the *commanded* state before launch
+is what makes measuring deviation from it, later, mean something. See
+`docs/maps-missions-and-retasking.md` for the full assign → inspect → launch
+sequence and the retasking grammar.
 
 ### Then make it react to something
 
@@ -157,15 +168,21 @@ is a result.
 
 ## 4. Running it
 
-**From the Console** — set it in the scenario file and press Play. This is the
-normal way and it is what the rest of the toolchain assumes: the run gets
-recorded to a bag in `runs/`, the timeline scrubs it, and PlotJuggler opens it.
+**From the Console** — set it in the scenario file, press Play, then `blue
+launch` (or whichever network) once you've checked the Mission tab shows what
+you meant. This is the normal way and it is what the rest of the toolchain
+assumes: the run gets recorded to a bag in `runs/`, the timeline scrubs it,
+and PlotJuggler opens it.
 
 **Headless, for a sweep** — the simulator core runs on its own and prints one
-JSON frame per line:
+JSON frame per line. `--retask` opens the same command channel the Console's
+Terminal writes to, so a script can launch it the same way:
 
 ```bash
-python3 tools/stub_telemetry.py --scenario scenarios/three_car_fleet.yaml
+python3 tools/stub_telemetry.py --scenario scenarios/three_car_fleet.yaml \
+    --retask runs/retask
+# from another shell, once you're ready:
+echo "LAUNCH blue" > runs/retask/queue
 ```
 
 **As a real ROS 2 node** — the same file, driving a car over ROS topics:

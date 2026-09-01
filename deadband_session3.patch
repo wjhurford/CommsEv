@@ -1,0 +1,361 @@
+From 76cfc384aaf45ad33d35926d1ba162c5a64b6d2e Mon Sep 17 00:00:00 2001
+From: Deadband Session <assistant@deadband.local>
+Date: Wed, 26 Aug 2026 23:26:49 +0000
+Subject: [PATCH 1/2] Live objectives in the tree; scenes terminology; UI
+ polish
+
+- frames carry the full objective, not just its type, so 'pursue car3' shows
+- Mission tree objective rows update live on retask (verified: shuttle A-B ->
+  pursue car3 at the moment the command lands)
+- sensor view shows 'objective pursue car3' instead of a bare 'mission pursuit'
+- Properties dock titled 'Properties - car1' / '- no agent selected'
+- tab order top-to-bottom: Environment, Overview, Mission, Comms, Cyber, Results
+- panel headers hidden; the selected sidebar tab already names the panel
+- maps/ renamed scenes/; missions use 'scene:' ('map:' still accepted)
+- Environment names the loaded scene
+- file picker opens at the repo root so scenes/ and missions/ are one click away
+---
+ console/app.py                   | 77 +++++++++++++++++++++++++++-----
+ missions/three_lane_shuttle.yaml |  2 +-
+ {maps => scenes}/big_hall.yaml   |  0
+ {maps => scenes}/lab_box.yaml    |  0
+ tools/stub_telemetry.py          | 24 +++++++---
+ 5 files changed, 85 insertions(+), 18 deletions(-)
+ rename {maps => scenes}/big_hall.yaml (100%)
+ rename {maps => scenes}/lab_box.yaml (100%)
+
+diff --git a/console/app.py b/console/app.py
+index 65b6510..5d261bb 100644
+--- a/console/app.py
++++ b/console/app.py
+@@ -744,8 +744,12 @@ class SensorView(QWidget):
+                                f"z {_num(pose.get('z')):7.2f}  m")
+             p.drawText(10, 46, f"yaw {math.degrees(_num(pose.get('yaw'))):6.1f} deg   "
+                                f"speed {_num(pose.get('speed')):5.2f} m/s")
+-            if self.state.get("mission"):
+-                p.drawText(10, 60, f"mission {self.state.get('mission')}")
++            obj = self.state.get("objective")
++            if isinstance(obj, dict):
++                # The full objective - "pursue car3", not a bare "pursuit".
++                p.drawText(10, 60, f"objective  {_objective_label(obj)}")
++            elif self.state.get("mission"):
++                p.drawText(10, 60, f"objective  {self.state.get('mission')}")
+             top = 66
+             p.setPen(QPen(QColor(C_LINE)))
+             p.drawLine(8, top, self.width() - 8, top)
+@@ -1441,15 +1445,17 @@ class Console(QMainWindow):
+         # Left: the three-tab workflow. Left to right is the order you build a
+         # study in: where it happens, what is in it, what goes wrong.
+         self.tab_env = QTreeWidget()
+-        self.tab_env.setHeaderLabels(["Environment"])
++        # No header label: the selected sidebar tab already names the panel,
++        # so repeating it wastes a row of a narrow panel.
++        self.tab_env.setHeaderHidden(True)
+         self.tab_scn = QTreeWidget()
+-        self.tab_scn.setHeaderLabels(["Overview"])
++        self.tab_scn.setHeaderHidden(True)
+         # Two questions, two trees. OVERVIEW answers "what is each agent" -
+         # system, network, agents, and each agent's equipment (sensors). MISSION
+         # answers "what is each agent doing" - the same hierarchy down to agents,
+         # then their objectives, and nothing about hardware.
+         self.tab_msn = QTreeWidget()
+-        self.tab_msn.setHeaderLabels(["Mission"])
++        self.tab_msn.setHeaderHidden(True)
+         for t in (self.tab_env, self.tab_scn, self.tab_msn):
+             t.itemSelectionChanged.connect(self.on_select)
+             # The default indent stacks five levels deep off the right edge of a
+@@ -1536,12 +1542,16 @@ class Console(QMainWindow):
+         self.tabs = QTabWidget()
+         # Order top-to-bottom down the left edge, as Will laid it out: the
+         # analysis tabs first, then the two build trees, then tasking.
++        # The sidebar renders these bottom-up, so adding in reverse gives the
++        # reading order Will wants top-to-bottom: Environment (where), Overview
++        # (what things are), Mission (what they are doing), then the analysis
++        # tabs Comms, Cyber, Results.
+         self.tabs.addTab(results, "Results")
+         self.tabs.addTab(cyber, "Cyber")
+         self.tabs.addTab(comms, "Comms")
++        self.tabs.addTab(self.tab_msn, "Mission")
+         self.tabs.addTab(self.tab_scn, "Overview")
+         self.tabs.addTab(self.tab_env, "Environment")
+-        self.tabs.addTab(self.tab_msn, "Mission")
+         self.tabs.currentChanged.connect(self.on_tab_changed)
+         # Tabs down the left edge rather than across the top: the labels stack
+         # vertically, the panel stays narrow, and the section you are in is the
+@@ -1560,7 +1570,8 @@ class Console(QMainWindow):
+         self.props.horizontalHeader().setStretchLastSection(True)
+         self.props.verticalHeader().setVisible(False)
+         self.props.itemChanged.connect(self.on_prop_edited)
+-        d_props = QDockWidget("Properties")
++        d_props = QDockWidget("Properties — no agent selected")
++        self.d_props = d_props
+         d_props.setWidget(self.props)
+         self.addDockWidget(Qt.RightDockWidgetArea, d_props)
+ 
+@@ -1637,9 +1648,12 @@ class Console(QMainWindow):
+     # -- scenario -----------------------------------------------------------
+ 
+     def open_dialog(self):
++        # Open at the repo root, not inside scenarios/ - a run is now a SCENE
++        # plus a MISSION, and both folders (plus legacy scenarios/) need to be
++        # one click away rather than up-a-level.
+         path, _ = QFileDialog.getOpenFileName(
+-            self, "Open scenario", str(REPO_ROOT / "scenarios"),
+-            "Scenario files (*.yaml *.yml)")
++            self, "Open mission or scene", str(REPO_ROOT),
++            "Deadband files (*.yaml *.yml)")
+         if path:
+             self.load_scenario(Path(path))
+ 
+@@ -1717,7 +1731,12 @@ class Console(QMainWindow):
+         # the room and changing the weather are different jobs.
+         arena = self._view().get("arena") or {}
+ 
+-        scene = QTreeWidgetItem(self.tab_env, ["Scene"])
++        # Name the SCENE that is loaded. A mission names a scene; this is where
++        # you confirm which world you are actually in.
++        view = self._view()
++        scene_name = (view.get("name") if not (self.doc or {}).get("scene")
++                      else (self.doc or {}).get("scene"))
++        scene = QTreeWidgetItem(self.tab_env, [f"Scene: {scene_name or 'inline'}"])
+         room = QTreeWidgetItem(scene, [f"{arena.get('type', 'box')}  "
+                                        f"({_num((arena.get('extent') or {}).get('x')):.0f}"
+                                        f" x {_num((arena.get('extent') or {}).get('y')):.0f}"
+@@ -1763,6 +1782,8 @@ class Console(QMainWindow):
+         about hardware appears in the objective tree, and no objective appears in
+         the equipment tree."""
+         view = self.resolved or self.doc
++        if leaf == "objective":
++            self._objective_rows = {}
+         mission_name = view.get("name") or (self.path.stem if self.path else "")
+         root = QTreeWidgetItem(tree, [f"Mission: {mission_name}"])
+         agents = view.get("agents") or []
+@@ -1790,6 +1811,10 @@ class Console(QMainWindow):
+                         obj = agent.get("mission") or {"type": "static"}
+                         o = QTreeWidgetItem(a, [f"objective: {_objective_label(obj)}"])
+                         o.setData(0, Qt.UserRole, ("objective", ["agents", i]))
++                        # Keep a handle so a retask can update this row live,
++                        # rather than the tree showing what the FILE said while
++                        # the agent is doing something else entirely.
++                        self._objective_rows[agent.get("id")] = o
+                     else:  # equipment
+                         for j, sen in enumerate(agent.get("sensors") or []):
+                             it = QTreeWidgetItem(
+@@ -1877,6 +1902,14 @@ class Console(QMainWindow):
+                 node = node[key]
+             return node
+ 
++    def _set_props_title(self, agent_id):
++        """Name what the Properties panel is showing, so a table of values is
++        never ambiguous about whose values they are."""
++        dock = getattr(self, "d_props", None)
++        if dock is not None:
++            dock.setWindowTitle(f"Properties \u2014 {agent_id}" if agent_id
++                                else "Properties \u2014 no agent selected")
++
+     def on_select(self):
+         tree = self.tabs.currentWidget()
+         if not isinstance(tree, QTreeWidget):
+@@ -1887,6 +1920,7 @@ class Console(QMainWindow):
+         data = items[0].data(0, Qt.UserRole)
+         if not data:
+             self.props.setRowCount(0)
++            self._set_props_title(None)
+             return
+         kind, path = data
+         # A 'system' row is a UI grouping, not a node in the file - selecting it
+@@ -1902,6 +1936,7 @@ class Console(QMainWindow):
+             self.selected_agent = None
+             self.viewport.update()
+             self.props.setRowCount(0)
++            self._set_props_title(None)
+             return
+         # An 'objective' row points at its agent; show that agent selected.
+         if kind == "objective":
+@@ -1915,6 +1950,7 @@ class Console(QMainWindow):
+         if kind == "agent":
+             self.selected_agent = node.get("id")
+             self.viewport.selected = {self.selected_agent}
++            self._set_props_title(self.selected_agent)
+         elif kind == "node" and len(path) == 2 and path[0] == "networks":
+             # Selecting a network highlights everything on it. When red agents
+             # arrive this is how you see the two sides apart at a glance.
+@@ -2818,11 +2854,32 @@ class Console(QMainWindow):
+             return
+         self.consume_frame(frame)
+ 
++    def _refresh_live_objectives(self):
++        """Update the Mission tree's objective rows from live telemetry.
++
++        A retask changes what an agent is DOING; without this the tree keeps
++        showing what the file SAID, which makes it actively misleading. Only
++        rows whose text actually changed are touched, so this costs nothing on
++        a normal frame.
++        """
++        rows = getattr(self, "_objective_rows", None)
++        if not rows:
++            return
++        for aid, item in rows.items():
++            live = (self.latest or {}).get(aid) or {}
++            obj = live.get("objective")
++            if not isinstance(obj, dict):
++                continue
++            text = f"objective: {_objective_label(obj)}"
++            if item.text(0) != text:
++                item.setText(0, text)
++
+     def consume_frame(self, frame):
+         """One telemetry frame, from whichever source. The only place the
+         Console turns numbers into what is on screen."""
+         agents = frame.get("agents", [])
+         self.latest = {a.get("id"): a for a in agents}
++        self._refresh_live_objectives()
+         # Keep the run for the Results tab. Capped so a forgotten overnight run
+         # cannot quietly eat all the memory on the machine.
+         if len(self.frames) < 36000:
+diff --git a/missions/three_lane_shuttle.yaml b/missions/three_lane_shuttle.yaml
+index babf75d..6c33177 100644
+--- a/missions/three_lane_shuttle.yaml
++++ b/missions/three_lane_shuttle.yaml
+@@ -29,7 +29,7 @@ description: >
+   All three cars shuttle in parallel lanes on the lab map. The control
+   condition, expressed as a portable mission rather than a welded scenario.
+ 
+-map: lab_box
++scene: lab_box
+ 
+ objectives:
+   car1: {do: shuttle, between: [A, B]}
+diff --git a/maps/big_hall.yaml b/scenes/big_hall.yaml
+similarity index 100%
+rename from maps/big_hall.yaml
+rename to scenes/big_hall.yaml
+diff --git a/maps/lab_box.yaml b/scenes/lab_box.yaml
+similarity index 100%
+rename from maps/lab_box.yaml
+rename to scenes/lab_box.yaml
+diff --git a/tools/stub_telemetry.py b/tools/stub_telemetry.py
+index a35cef1..c68a8c3 100644
+--- a/tools/stub_telemetry.py
++++ b/tools/stub_telemetry.py
+@@ -75,7 +75,9 @@ def resolve_mission(path):
+     old scenario, so nothing else in the pipeline had to change.
+     """
+     doc = _load_yaml(path)
+-    map_ref = doc.get("map")
++    # SCENE is the term: the world a mission is dropped into. `map:` is kept as
++    # a silent alias so nothing already written breaks.
++    map_ref = doc.get("scene") or doc.get("map")
+     if not map_ref:
+         return doc                          # self-contained: the old shape
+ 
+@@ -83,16 +85,20 @@ def resolve_mission(path):
+     if not map_path.suffix:
+         map_path = map_path.with_suffix(".yaml")
+     if not map_path.is_absolute():
+-        # A bare name means maps/<name>.yaml; a path is taken as given.
+-        map_path = (REPO_ROOT / "maps" / map_path) if map_path.parent == Path(".") \
+-            else (REPO_ROOT / map_path)
++        # A bare name means scenes/<name>.yaml (maps/ still searched for older
++        # files); a path is taken as given.
++        if map_path.parent == Path("."):
++            cand = REPO_ROOT / "scenes" / map_path
++            map_path = cand if cand.exists() else (REPO_ROOT / "maps" / map_path)
++        else:
++            map_path = REPO_ROOT / map_path
+     world_doc = _load_yaml(map_path)
+ 
+-    merged = dict(world_doc)                 # start from the map's world
++    merged = dict(world_doc)                 # start from the scene's world
+     # The mission's own top-level keys win, EXCEPT agents, which are merged
+-    # per-id so the map keeps the bodies and the mission supplies the objectives.
++    # per-id so the scene keeps the bodies and the mission supplies the objectives.
+     for key, val in doc.items():
+-        if key in ("map", "agents"):
++        if key in ("map", "scene", "agents"):
+             continue
+         merged[key] = val
+ 
+@@ -864,6 +870,10 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
+             "network": a["network"],
+             "colour": a["colour"],
+             "mission": a["mission"].get("type", "static"),
++            # The FULL objective, not just its type, so the Console can show
++            # "pursue car3" rather than a bare "pursuit" - and so a retask is
++            # visible in the tree the moment it takes effect.
++            "objective": a["mission"],
+             "dimensions": a["dimensions"],
+             "pose": poses[a["id"]],
+             "scan": scan_for(a, lidars[0], poses, agents, arena, rng) if lidars else None,
+-- 
+2.43.0
+
+
+From a8878fd210cf3b4f091a1d715419dcff7ba8410d Mon Sep 17 00:00:00 2001
+From: Deadband Session <assistant@deadband.local>
+Date: Wed, 26 Aug 2026 23:27:33 +0000
+Subject: [PATCH 2/2] Checklist: capability story for contested-comms work;
+ feature gaps
+
+---
+ docs/CHECKLIST.md | 36 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/docs/CHECKLIST.md b/docs/CHECKLIST.md
+index 7128ad6..d3cc348 100644
+--- a/docs/CHECKLIST.md
++++ b/docs/CHECKLIST.md
+@@ -60,7 +60,10 @@ one app.**
+ 
+ ## Next up
+ 
+-- [ ] **Objective + speed on a selected agent, live** — visible while running.
++- [ ] **Objective + speed on a selected agent, live** — DONE for objective and
++      speed; the panel still needs to feel bespoke rather than generic.
++- [ ] **Bespoke Properties panel** — per-agent, shaped to what that agent is and
++      is doing, rather than a flat table of file keys.
+ - [ ] **Per-agent bespoke sensor panel** — shows the sensors THIS agent has;
+       lidar stays as default when present, is not removed.
+ - [ ] **Pre-run point editing for split missions** — in-app map-point editor;
+@@ -78,8 +81,37 @@ one app.**
+ 
+ ## Research capabilities (the paper-shaped work)
+ 
++The gap to close, stated plainly: right now nothing BREAKS. There is a control
++condition and no contested condition. Everything below follows from that, and
++in this order it tells one complete story — here is a fleet, here is the attack,
++here is how it degrades, here is what each robot THOUGHT was happening, here is
++whether the fallback held.
++
++- [ ] **Attacks that actually fire (Cyber tab)** — jamming (a region or emitter
++      raising the noise floor), spoofing (an agent fed false positions), replay.
++      The single highest-value addition: it turns Deadband from a fleet sim into
++      a testbed for autonomy under attack, and every other feature below is more
++      impressive once it exists.
+ - [ ] **PACE plan** (Primary/Alternate/Contingency/Emergency per network) —
+-      declare a fallback ladder, measure whether it holds under attack.
++      declare a fallback ladder, jam the primary, and MEASURE it: time to
++      detect, time to switch, what was lost in between. A result, not a demo.
++- [ ] **Degraded-comms autonomy behaviours** — return-to-comms, continue-on-
++      last-order, hold-and-wait, autonomous regroup. `return_on_link_loss.py`
++      is written and has never been run. Jam the net and watch the fleet behave
++      sensibly without being told: that is the demo that lands.
++- [ ] **Per-agent belief, not just ground truth** — each agent holds a stale,
++      partial picture with age on every track ("last seen 4 s ago"). Let the
++      operator view switch between ground truth and any agent's belief. The
++      divergence between them under jamming is the whole point.
++- [ ] **Multi-domain: the air layer** — ArduPilot + Gazebo. Ground and air on
++      one network, with the air asset as a comms relay when the ground link
++      breaks. Uses the z-axis already modelled.
++- [ ] **Replay / after-action review** — scrub a recorded run with link drops,
++      objective changes and attack events on one timeline. Makes it a tool
++      rather than a script.
++- [ ] **Seeded batch runs → results table** — same mission across N jamming
++      intensities, headless, producing a curve. The difference between a demo
++      and a paper. `seed` already exists.
+ - [ ] **Real-test overlay** — draw a real-car rosbag over the simulated run.
+ - [ ] **VESC model** — real actuator limits; an attack surface below ROS.
+ - [ ] **Edge compute budget** — per-agent CPU/memory as a modelled resource.
+-- 
+2.43.0
+

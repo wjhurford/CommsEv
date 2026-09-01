@@ -1,0 +1,36 @@
+# =============================================================================
+# Deadband MISSION — test
+# =============================================================================
+# A MISSION is the COMMAND, and nothing else: objectives for agents, applied
+# to whatever fleet is running, on whatever scene it was set up in. It names
+# NO scene and NO fleet - the Setup tab composes those, and the mission is set
+# from the terminal, before launch:
+#
+#     SETMISSION test
+#     blue launch
+#
+# This one is the benchmark: three cars shuttling their own lanes - the
+# control condition everything else is measured against. See
+# docs/vocabulary.md.
+#
+# Will's definition: a system/fleet-wide command.
+#
+# Objectives are verbs on named points, never coordinates - "shuttle between
+# A and B" is portable to any scene that defines A and B. Retask any of it
+# live from the Console (REOBJECTIVE / REMISSION / LOADMISSION).
+# =============================================================================
+
+spec_version: 0.1
+name: test
+kind: mission
+
+description: >
+  Three cars shuttling three lanes. The benchmark command - the control
+  condition everything else is measured against. Needs a fleet with car1-3
+  and a scene defining points A-F.
+
+
+objectives:
+  car1: {do: shuttle, between: [A, B]}
+  car2: {do: shuttle, between: [C, D]}
+  car3: {do: shuttle, between: [E, F]}

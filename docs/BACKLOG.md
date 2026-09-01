@@ -54,12 +54,20 @@ until then. This is irreversible and it gates the whole point of the project.
 
 ## Decisions taken (do not relitigate)
 
-- **A run is a MAP plus a MISSION, combined at run time.** A map is the world
-  (arena, radios, agent bodies, named points); a mission is tasking (one
-  objective per agent). One mission runs on any map that defines the points it
-  names; proven on `lab_box` and `big_hall`. `scenarios/` files stay valid as
-  missions with the map inline - backward compatible, nothing forced to split.
-  Terminology: the thing you write and run is a **mission**, not a scenario.
+- **SUPERSEDED (1 Sep 2026) by the three-layer model** - see
+  `docs/vocabulary.md`. A run is now **scene + fleet, composed by a mission**:
+  **scene** (the world only - arena, radio medium, contested background,
+  points; what the File dropdown picks), **fleet** (the agents and their
+  wiring - bodies, sensors, radios, networks, authority/routing; no world, no
+  tasking), **mission** (names a scene AND a fleet, then issues the command -
+  per-agent objectives or a fleet-wide order). The word "scenario" is retired
+  from the framework - it was the word causing the confusion. The loader
+  resolves the chain recursively; a file naming no base is self-contained (the
+  old shape) and still loads. Old files are preserved in `attic/`, which
+  nothing reads.
+  - *Previously:* "A run is a MAP plus a MISSION." A map was the world; a
+    mission was tasking; `scenario` meant a legacy combined file. Kept here for
+    provenance - do not follow it, follow `docs/vocabulary.md`.
 - **An objective is a verb, not a destination.** `shuttle between A B`,
   `pursuit`, `wall_follow`, `orbit`, `static`, `script`. Portable because it
   refers to points the map resolves, not coordinates. `docs/maps-missions-and-
@@ -165,6 +173,27 @@ break the simulator. Order is roughly dependency order.
       tweaked pre-run, and Play begins the run (with retasking available during
       it). Explicitly NOT needed for the current research sandbox - this is the
       hand-over-to-others milestone, built last of this group.
+
+- [ ] **Per-agent beliefs** (Will, 1 Sep) - each agent's own estimate of
+      world state (positions of others, link health, its own pose) built only
+      from what ITS sensors and network deliver, displayed beside ground
+      truth. The gap between belief and truth IS the cost of jamming, and the
+      thing Kalman filtering / ML later defend. Groundwork for both the
+      Contested work and the estimation layer.
+- [ ] **Editable doctrines** (Will, 1 Sep) - authority behaviours (e.g. does
+      a squad fall back to the coordinator when its leader drops, or strand?)
+      should be declarable per network rather than hard-coded. To be designed
+      with the Network tab, where doctrine becomes visible.
+- [ ] **Fleet-wide REOBJECTIVE** (Will, 1 Sep) - `REOBJECTIVE blue <verb>`
+      / `REOBJECTIVE alpha <verb>`: scope tokens (network / squad / agent)
+      resolved exactly like LAUNCH/HALT's, one objective applied to every
+      resolved agent, gated by reachability like SETMISSION. An order-grammar
+      extension, NOT a new file layer - missions stay the named overall goal,
+      objectives stay per-agent verbs. Natural fit for the blue-cell
+      terminal step.
+- [ ] **SETMISSION before Play** - buffer a pre-run SETMISSION in the Console
+      so the order can be staged before the sim starts, instead of the spool
+      wipe eating it. Until then the order is: Play, SETMISSION, blue launch.
 
 ## Later
 

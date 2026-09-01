@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Print the network picture for a scene or mission, in one command.
 
-    python3 tools/netcheck.py                        # three_car_fleet
-    python3 tools/netcheck.py missions/squad_patrol.yaml
+    python3 tools/netcheck.py                        # default_run.yaml
+    python3 tools/netcheck.py default_run.yaml
     python3 tools/netcheck.py --budget               # link budget vs distance
 
 Exists because the alternative was pasting multi-line python -c into bash,
@@ -95,5 +95,5 @@ if __name__ == "__main__":
     if "--budget" in args:
         budget()
     else:
-        scn = args[0] if args else "scenarios/three_car_fleet.yaml"
+        scn = args[0] if args else "default_run.yaml"
         report(scn)
