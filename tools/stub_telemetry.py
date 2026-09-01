@@ -1347,13 +1347,17 @@ def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=()):
             continue
         d = max(0.1, math.dist((pos["x"], pos["y"], pos["z"]),
                                (jp["x"], jp["y"], jp["z"])))
+        # Past the radio horizon the earth blocks it, whatever the power.
+        if d > radio_horizon_m(pos.get("z"), jp.get("z")):
+            continue
         pl_d0 = 20.0 * math.log10(jband) + 20.0 * math.log10(0.001) + 32.44
         rx_dbm = tx - (pl_d0 + 10.0 * plexp * math.log10(d))
         total += 10.0 ** (rx_dbm / 10.0)
     return total
 
 
-def jammer_range_m(tx_dbm, band_mhz, noise_dbm, plexp, jn_db=0.0):
+def jammer_range_m(tx_dbm, band_mhz, noise_dbm, plexp, jn_db=0.0,
+                   tx_h_m=2.0, rx_h_m=2.0):
     """Nominal influence radius of an omnidirectional jammer: the distance at
     which its received power falls to `jn_db` above the ambient noise floor
     (J/N = jn_db). At jn_db = 0 this is the classic jammed-area boundary
@@ -1367,7 +1371,11 @@ def jammer_range_m(tx_dbm, band_mhz, noise_dbm, plexp, jn_db=0.0):
     """
     pl_d0 = 20.0 * math.log10(band_mhz) + 20.0 * math.log10(0.001) + 32.44
     exponent = (tx_dbm - (noise_dbm + jn_db) - pl_d0) / (10.0 * max(plexp, 0.1))
-    return 10.0 ** exponent
+    free_space = 10.0 ** exponent
+    # A jammer cannot reach past the horizon however much power it has. Both
+    # ends assumed near the ground unless told otherwise; pass heights for an
+    # airborne case. See radio_horizon_m.
+    return min(free_space, radio_horizon_m(tx_h_m, rx_h_m))
 
 
 def _scene_has_features(arena):
@@ -1387,6 +1395,28 @@ def _scene_has_features(arena):
     for a in (arena.get("_obstacles") or []):
         return True
     return False
+
+
+def radio_horizon_m(h1_m, h2_m):
+    """Line-of-sight range limit between two antennas, metres.
+
+    d_km ~ 4.12 * (sqrt(h1) + sqrt(h2)) with heights in metres - the standard
+    radio-horizon approximation (4/3-earth refraction). This is what stops a
+    jammer, or any transmitter, reaching arbitrarily far just by adding power:
+    past the horizon the earth is in the way.
+
+    It matters most for GNSS jamming. GNSS signals arrive at about -128 dBm, so
+    a jammer needs very little power to out-shout them, and a naive free-space
+    model gives denial radii of tens or hundreds of kilometres. Real GNSS
+    jamming is HORIZON-limited: two ~2 m antennas see about 11.6 km of each
+    other; a receiver at 100 m altitude sees a ground jammer from ~47 km, which
+    is why GNSS jamming affects aviation over far wider areas than ground
+    users. The Baltic Sea trial's ">3 km area of influence" for a ship-borne
+    jammer sits comfortably inside the ground-to-ground horizon.
+    """
+    h1 = max(_num(h1_m, 0.0), 1.0)      # assume a 1 m antenna at minimum
+    h2 = max(_num(h2_m, 0.0), 1.0)
+    return 4120.0 * (math.sqrt(h1) + math.sqrt(h2))
 
 
 def _position_aiding(agent, arena):

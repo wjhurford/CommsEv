@@ -209,3 +209,100 @@ keep its frames for instant scrubbing.
 
 **Per-agent:** which agent lost command first (bar) - shows the star dying at
 its longest link.
+
+---
+
+# Round 3 — architecture everywhere, and formation as a variable
+
+## Correction: GNSS jamming is NOT "theatre-wide", it is horizon-limited
+
+I over-claimed. GNSS jamming has a range like anything else - it is simply
+much LARGER than comms jamming range for the same power, because the victim
+signal is ~80-90 dB weaker (GNSS arrives at about -128 dBm; a comms link at
+-40 to -60 dBm). The earlier figures (146 km at 30 dBm) were free-space
+line-of-sight with no earth in the way, which is wrong.
+
+**Now modelled:** `radio_horizon_m(h1, h2) = 4120 * (sqrt(h1) + sqrt(h2))`,
+the standard 4/3-earth radio horizon. Nothing is received past it, whatever
+the power. Result:
+
+| case | GNSS denial radius |
+|---|---|
+| ground jammer -> ground receiver (2 m antennas) | capped at **11.7 km** at any power |
+| ground jammer -> drone at 100 m | **47 km** |
+| ground jammer -> receiver at 500 m | **98 km** |
+
+That is why GNSS jamming affects aviation over far wider areas than ground
+users, and why the Baltic trial's ">3 km" for a ship-borne jammer is
+comfortably inside the ground-to-ground horizon. The point that stands: on a
+100 m test grid the whole field is denied uniformly - not because the range is
+infinite, but because 100 m is tiny next to an 11 km radius.
+
+## Architecture must be a sweep dimension in EVERY experiment
+
+Will's point, and it is right. Command structure is the niche, so architecture
+should not be one experiment among four - it should be an axis on all of them.
+Every experiment file gets `authority: [centralized, decentralized,
+hierarchical]` in its sweep unless there is a reason not to. The out-and-back
+included: the interesting question is not just "how much drift" but "does a
+distributed fleet hold together while a centralized one is decapitated, over
+the same ground".
+
+## Formation as a controllable variable - strong literature support
+
+Will asked whether holding a shape could improve communications. It can, and
+it is a published anti-jamming technique:
+
+- *A Critical Analysis of Spoofing and Jamming Approaches* [29] describes a
+  **wireless relay network that mitigates jamming by optimising the FLIGHT
+  PATH of a UAV relay** - "utilizing the mobility of the UAV to maximize the
+  signal-to-interference-plus-noise ratio at the receiver". Formation geometry
+  as an anti-jam measure, exactly the idea.
+- *Drones* 2025 (9, 401) [9]: "optimizing the placement of relay UAVs to
+  maximize end-to-end packet delivery ratio in multi-hop networks... dynamic
+  relay positioning"; relays "significantly enhance drone communication...
+  during beyond-line-of-sight operations".
+- Chen et al. 2018 (channel-modelling survey): single-hop vs multi-hop UAV
+  networks in "mesh or star topologies controlled by the ground station", and
+  notes **antenna orientation** measurably changes received power - a second
+  geometric lever we do not model yet.
+
+Why it works in our model already: SINR falls with distance, so **splitting
+one long link into two short hops is a large SINR gain**. A relay placed
+between the GCS and a distant team converts a dying link into two healthy
+ones. Formations worth testing:
+
+- **cluster** - short strong internal links, poor reach, all agents inside the
+  jammer's core together.
+- **line / chain (relay)** - extends reach by multi-hop; each hop short and
+  strong; fragile to losing a middle agent.
+- **spread / wedge** - not all agents in the jammer's core at once; trades
+  link strength for survivability.
+- **adaptive relay** - an agent repositions to maximise the weakest link's
+  SINR (the published technique).
+
+**Proposed experiment 6: formation vs jamming.** Same fleet, same jammer,
+same mission; sweep formation x architecture. Metric: commanded_fraction and
+the worst link's SINR. Hypothesis from the literature: a relay chain keeps
+command at jamming levels where a cluster loses it.
+
+## Do our architectures match the literature? Honest answer
+
+- **Centralized vs decentralized** is textbook multi-agent control and our
+  implementation matches the standard description: one coordinator decides
+  (single point of failure; optimal while the link holds) versus every agent
+  decides for itself (loses information, never authority). Chen 2018's star vs
+  mesh topologies map onto our routing layer.
+- **Hierarchical** is a reasonable middle ground and is common in the
+  SAGIN/swarm literature, but the specific fallback semantics - a squad whose
+  leader drops reports up to the coordinator, or is stranded - are OUR design
+  choice. We made that choice explicit and declarable (`leader_loss`), which
+  is the honest way to handle it.
+- **What we should not claim:** that our three-way taxonomy is validated
+  against a specific published model. It is a defensible engineering
+  abstraction.
+- **What is arguably a contribution:** separating DECISION AUTHORITY from
+  NETWORK TOPOLOGY. Most treatments conflate them. A mesh can carry
+  centralized decision-making, and then the mesh survives a hub loss while the
+  decision-making does not. That gap is measurable here and is not, as far as
+  the library goes, something the surveyed work isolates.

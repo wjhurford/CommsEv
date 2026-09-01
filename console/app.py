@@ -1680,6 +1680,181 @@ class ShellPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Custom fleet builder - compose a fleet in the Console, no YAML by hand
+# ---------------------------------------------------------------------------
+
+# Sensible defaults per platform, so a custom fleet is a real fleet: bodies,
+# sensors and performance that the RF and dynamics models can actually use.
+# The "build one now" entry that appears at the bottom of each fleet picker.
+CUSTOM_FLEET_ENTRY = "+ Build custom fleet..."
+
+PLATFORM_DEFAULTS = {
+    "roboracer": {
+        "dims": (0.55, 0.30, 0.20), "speed": 1.5, "accel": 2.0,
+        "turn_radius": 0.6, "colour": "#2E6FB0",
+        "sensors": [("lidar", "ust10lx"), ("imu", "generic_imu")]},
+    "roboracer_no_lidar": {
+        "dims": (0.55, 0.30, 0.20), "speed": 1.5, "accel": 2.0,
+        "turn_radius": 0.6, "colour": "#2E6FB0",
+        "sensors": [("imu", "generic_imu")]},
+    "quadcopter": {
+        "dims": (0.40, 0.40, 0.15), "speed": 8.0, "accel": 4.0,
+        "turn_radius": 0.1, "colour": "#4FA3D1",
+        "sensors": [("imu", "generic_imu")]},
+    "ground_station": {
+        "dims": (0.40, 0.40, 1.00), "speed": 0.0, "accel": 1.0,
+        "turn_radius": 1.0, "colour": "#2E6FB0", "sensors": [], "ghost": True},
+    "jammer": {
+        "dims": (0.30, 0.30, 0.30), "speed": 0.0, "accel": 1.0,
+        "turn_radius": 1.0, "colour": "#C4685A", "sensors": [],
+        "jammer": True},
+}
+
+
+class CustomFleetDialog(QDialog):
+    """Build a fleet by hand: name it, pick a side, add agents with their
+    platform and spawn pose. Writes a real fleets/<name>.yaml, so a fleet you
+    invented in the sandbox is as diffable and re-runnable as a shipped one."""
+
+    def __init__(self, side="blue", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Build a custom {side} fleet")
+        self.side = side
+        lay = QVBoxLayout(self)
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Fleet name"))
+        self.name = QLineEdit(f"custom_{side}")
+        top.addWidget(self.name, 1)
+        lay.addLayout(top)
+        hint = QLabel("Add agents, set platform and spawn pose. Saved to "
+                      "fleets/<name>.yaml and selected in Setup.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["id", "platform", "x", "y", "z", "yaw"])
+        self.table.verticalHeader().setVisible(False)
+        lay.addWidget(self.table, 1)
+
+        rowbtns = QHBoxLayout()
+        add = QPushButton("Add agent")
+        add.clicked.connect(self.add_row)
+        rem = QPushButton("Remove selected")
+        rem.clicked.connect(self.remove_row)
+        rowbtns.addWidget(add)
+        rowbtns.addWidget(rem)
+        rowbtns.addStretch(1)
+        lay.addLayout(rowbtns)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Create fleet")
+        ok.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        lay.addLayout(row)
+
+        # Seed with something sensible for the side.
+        if side == "red":
+            self.add_row(("jam1", "jammer", 0.0, 0.0, 0.0, 0.0))
+        else:
+            self.add_row(("gcs", "ground_station", 0.0, -3.4, 0.0, 0.0))
+            self.add_row(("car1", "roboracer", -3.0, 2.0, 0.0, 0.0))
+
+    def add_row(self, preset=None):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        n = r + 1
+        vals = preset if isinstance(preset, tuple) else (
+            f"agent{n}", "roboracer", 0.0, 0.0, 0.0, 0.0)
+        self.table.setItem(r, 0, QTableWidgetItem(str(vals[0])))
+        combo = QComboBox()
+        combo.addItems(list(PLATFORM_DEFAULTS))
+        combo.setCurrentText(str(vals[1]))
+        self.table.setCellWidget(r, 1, combo)
+        for c, v in ((2, vals[2]), (3, vals[3]), (4, vals[4]), (5, vals[5])):
+            self.table.setItem(r, c, QTableWidgetItem(str(v)))
+        self.table.resizeColumnsToContents()
+
+    def remove_row(self):
+        r = self.table.currentRow()
+        if r >= 0:
+            self.table.removeRow(r)
+
+    def fleet_doc(self):
+        """The fleet YAML this dialog describes."""
+        agents = []
+        for r in range(self.table.rowCount()):
+            def num(c):
+                try:
+                    return float(self.table.item(r, c).text())
+                except (TypeError, ValueError):
+                    return 0.0
+            aid = (self.table.item(r, 0).text() or f"agent{r+1}").strip()
+            w = self.table.cellWidget(r, 1)
+            plat = w.currentText() if w else "roboracer"
+            d = PLATFORM_DEFAULTS.get(plat, PLATFORM_DEFAULTS["roboracer"])
+            L, W, H = d["dims"]
+            src = "Console custom fleet - nominal, NOT measured"
+            a = {"id": aid,
+                 "platform": ("roboracer" if plat == "roboracer_no_lidar"
+                              else plat),
+                 "network": self.side,
+                 "colour": d["colour"],
+                 "pose": {"x": num(2), "y": num(3), "z": num(4),
+                          "yaw": num(5)},
+                 "dimensions": {
+                     "length": {"value": L, "unit": "m", "source": src},
+                     "width": {"value": W, "unit": "m", "source": src},
+                     "height": {"value": H, "unit": "m", "source": src}},
+                 "performance": {
+                     "max_speed": {"value": d["speed"], "unit": "m/s",
+                                   "source": src},
+                     "max_accel": {"value": d["accel"], "unit": "m/s^2",
+                                   "source": src},
+                     "min_turn_radius": {"value": d["turn_radius"],
+                                         "unit": "m", "source": src}}}
+            if d.get("ghost"):
+                a["ghost"] = True
+            if d.get("sensors"):
+                a["sensors"] = [
+                    {"id": sid, "type": stype,
+                     "mount": {"offset": {"x": 0.1, "y": 0.0, "z": 0.15}}}
+                    for sid, stype in d["sensors"]]
+            if d.get("jammer"):
+                a["jammer"] = {
+                    "tx_power": {"value": 10, "unit": "dBm", "source": ""},
+                    "band": {"value": 2400, "unit": "MHz",
+                             "source": "Console custom fleet"}}
+            agents.append(a)
+        net = {"system": "adversary" if self.side == "red" else "friendly",
+               "authority": ("decentralized" if self.side == "red"
+                             else "centralized"),
+               "routing": "mesh" if self.side == "red" else "star",
+               "topology": ("decentralized" if self.side == "red"
+                            else "centralized"),
+               "band": 2400}
+        if self.side != "red":
+            gcs = next((a["id"] for a in agents
+                        if a["platform"] == "ground_station"), None)
+            if gcs:
+                net["coordinator"] = gcs
+            else:
+                net["authority"] = net["topology"] = "decentralized"
+                net["routing"] = "mesh"
+        name = (self.name.text() or f"custom_{self.side}").strip()
+        return name, {"spec_version": 0.1, "name": name, "kind": "fleet",
+                      "description": "Built in the Console's custom fleet "
+                                     "builder. Values are nominal, not "
+                                     "measured.",
+                      "networks": {self.side: net}, "agents": agents}
+
+
+# ---------------------------------------------------------------------------
 # Spawn dialog - where does this fleet start, in THIS scene?
 # ---------------------------------------------------------------------------
 
@@ -2223,6 +2398,8 @@ class Console(QMainWindow):
             combo.addItem(placeholder)
             for f in sorted((REPO_ROOT / folder).glob("*.yaml")):
                 combo.addItem(f.stem)
+            if folder == "fleets":
+                combo.addItem(CUSTOM_FLEET_ENTRY)
             i = combo.findText(current)
             if i > 0:
                 combo.setCurrentIndex(i)
@@ -2254,6 +2431,15 @@ class Console(QMainWindow):
             self._compose_setup()
             return
         fleet = combo.currentText()
+        if fleet == CUSTOM_FLEET_ENTRY:
+            fleet = self._build_custom_fleet(side)
+            if not fleet:
+                combo.setCurrentIndex(0)
+                return
+            self._refresh_setup_lists()
+            i = combo.findText(fleet)
+            if i > 0:
+                combo.setCurrentIndex(i)
         if side == "red" and fleet == self._setup_fleet:
             self.say("Red and blue fleets must be different files.")
             combo.setCurrentIndex(0)
@@ -2286,6 +2472,33 @@ class Console(QMainWindow):
         self.statusBar().showMessage(
             f"{self._setup_scene} + {both} - press Play, then "
             f"SETMISSION <name> and blue launch")
+
+    def _build_custom_fleet(self, side):
+        """Open the custom fleet builder, write the fleet file, return its
+        name (or None if cancelled). The file is a normal fleet from then on -
+        pickable, editable, diffable."""
+        dlg = CustomFleetDialog(side=side, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        name, doc = dlg.fleet_doc()
+        if not doc.get("agents"):
+            self.say("Custom fleet needs at least one agent.")
+            return None
+        import yaml as _yaml
+        path = REPO_ROOT / "fleets" / f"{name}.yaml"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "# Built in the Console's custom fleet builder.\n"
+                "# Values are NOMINAL, not measured - the provenance report "
+                "will say so.\n"
+                + _yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        except OSError as exc:
+            self.say(f"cannot write fleet: {exc}")
+            return None
+        self.say(f"Created fleets/{name}.yaml "
+                 f"({len(doc['agents'])} agents, {side})")
+        return name
 
     def _clear_side(self, side):
         ids = getattr(self, "_red_ids" if side == "red" else "_blue_ids", set())

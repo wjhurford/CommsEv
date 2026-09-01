@@ -200,6 +200,17 @@ break the simulator. Order is roughly dependency order.
 - [ ] **Camera/optical-flow aiding in open field** - lidar needs structure
       (now enforced), but optical flow localises off ground texture with no
       3D features. A camera sensor should aid where a lidar cannot.
+- [ ] **Formation as a variable** (Will, 1 Sep) - cluster / line-relay /
+      spread / adaptive-relay. Splitting one long link into two short hops is
+      a large SINR gain; optimising a relay's position to maximise SINR is a
+      published anti-jam technique (Critical Analysis [29]; Drones 2025 [9]).
+      Experiment 6. See docs/experiments-design.md round 3.
+- [ ] **Antenna orientation / gain pattern** - Chen 2018 measured that antenna
+      alignment materially changes received power on UAVs. A second geometric
+      lever, after formation.
+- [ ] **Terrain masking** - the radio horizon is now modelled; terrain
+      blocking (hills, buildings) is the next realism step for both comms and
+      GNSS denial.
 - [ ] **Failsafe doctrines** - expand on_link_loss to hold/rtl/land/continue
       with a realistic timeout (ArduPilot's real menu). Comms jamming's full
       behaviour set.
