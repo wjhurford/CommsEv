@@ -1,0 +1,47 @@
+# =============================================================================
+# Deadband SCENE — open_field
+# =============================================================================
+# An outdoor rig for the GNSS-denial / drift demo. Unlike the lab (walls, no
+# GNSS), a field HAS a GNSS fix, so a GNSS-band jammer is the thing that takes
+# it away - a clean cause and effect. Open ground: no walls for a lidar to
+# localise against, so a no-lidar car has ONLY GNSS to lose. Same lane points
+# A-F as the lab so missions/test runs here unchanged.
+#
+# GNSS is available here (availability: available); jam the GNSS band
+# (JAM jam1 band 1575) and watch a no-lidar fleet's belief drift off truth.
+# See docs/gnss-drift-model.md.
+# =============================================================================
+
+spec_version: 0.1
+name: open_field
+kind: scene
+
+description: >
+  20x20 m open outdoor ground with a GNSS fix available. The rig for the
+  GNSS-denial drift demo: jam the GNSS band and a no-lidar fleet drifts.
+
+arena:
+  type: box
+  extent: {x: 20.0, y: 20.0, z: 5.0}
+  surface_reflectivity: low
+  boundaries: {x_min: open, x_max: open, y_min: open, y_max: open}
+
+background:
+  propagation:
+    path_loss_exponent: {value: 2.2, unit: "", source: ""}   # near free space
+    noise_floor: {value: -95, unit: dBm, source: ""}
+  spectrum:
+    band: {value: 2400, unit: MHz, source: ""}
+  gnss:
+    availability: available     # outdoors: a fix exists, until it is jammed
+  wind:
+    speed: {value: 0.0, unit: "m/s", source: ""}
+
+points:
+  A: {x: -6.0, y:  2.0}
+  B: {x:  6.0, y:  2.0}
+  C: {x: -6.0, y:  0.0}
+  D: {x:  6.0, y:  0.0}
+  E: {x: -6.0, y: -2.0}
+  F: {x:  6.0, y: -2.0}
+  HOME: {x: 0.0, y: -6.0}

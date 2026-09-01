@@ -174,6 +174,35 @@ break the simulator. Order is roughly dependency order.
       it). Explicitly NOT needed for the current research sandbox - this is the
       hand-over-to-others milestone, built last of this group.
 
+- [x] 2026-09-01 no-LiDAR fleet `3_roboracer_no_lidar` - the clean rig for
+      measuring positioning faults (cars follow GCS waypoints open-loop, no
+      sensor loop to mask drift).
+- [ ] **GNSS-denial drift model** (Will, 1 Sep) - the headline effect. Two
+      poses per agent (true/believed); GNSS jammed -> dead-reckoning drift
+      that emerges from integrating IMU error without GPS correction; steer on
+      belief so the car physically misses. docs/jamming-effects-research.md.
+- [ ] **More jamming targets & techniques** (Will, 1 Sep) - beyond comms +
+      GNSS: radar/EO-IR sensor jamming; reactive/random/deceptive/follow-on
+      techniques; barrage vs spot vs sweep; directional jamming. See
+      docs/spectrum-and-sensors-reference.md.
+- [ ] **Real frequency bands** (Will, 1 Sep) - GPS L1/L2/L5, GLONASS, Galileo;
+      900/1300/2400/5800 ISM; Link 16 (hopping); UHF/VHF; SATCOM; X-band
+      radar. Additive - band separation already modelled. Reference doc above.
+- [ ] **More vehicle sensors** (Will, 1 Sep) - EO/IR camera + optical flow
+      (works in open field where lidar can't), magnetometer, radar altimeter,
+      wheel odometry, terrain-referenced nav, UWB/beacon ranging. Each feeds
+      the position estimate; the Kalman step fuses survivors. Reference doc.
+- [ ] **GNSS-denial grace period** (Will, 1 Sep) - real GPS+INS blends, so
+      position stays accurate ~10 s (ArduPilot) before diverging, rather than
+      drifting linearly from t=0 as v1 does. Add a per-agent denied-duration
+      before drift onset / an EKF-style ride-out. Directly answers "why so
+      quick".
+- [ ] **Camera/optical-flow aiding in open field** - lidar needs structure
+      (now enforced), but optical flow localises off ground texture with no
+      3D features. A camera sensor should aid where a lidar cannot.
+- [ ] **Failsafe doctrines** - expand on_link_loss to hold/rtl/land/continue
+      with a realistic timeout (ArduPilot's real menu). Comms jamming's full
+      behaviour set.
 - [ ] **Per-agent beliefs** (Will, 1 Sep) - each agent's own estimate of
       world state (positions of others, link health, its own pose) built only
       from what ITS sensors and network deliver, displayed beside ground

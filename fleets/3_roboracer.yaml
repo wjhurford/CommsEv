@@ -62,7 +62,7 @@ agents:
   - id: gcs
     platform: ground_station
     network: blue
-    colour: "#6B7B85"
+    colour: "#2E6FB0"
     pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
     dimensions:
       length: {value: 0.40, unit: m, source: "Nominal - measure the actual bench"}

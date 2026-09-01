@@ -318,3 +318,141 @@ dB/PDR figures as truth).
 - Still constant-jammer only; reactive/random/deceptive is the levels ladder.
 - No processing gain / spread spectrum — the model understates a
   spread-spectrum radio's resilience (justification doc §weaknesses).
+
+---
+
+## Step 5 — Network tab + three cells (built together), blue-only missions
+
+### What changed
+- **gcs is blue** (was drawn grey) — it was always on the blue network; now
+  it reads blue too.
+- **Missions are blue-only**, enforced in the sim (`_is_taskable`): SETMISSION
+  skips any adversary-network agent or jammer with a printed reason, and a
+  live REOBJECTIVE on one is ignored. Red is jamming, driven by
+  launch/halt/JAM, never by objectives.
+- **Three cell terminals** replace the single plain terminal: **Blue cell**
+  (commands blue: SETMISSION, blue launch/halt, REOBJECTIVE blue), **Red cell**
+  (red launch/halt, JAM — no SETMISSION, cannot task blue), **White cell**
+  (umpire: anything + shell; extra "New terminal" tabs are white). Scope is
+  enforced by `Console.side_of()` (network `system` field); a cross-side order
+  prints why it was blocked and is not sent. Bash works in every cell.
+- **Network tab** (new, after Mission): `netcheck`'s tables live in the GUI —
+  Declared (authority/routing/coordinator/squads/doctrine per network), Live
+  (each agent's decider/tier/reachable, unreachable ones in red), Measured
+  topology (shape/hub/betweenness, active/spare/down links, and a ⚠ when the
+  measured shape ≠ the declared routing).
+- **Editable leader-loss doctrine** (`leader_loss: fallback|strand`): a squad
+  whose leader drops either reports up to the coordinator (fallback, default,
+  "degraded not decapitated") or is stranded. Declarable per network, shown in
+  the Network tab. Discussion + open question in docs/cells-and-network.md.
+- **Tests: 139 passed** (+2 sections: missions-are-blue-only; leader-loss
+  doctrine fallback vs strand).
+
+### Check (all verified headless; GUI ones need your eyes)
+1. `python3 tests/test_all.py` → 139 passed, 0 failed.
+2. Console Terminals area shows three tabs — Blue / Red / White cell —
+   colour-coded. In the **Red cell**, `SETMISSION test` is blocked
+   ("missions are a BLUE-cell action"); in the **Blue cell**, `JAM jam1
+   power 20` is blocked ("JAM is a RED-cell action"); White does both.
+3. Network tab: Declared shows blue (star, coordinator gcs) and red;
+   after `red launch` + jamming, Live shows car1/car2 decider gcs
+   UNREACHABLE (red), car3 reachable.
+4. Blue cell: `blue launch`, `SETMISSION test`; Red cell: `red launch`,
+   `JAM jam1 power 30`. Behaviour matches CHECK 4 numbers above.
+
+---
+
+## Step 5b — Jamming now CHANGES BEHAVIOUR (the missing causal link)
+
+Will spotted it live: under jamming the Network tab showed every car
+UNREACHABLE and links down, but the cars kept driving. Because `step()` only
+ever checked `armed`, never whether an agent could still reach its commander —
+so `on_link_loss` was declared and never read. Fixed.
+
+### What changed
+- `frame()` computes reachability from the PRE-step link state (honest
+  one-tick lag) and passes the set of cut-off agents to `step()`.
+- `step()` honours each agent's `on_link_loss` doctrine: **hold** (default —
+  freeze until the link returns; a centralized agent with no coordinator has
+  no orders) or **continue** (ignore, the old behaviour / a control). A
+  **decentralized** agent is never cut off (it commands itself), so it keeps
+  moving — the robustness result, now physical, not just a readout.
+- The frame carries `link_loss_hold` per agent; the map draws "⊘ held (link
+  loss)" on a frozen car so it reads as "cut off", not "arrived".
+- Tests: **143 passed** (+1 section: a centralized fleet freezes under
+  jamming, a decentralized one keeps going).
+
+### Check
+1. `python3 tests/test_all.py` → 143 passed.
+2. Run the jammed setup, `blue launch`, `SETMISSION test`, cars shuttle.
+   `red launch` + `JAM jam1 power 30` → the cars STOP and show "⊘ held";
+   `red halt` → they resume. (Before this, they drove on regardless.)
+
+---
+
+## Step 6 — GNSS-denial drift (belief vs truth), no-LiDAR rig, orange down line
+
+The headline correctness feature: jamming now produces the RIGHT effect for the
+RIGHT band. Full model in docs/gnss-drift-model.md; research in
+docs/jamming-effects-research.md.
+
+### What changed
+- **Two poses per agent:** true (physics) and belief (estimate). A car with a
+  fix (GNSS or lidar/vision) has belief == truth. GNSS-denied and unaided, it
+  dead-reckons and DRIFTS at ~4% of distance (UAV Navigation figure), the drift
+  emerging from integrating a per-tick error, never hardcoded. The controller
+  steers on belief, so a drifted car physically misses. A regained fix
+  recovers it.
+- **Two jammings, cleanly separated by band:** a GNSS-band jammer (1575 MHz)
+  denies the position fix -> drift; a comms-band jammer (2400 MHz) denies the
+  link -> failsafe/hold. Retune the one jammer live: `JAM jam1 band 1575`.
+- **Sensors matter:** a lidar/vision car resists GNSS jamming (localises
+  without GNSS); a no-lidar car has only GNSS to lose.
+- **`fleets/3_roboracer_no_lidar`** (built earlier) and **`scenes/open_field`**
+  (GNSS available) are the clean rig.
+- **UI:** the map draws a belief "ghost" for any drifting car ("thinks: X m
+  off"); the Sensor panel is per-agent (GNSS status, estimated error, the
+  agent's real sensor list, lidar plot only if it has one).
+- **Orange down line:** a DOWN link is now drawn orange, unmistakable.
+- **Tests: 151 passed** (+6: drift grows under GNSS jamming, recovers on fix,
+  lidar resists, comms-band jammer causes no drift).
+
+### Check (headless verified)
+1. `python3 tests/test_all.py` -> 151 passed.
+2. Setup: scene `open_field`, Blue `3_roboracer_no_lidar`, Red `red_jammer`.
+   Play; White/Blue cell: `SETMISSION test`, `blue launch` (cars shuttle,
+   Sensor panel "GNSS ok"). Red cell: `JAM jam1 band 1575`, `red launch` ->
+   ghosts appear and widen, Sensor panel "GNSS DENIED - est error X m". `red
+   halt` -> ghosts snap back.
+3. Same with Blue `3_roboracer` (has lidar): GNSS jamming does nothing -
+   the lidar localises the car. That contrast is the result.
+4. Any run with a down link: the down link line is orange.
+
+### Known gaps (in docs/gnss-drift-model.md)
+- Lidar aiding is a scalar proxy (has-lidar => no drift); real odometry needs
+  map features and has its own error. The Kalman/fusion step refines this.
+- Drift direction is a random walk (growth rate sourced; exact path
+  illustrative).
+
+---
+
+## Step 7 — Band strip (frequency filter above the timeline)
+
+### What changed
+- A **band strip** sits above the timeline: one button per frequency in the
+  scene (All, each comms band, GNSS 1575). Selecting a comms band shows only
+  that band's links; "All" shows everything; "GNSS" hides the comms lines so
+  the positioning drift (ghosts) is the story on that band.
+- A band button turns **orange, bold, live** while a jammer is emitting on it,
+  so what is being jammed — and when — is evident at a glance. GNSS counts a
+  jammer within 5 MHz of L1.
+- Each link now carries `band_mhz` (from its network) so the viewport can
+  filter by band; nothing else changed in the sim.
+- Tests: 152 passed (link band tag added; no behaviour change).
+
+### Check
+1. `python3 tests/test_all.py` -> 152 passed.
+2. Run any scene: the Band strip shows All / the comms band / GNSS. Click
+   the comms band -> only comms links draw; click GNSS -> comms lines vanish.
+3. `red launch` on the comms band -> that band's button goes orange live.
+   `JAM jam1 band 1575` -> the GNSS button goes orange instead.

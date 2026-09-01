@@ -36,6 +36,33 @@ RATE_HZ = 10.0
 # means the same thing everywhere in this file - see docs/PATCH-07-CHECKS.md.
 WALL_MARGIN_M = 0.6
 
+# --- GNSS / dead-reckoning drift model. See docs/jamming-effects-research.md
+# and docs/gnss-drift-model.md. Every figure here is a declared free parameter
+# with a source; none is invented.
+GNSS_BAND_MHZ = 1575.42          # GPS L1 - the band a GNSS jammer occupies
+# Jammer power (received, dBm) above which an agent loses its GNSS fix. GNSS
+# signals arrive at about -128 dBm, so a jammer only tens of dB stronger denies
+# them ("GNSS signals are weak and easily jammed", Critical Analysis of
+# Spoofing and Jamming). -120 dBm is a defensible denial threshold, NOT a
+# measurement.
+GNSS_DENIAL_DBM = -120.0
+# Dead-reckoning drift as a FRACTION OF DISTANCE TRAVELLED. 0.04 (4%) is the
+# UAV Navigation VECTOR autopilot figure for pure MEMS inertial (~33 m/min);
+# with visual aiding it falls to ~0.01 (1%). Source: UAV Navigation, "Dead
+# Reckoning Operations".
+DRIFT_RATE_UNAIDED = 0.04
+DRIFT_RATE_AIDED = 0.01
+# A sensor that gives an RF-immune position fix (lidar/vision localisation) all
+# but removes the drift - the GNSS-denied-navigation result. Modelled as a
+# near-zero rate; real visual odometry is richer (flagged simplification).
+DRIFT_RATE_LIDAR = 0.0
+# Heading of the accumulating error random-walks; this is its per-tick sigma
+# (rad). Free parameter - it sets how the error meanders, not how fast it grows.
+DRIFT_TURN_SIGMA = 0.15
+# When a fix returns, the estimate is pulled back to truth at this rate (m/s),
+# not snapped - matches ArduPilot's EKF offset correction "reducing at 1 m/s".
+GNSS_RECOVER_MPS = 1.0
+
 
 def _num(v, default=0.0):
     """Accept a bare number or a {value, unit, source} quantity."""
@@ -307,8 +334,45 @@ def load_scenario(path):
             # 30-second-old clock would put it. See "Bug fix: the launch
             # hiccup" in docs/PATCH-07-CHECKS.md.
             "phase_t0": 0.0,
+            # POSITION ESTIMATE. `belief` is where the agent THINKS it is;
+            # the pose in `poses` is the truth. They agree while the agent has
+            # a fix (GNSS or a lidar/vision loop); under GNSS denial the belief
+            # dead-reckons and DRIFTS. `drift` is the accumulated error vector
+            # (belief - truth), `drift_dir` the heading it is currently
+            # accumulating along. See step() and docs/gnss-drift-model.md.
+            "belief": {"x": _num(pose.get("x")), "y": _num(pose.get("y"))},
+            "drift": {"x": 0.0, "y": 0.0},
+            "drift_dir": 0.0,
+            # What this agent does when it cannot reach its commander: hold
+            # (freeze, default) or continue. Read by step(). A real field on
+            # the fleet already (lab cars declare on_link_loss: hold).
+            "on_link_loss": a.get("on_link_loss", "hold"),
             "ghost": bool(a.get("ghost", False)),
             "speed": _num((a.get("performance") or {}).get("max_speed"), 1.5),
+            # VEHICLE DYNAMICS. Until now an agent reached full speed in one
+            # tick and its heading TELEPORTED to the direction of travel - so
+            # a shuttling car "turned round" instantly and its forward-mounted
+            # lidar snapped with it. Both are now rate-limited from the
+            # performance block the schema always had:
+            #   max_accel        m/s^2 - how fast it can change speed
+            #   min_turn_radius  m     - tightest arc; yaw rate = v / R
+            # MOTION MODEL by platform: a car is ACKERMANN (it can only drive
+            # along its heading, so it must arc round or reverse); a
+            # quadcopter is HOLONOMIC (it can translate any direction and its
+            # yaw is independent of travel).
+            "max_accel": _num((a.get("performance") or {}).get("max_accel"),
+                              2.0),
+            "turn_radius": _num((a.get("performance") or {})
+                                .get("min_turn_radius"), 0.6),
+            "motion": (a.get("motion")
+                       or ("holonomic"
+                           if a.get("platform") in ("quadcopter", "drone",
+                                                    "multirotor")
+                           else "ackermann")),
+            # A car may reverse rather than execute a U-turn. Reversing keeps
+            # the heading (and therefore points a forward lidar BACKWARDS -
+            # a real sensing consequence, surfaced as `reversing` per frame).
+            "can_reverse": bool(a.get("can_reverse", True)),
             # A jammer is an ORDINARY agent that happens to transmit noise:
             # {tx_power, band} quantities. Armed = transmitting - the same
             # LAUNCH/HALT state machine as everything else, so `red launch`
@@ -767,7 +831,8 @@ def blocked(agent, nx, ny, poses, agents, arena):
 _ALL_AGENTS = []
 
 
-def step(agents, poses, t, dt, arena):
+def step(agents, poses, t, dt, arena, unreachable=None,
+         position_lost=None, drift_rates=None, rng=None):
     """Advance every agent one tick toward its mission target.
 
     Motion is speed-limited and collision BLOCKS it rather than displacing the
@@ -776,10 +841,29 @@ def step(agents, poses, t, dt, arena):
     overlap, so two agents in contact rest against each other instead of
     jittering. This is a kinematic constraint solver, not a physics engine —
     there is no momentum, restitution or contact force.
+
+    LINK LOSS. `unreachable` is the set of agent ids that, this tick, cannot
+    reach whoever commands them (from command_authority on the pre-step link
+    state). What such an agent DOES is its `on_link_loss` doctrine:
+      hold (default) - freeze in place until the link returns. A centralized
+                       agent that loses its coordinator has no orders, so it
+                       stops. THIS is what makes jamming change behaviour, not
+                       just a readout.
+      continue       - keep executing the last objective regardless (the old
+                       behaviour; a control condition, and what a decentralized
+                       agent effectively does since it never loses authority).
+    A decentralized agent is never in `unreachable` (it decides for itself),
+    so it keeps moving under jamming - the robustness story, made physical.
     """
     global _ALL_AGENTS
     _ALL_AGENTS = agents            # so a World built inside mission_target
                                     # can answer questions about every agent
+    unreachable = unreachable or set()
+    position_lost = position_lost or set()
+    drift_rates = drift_rates or {}
+    if rng is None:
+        import random as _r
+        rng = _r.Random()
     contacts = []
     for a in agents:
         p = poses[a["id"]]
@@ -790,19 +874,75 @@ def step(agents, poses, t, dt, arena):
         if (a["mission"].get("type", "static") == "static"
                 or not a.get("armed", False)):
             p["speed"] = 0.0
+            p["v"] = 0.0
+            _update_belief(a, poses, 0.0, 0.0, dt, position_lost, drift_rates,
+                           rng)
+            continue
+        # Command lost: apply the agent's link-loss doctrine. `hold` freezes;
+        # `continue` ignores the loss. This is the causal step that was
+        # missing - jamming that strips authority now stops the vehicle.
+        if a["id"] in unreachable \
+                and (a.get("on_link_loss") or "hold") != "continue":
+            p["speed"] = 0.0
+            _update_belief(a, poses, 0.0, 0.0, dt, position_lost, drift_rates,
+                           rng)
             continue
         # Look one tick AHEAD. Without this the target advances at exactly the
         # agent's own speed, so the agent keeps catching it exactly and stopping
         # for a frame - which is what put the regular dropouts to zero in the
         # speed plot. A moving target must always be a step away.
         tx, ty = mission_target(a, t + dt, poses, arena)
-        dx, dy = tx - p["x"], ty - p["y"]
+        # A vehicle steers toward its target from where it BELIEVES it is - it
+        # has no other position to use. While it has a fix, belief == truth
+        # and this is the old behaviour. Under GNSS denial, belief has drifted,
+        # so the heading is computed from a wrong origin and the true path
+        # bends off-target: the fault becomes visible, and emergent.
+        b = a.get("belief") or {"x": p["x"], "y": p["y"]}
+        dx, dy = tx - b["x"], ty - b["y"]
         dist = math.hypot(dx, dy)
         if dist < 1e-6:
             p["speed"] = 0.0
+            _update_belief(a, poses, 0.0, 0.0, dt, position_lost, drift_rates,
+                           rng)
             continue
-        stepd = min(dist, max(a["speed"], 0.05) * dt)
-        ux, uy = dx / dist, dy / dist
+        # --- speed: accelerate toward the cap, decelerate to stop on target.
+        vmax = max(a["speed"], 0.05)
+        accel = max(_num(a.get("max_accel"), 2.0), 0.05)
+        # Slow down in time to stop at the target: v = sqrt(2*a*d).
+        v_want = min(vmax, math.sqrt(max(2.0 * accel * dist, 0.0)))
+        v = _num(p.get("v"), 0.0)
+        v += max(-accel * dt, min(accel * dt, v_want - v))
+        v = max(0.0, min(v, vmax))
+
+        desired = math.atan2(dy, dx)
+        reversing = False
+        if a.get("motion") == "holonomic":
+            # A quadcopter translates in any direction; yaw is free, so point
+            # it along travel for display (a camera could point elsewhere).
+            hx_, hy_ = math.cos(desired), math.sin(desired)
+            p["yaw"] = round(wrap_pi(desired), 4)
+        else:
+            # ACKERMANN: it can only move along its own heading, and the
+            # heading changes no faster than v / turn_radius.
+            yaw = _num(p.get("yaw"))
+            err = wrap_pi(desired - yaw)
+            if abs(err) > math.radians(120.0) and a.get("can_reverse", True):
+                # Too sharp to turn into - back up along the current heading
+                # instead. The lidar now faces AWAY from travel.
+                reversing = True
+                err = wrap_pi(err - math.pi)
+            radius = max(_num(a.get("turn_radius"), 0.6), 0.05)
+            max_rate = max(v, 0.05) / radius        # rad/s
+            yaw = wrap_pi(yaw + max(-max_rate * dt,
+                                    min(max_rate * dt, err)))
+            p["yaw"] = round(yaw, 4)
+            hx_, hy_ = math.cos(yaw), math.sin(yaw)
+            if reversing:
+                hx_, hy_ = -hx_, -hy_
+        p["v"] = round(v, 4)
+        p["reversing"] = reversing
+        stepd = min(dist, v * dt)
+        ux, uy = hx_, hy_
         nx, ny = p["x"] + ux * stepd, p["y"] + uy * stepd
 
         why = blocked(a, nx, ny, poses, agents, arena)
@@ -816,12 +956,49 @@ def step(agents, poses, t, dt, arena):
                 p["x"] = nx
             elif blocked(a, p["x"], ny, poses, agents, arena) is None:
                 p["y"] = ny
-        # Heading follows the direction of travel, not the target bearing.
+        # Speed is what the body ACTUALLY achieved (collision may have cut it
+        # short); heading was integrated above, never snapped to the bearing.
         moved = math.hypot(p["x"] - px0, p["y"] - py0)
         p["speed"] = round(moved / dt, 4) if dt > 1e-6 else 0.0
-        p["yaw"] = round(wrap_pi(math.atan2(uy, ux)), 4)
         p["x"], p["y"] = round(p["x"], 4), round(p["y"], 4)
+        _update_belief(a, poses, p["x"] - px0, p["y"] - py0, dt,
+                       position_lost, drift_rates, rng)
     return contacts
+
+
+def _update_belief(a, poses, adx, ady, dt, position_lost, drift_rates, rng):
+    """Advance an agent's position estimate one tick.
+
+    With a fix: pull the belief back toward truth at GNSS_RECOVER_MPS (a
+    regained fix corrects gradually, not with a jump). Without a fix (GNSS
+    denied and no lidar/vision aiding): dead-reckon. The estimate follows the
+    real motion, but an error accumulates at drift_rate * distance travelled in
+    a slowly random-walking direction - so the drift GROWS with distance,
+    exactly the % -of-distance behaviour the literature reports, and it is the
+    integral of a per-tick error, never a hardcoded wander.
+    """
+    p = poses[a["id"]]
+    b = a.setdefault("belief", {"x": p["x"], "y": p["y"]})
+    drift = a.setdefault("drift", {"x": 0.0, "y": 0.0})
+    if a["id"] in position_lost:
+        rate = drift_rates.get(a["id"], DRIFT_RATE_UNAIDED)
+        step_d = math.hypot(adx, ady)
+        a["drift_dir"] = wrap_pi(a.get("drift_dir", 0.0)
+                                 + rng.gauss(0.0, DRIFT_TURN_SIGMA))
+        emag = rate * step_d
+        drift["x"] += emag * math.cos(a["drift_dir"])
+        drift["y"] += emag * math.sin(a["drift_dir"])
+        # belief = truth + accumulated error (the estimate the vehicle holds)
+        b["x"] = p["x"] + drift["x"]
+        b["y"] = p["y"] + drift["y"]
+    else:
+        # A fix (GNSS or a lidar/vision loop) gives an ABSOLUTE position every
+        # tick, so the belief tracks truth: no lag, no residual. The estimate
+        # is truth plus small fix noise (negligible here). A regained fix
+        # therefore corrects the accumulated drift immediately - which is what
+        # makes "jam -> drift, unjam -> recover" clean to watch.
+        b["x"], b["y"] = p["x"], p["y"]
+        drift["x"], drift["y"] = 0.0, 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1106,9 +1283,16 @@ def command_authority(agent, arena, links, poses, networks,
         if _reaches(leader):
             tier = "coordinator" if leader == net.get("coordinator") else "leader"
             return {"decider": leader, "reachable": True, "tier": tier}
-        # Leader unreachable: try the top-level coordinator before giving up.
+        # Leader unreachable. DOCTRINE, declarable per network as `leader_loss`:
+        #   fallback (default) - the squad reports up to the coordinator;
+        #                        degraded, not decapitated.
+        #   strand             - the squad is on its own the moment its leader
+        #                        drops; no automatic reach-up.
+        # This is exactly the kind of command-resilience choice the framework
+        # exists to let you compare - so it is a field, not a hard-coded rule.
+        doctrine = (net.get("leader_loss") or "fallback").lower()
         top = net.get("coordinator")
-        if top != leader and _reaches(top):
+        if doctrine == "fallback" and top != leader and _reaches(top):
             return {"decider": top, "reachable": True, "tier": "coordinator"}
         return {"decider": leader, "reachable": False, "tier": "orphaned"}
 
@@ -1186,6 +1370,59 @@ def jammer_range_m(tx_dbm, band_mhz, noise_dbm, plexp, jn_db=0.0):
     return 10.0 ** exponent
 
 
+def _scene_has_features(arena):
+    """Does this world give a lidar/camera something to localise AGAINST?
+
+    A lidar knows where it is by matching what it scans to a known shape - it
+    needs walls, buildings, terrain. In an OPEN FIELD with nothing around, a
+    lidar sees no returns and cannot localise at all (Will's point, and it is
+    correct). Proxy: the arena has reference features if any boundary is solid
+    (walls) or there is a static obstacle. Open boundaries + no obstacles =
+    featureless = no lidar aiding. See docs/gnss-drift-model.md."""
+    arena = arena or {}
+    for face, kind in (arena.get("boundaries") or {}).items():
+        if kind == "solid":
+            return True
+    # A non-ghost body an agent could scan counts as a feature too.
+    for a in (arena.get("_obstacles") or []):
+        return True
+    return False
+
+
+def _position_aiding(agent, arena):
+    """An RF-immune source of a position fix this agent carries. A lidar or
+    camera can localise WITHOUT GNSS or the radio - but ONLY where there is
+    something to localise against (see _scene_has_features). An IMU is NOT
+    aiding: it is the dead-reckoning source that DRIFTS. Returns the drift
+    rate under GNSS denial, or None if this agent has no usable fix source."""
+    if not _scene_has_features(arena):
+        return None                      # featureless field: lidar cannot help
+    for sen in agent.get("sensors") or []:
+        t = (sen.get("type") or "").lower()
+        if "lidar" in t or "ust10" in t or "camera" in t or "vision" in t:
+            return DRIFT_RATE_LIDAR
+    return None
+
+
+def gnss_denied(agent, poses, jammers, plexp):
+    """Is this agent's GNSS fix denied right now by a GNSS-band jammer?
+
+    Only a jammer ON the GNSS band counts (a comms-band jammer denies the
+    radio link, not the position fix - two different jammings, the whole
+    point). Denied when the received jamming power on L1 exceeds the denial
+    threshold. See docs/jamming-effects-research.md."""
+    gnss_jams = [j for j in jammers
+                 if abs(_qty((j.get("jammer") or {}).get("band"), 2400.0)
+                        - GNSS_BAND_MHZ) < 5.0]
+    if not gnss_jams:
+        return False
+    mw = jammer_rx_mw(poses[agent["id"]], gnss_jams, poses, plexp,
+                      GNSS_BAND_MHZ, exclude=(agent["id"],))
+    if mw <= 0:
+        return False
+    return 10.0 * math.log10(mw) > GNSS_DENIAL_DBM
+
+
 def active_jammers(agents):
     """The jammers currently transmitting: a jammer block AND armed."""
     return [a for a in agents if a.get("jammer") and a.get("armed")]
@@ -1261,6 +1498,7 @@ def apply_routing(links, agents, networks, poses, world=None):
                         noise_dbm=_rf["noise_dbm"], interference_mw=interf)
         out.append({**l, **state,
                     "routing": routing,
+                    "band_mhz": band,          # so the UI can filter by band
                     "active": active,
                     "usable": state["state"] != "down"})
     return out
@@ -1443,12 +1681,44 @@ def _unused_enforce_bounds(agents, poses, arena):
 
 def frame(t, dt, seq, arena, agents, links, poses, rng):
     """One telemetry frame. THIS DICTIONARY IS THE CONTRACT."""
-    contacts = step(agents, poses, t, dt, arena)
+    _nets0 = arena.get("networks") or {}
+    # Reachability BEFORE moving: score the links on the poses as they enter
+    # this tick, work out who cannot reach their commander, and let that gate
+    # movement. Using the pre-step state is the honest one-tick lag - an agent
+    # acts on the link it last had, not one it cannot yet know. Without this,
+    # a jammed centralized car kept driving as if still commanded.
+    _pre = apply_routing(links, agents, _nets0, poses, world=arena)
+    _pre_states = {frozenset((l["a"], l["b"])): l["state"] for l in _pre}
+    _unreachable = {a["id"] for a in agents
+                    if not command_authority(a, arena, links, poses, _nets0,
+                                             link_states=_pre_states
+                                             ).get("reachable", True)}
+    # GNSS: is each agent's position fix available? Denied by a GNSS-band
+    # jammer, OR simply absent if the scene provides no GNSS (indoors). An
+    # agent with a lidar/vision aiding sensor keeps a fix regardless (RF-
+    # immune). Those with no fix this tick DRIFT; drift_rates says how fast.
+    _rf0 = scene_rf(arena)
+    _jam0 = active_jammers(agents)
+    _bg = (arena or {}).get("background") or {}
+    _gnss_present = ((_bg.get("gnss") or {}).get("availability", "available")
+                     != "denied")
+    _position_lost, _drift_rates = set(), {}
+    for a in agents:
+        aid = a["id"]
+        aided = _position_aiding(a, arena)   # None, or a (low) drift rate
+        gnss_ok = (_gnss_present
+                   and not gnss_denied(a, poses, _jam0, _rf0["plexp"]))
+        if gnss_ok or aided is not None:
+            _drift_rates[aid] = (aided if aided is not None
+                                 else DRIFT_RATE_AIDED)
+        else:
+            _position_lost.add(aid)
+            _drift_rates[aid] = DRIFT_RATE_UNAIDED
+    contacts = step(agents, poses, t, dt, arena, unreachable=_unreachable,
+                    position_lost=_position_lost, drift_rates=_drift_rates,
+                    rng=rng)
 
-    # Score the links FIRST - against the scene's declared baseline, with
-    # every armed jammer in the denominator - so that command authority
-    # below judges reachability from the links as they actually are, jammed
-    # and all, not from clean-spectrum geometry.
+    # Re-score after movement for the DISPLAY (positions changed).
     links_out = apply_routing(links, agents, arena.get("networks") or {},
                               poses, world=arena)
     _states = {frozenset((l["a"], l["b"])): l["state"] for l in links_out}
@@ -1483,6 +1753,24 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # Assigned vs active - the whole point of this patch. An agent
             # can hold a fully-formed objective and still not be armed.
             "armed": bool(a.get("armed", False)),
+            # Driving BACKWARDS (too sharp to turn into), so a forward-mounted
+            # lidar is pointing away from the direction of travel - a real
+            # sensing gap, not a display quirk.
+            "reversing": bool(poses[a["id"]].get("reversing")),
+            "motion": a.get("motion"),
+            # Is this agent holding because it lost its commander this tick?
+            "link_loss_hold": (a["id"] in _unreachable
+                               and (a.get("on_link_loss") or "hold")
+                               != "continue"
+                               and a["mission"].get("type") != "static"),
+            # POSITION ESTIMATE vs truth. `believed` is where the agent thinks
+            # it is; `position_error_m` is how wrong that is (0 with a fix,
+            # growing under GNSS denial). `gnss_denied` flags the cause.
+            "believed": dict(a.get("belief") or {}),
+            "position_error_m": round(
+                math.hypot(_num((a.get("drift") or {}).get("x")),
+                           _num((a.get("drift") or {}).get("y"))), 3),
+            "gnss_denied": a["id"] in _position_lost,
             "rf": rf_out,
             # A jammer's own emitter, for the Contested tab.
             "jammer": ({"tx_dbm": _qty((a.get("jammer") or {})
@@ -1615,6 +1903,21 @@ def parse_retask(text, agents_by_id):
 # in docs/PATCH-07-CHECKS.md for the full reasoning; summary here.
 # ---------------------------------------------------------------------------
 
+def _is_taskable(agent, networks):
+    """Can this agent be given an OBJECTIVE (a mission / REOBJECTIVE)?
+
+    No, if it sits on an adversary network - red is jamming, not manoeuvre,
+    and it is driven by LAUNCH/HALT/JAM, never by a mission. Also no if it is
+    a jammer by platform, wherever it sits. Everything else (blue fleet) is
+    taskable. Keeping this one predicate means the mission path and the live
+    REOBJECTIVE path agree. See docs/vocabulary.md.
+    """
+    if (agent or {}).get("platform") == "jammer" or (agent or {}).get("jammer"):
+        return False
+    net = (networks or {}).get(agent.get("network")) or {}
+    return net.get("system", "friendly") != "adversary"
+
+
 def apply_mission_file(path, agents_by_id, points, arena,
                        links=None, poses=None):
     """SETMISSION: distribute a mission file's per-agent objectives onto the
@@ -1646,6 +1949,10 @@ def apply_mission_file(path, agents_by_id, points, arena,
         if aid not in agents_by_id:
             messages.append(f"SETMISSION: '{aid}' is not in the running "
                             f"scene - it will not appear")
+            continue
+        if not _is_taskable(agents_by_id[aid], networks):
+            messages.append(f"SETMISSION: '{aid}' is on the adversary side "
+                            f"- missions are blue only, skipped")
             continue
         if links is not None and poses is not None:
             auth = command_authority(agents_by_id[aid], arena, links, poses,
@@ -1837,6 +2144,10 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
         result = parse_retask(line, agents_by_id)
         if result:
             aid, block = result
+            if not _is_taskable(agents_by_id[aid], networks):
+                print(f"retask: '{aid}' is on the adversary side - missions "
+                      f"are blue only, ignored", file=sys.stderr)
+                continue
             ok, err = validate_objective(block, points, arena)
             if not ok:
                 print(f"retask: {aid} rejected - {err}", file=sys.stderr)

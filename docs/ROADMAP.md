@@ -18,15 +18,26 @@ decisions supersede older text in BACKLOG.md; this file is the order.
 - `fleets/3_roboracer_jammed.yaml`: the lab fleet plus one red jammer — the
   first genuinely contested run.
 
-## Now
+## Done
 
-**2. Network tab.** Command authority and measured topology, live in the GUI
+**2. Network tab — DONE (1 Sep, Step 5).** Command authority and measured topology, live in the GUI
 (netcheck's tables, finally visible): who decides for whom, reachable or not,
 declared routing vs measured shape, active vs spare links. This is where the
 **editable doctrines** discussion happens (does a squad strand or fall back
 when its leader drops — declarable per network, not hard-coded).
 
-**3. Blue / red / white cell terminals.** Scoped by side: blue cell commands
+## Now (correctness focus)
+
+**PRIORITY (Will, 1 Sep) — model the ACTUAL effects of jamming, emergent not
+hardcoded.** See docs/jamming-effects-research.md. Two jammings, two effects:
+comms jamming -> failsafe doctrine (hold/rtl/land/continue, real timeout);
+GNSS jamming -> belief-vs-truth position drift (dead reckoning, error grows
+~10 s then diverges). No-LiDAR fleet (3_roboracer_no_lidar, DONE) is the clean
+rig. Build order: (1) belief/truth + GNSS drift [DONE 1 Sep, Step 6], (2) failsafe doctrines,
+(3) mitigations (LiDAR/vision/Kalman close the gap). Reviewed by Will first.
+
+
+**3. Cell terminals — DONE with the Network tab (Step 5).** Remaining on the red side: build interception, then reactive jammer. Deferred by Will until the ONE jammer is verified correct. Scoped by side: blue cell commands
 blue, red cell commands red (the jammer!), white cell is the umpire's full
 shell. **Fleet-wide REOBJECTIVE** (`REOBJECTIVE blue <verb>`, scope tokens
 like LAUNCH/HALT's, reachability-gated) lands here. **Command interception**
@@ -56,3 +67,13 @@ scripted jamming levels, graded on comms quality + mission outcome + time.
   until the companion apps exist.
 - SETMISSION order is Play → SETMISSION → blue launch (pre-Play buffering is
   a nicety, queued).
+
+## Major milestone (Will, 1 Sep) — real drones via ArduPilot + Gazebo
+
+Integrate ArduPilot SITL flight stacks flying in Gazebo Harmonic as the agents,
+in place of (or alongside) the kinematic stub. The mission contract and the
+whole Console/telemetry boundary are already designed for this: algorithms take
+plain numbers, the ROS node is a wrapper, Gazebo Harmonic is the named primary
+world. This is the sim-to-real step and the big one; scoped after the jamming
+effects, jammer types and experiments are solid on the fast stub. ArduPilot is
+GPL-3.0 - run as a SEPARATE process, never linked or vendored (LICENSE).

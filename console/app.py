@@ -50,6 +50,7 @@ from PySide6.QtGui import (
     QAction, QBrush, QColor, QDrag, QFont, QPainter, QPen, QPolygonF,
 )
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QApplication, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
@@ -285,6 +286,9 @@ class Viewport(QWidget):
         # jammer range ring. Set by the Console on load; defaults match
         # rf_link()'s own until a scene declares otherwise.
         self.scene_rf = (-95.0, 2.8)
+        # Band filter: None = all links; a float MHz = only that band's links;
+        # "gnss" = dim comms links so the positioning/drift is foregrounded.
+        self.band_filter = None
         self.links = []
         self.selected = set()   # highlighted agent ids
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
@@ -382,6 +386,8 @@ class Viewport(QWidget):
                 self._bounds(p)
             self._scan_fan(p)
             self._range_rings(p)
+            self._jammer_affect_lines(p)
+            self._belief_ghosts(p)
             self._link_lines(p)
             for a in self.agents:
                 self._agent(p, a)
@@ -553,7 +559,16 @@ class Viewport(QWidget):
 
     def _link_lines(self, p):
         by_id = {a.get("id"): a for a in self.agents}
+        bf = self.band_filter
         for link in self.links:
+            # Band filter: a comms band shows only its own links; GNSS hides
+            # the comms lines entirely (GNSS has no links - the drift ghosts
+            # are the story on that band).
+            if bf == "gnss":
+                continue
+            if isinstance(bf, (int, float)) and \
+                    abs(_num(link.get("band_mhz"), 2400.0) - bf) > 0.5:
+                continue
             a, b = by_id.get(link.get("a")), by_id.get(link.get("b"))
             if not a or not b:
                 continue
@@ -562,7 +577,12 @@ class Viewport(QWidget):
             if float(link.get("quality", 1.0)) <= 0.0:
                 continue
             state = link.get("state", "up")
-            pen = QPen(QColor(network_colour(link.get("network"))), 1.4)
+            # A DOWN link is drawn ORANGE (not the network colour) so a broken
+            # link is unmistakable at a glance; up/degraded stay the network
+            # colour, solid vs dashed.
+            colour = (QColor("#E08A3C") if state == "down"
+                      else QColor(network_colour(link.get("network"))))
+            pen = QPen(colour, 1.6 if state == "down" else 1.4)
             pen.setStyle({"up": Qt.SolidLine,
                           "degraded": Qt.DashLine}.get(state, Qt.DashDotLine))
             p.setPen(pen)
@@ -640,6 +660,13 @@ class Viewport(QWidget):
         p.setPen(QPen(QColor(C_TEXT if selected else C_DIM)))
         p.setFont(QFont("Consolas", 8))
         p.drawText(self.to_screen(x, y, z) + QPointF(9, -7), str(agent.get("id", "")))
+        # An agent holding because it lost its commander under jamming: say so
+        # on the map, so a frozen car reads as "cut off", not "arrived".
+        if agent.get("link_loss_hold"):
+            p.setPen(QPen(QColor(NETWORK_COLOURS["red"])))
+            p.setFont(QFont("Consolas", 7))
+            p.drawText(self.to_screen(x, y, z) + QPointF(9, 6),
+                       "⊘ held (link loss)")
 
     def _jammer_range(self, agent):
         """Nominal influence radius (m) of a jammer agent, from whichever
@@ -665,6 +692,85 @@ class Viewport(QWidget):
         band = val("band_mhz", "band", default=2400.0)
         noise, plexp = self.scene_rf
         return _jammer_range_m(tx, band, noise, plexp)
+
+    def _jammer_affect_lines(self, p):
+        """Select a jammer and see WHO it is currently hurting, on ITS band.
+
+        A red line runs from the jammer to every agent it is actually degrading
+        this tick, labelled with how far that agent's noise floor has been
+        raised (dB) - or "GNSS denied" for a positioning jammer. Thickness
+        follows severity. This answers "what is this emitter doing, right now,
+        to whom" without reading a table."""
+        for j in self.agents:
+            if j.get("id") not in self.selected:
+                continue
+            jam = j.get("jammer")
+            if not jam or not jam.get("on"):
+                continue
+            band = _num(jam.get("band_mhz"), 2400.0)
+            is_gnss = abs(band - 1575.42) < 5.0
+            # Respect the band strip: don't draw a comms jammer's effects
+            # while looking at the GNSS band, or vice versa.
+            bf = self.band_filter
+            if bf == "gnss" and not is_gnss:
+                continue
+            if isinstance(bf, (int, float)) and abs(band - bf) > 0.5:
+                continue
+            jp = j.get("pose", {})
+            jpt = self.to_screen(_num(jp.get("x")), _num(jp.get("y")),
+                                 _num(jp.get("z")))
+            for a in self.agents:
+                if a.get("id") == j.get("id"):
+                    continue
+                if is_gnss:
+                    if not a.get("gnss_denied"):
+                        continue
+                    label, sev = "GNSS denied", 12.0
+                else:
+                    rf = a.get("rf") or {}
+                    if not rf.get("jammed"):
+                        continue
+                    sev = _num(rf.get("noise_floor_dbm")) - \
+                        _num(rf.get("baseline_dbm"))
+                    label = f"+{sev:.0f} dB"
+                ap = a.get("pose", {})
+                apt = self.to_screen(_num(ap.get("x")), _num(ap.get("y")),
+                                     _num(ap.get("z")))
+                width = max(1.0, min(3.4, 0.8 + sev / 15.0))
+                col = QColor(NETWORK_COLOURS["red"])
+                p.setPen(QPen(col, width, Qt.SolidLine))
+                p.drawLine(jpt, apt)
+                mid = QPointF((jpt.x() + apt.x()) / 2.0,
+                              (jpt.y() + apt.y()) / 2.0)
+                p.setFont(QFont("Consolas", 7))
+                p.setPen(QPen(col))
+                p.drawText(mid + QPointF(4, -3), label)
+
+    def _belief_ghosts(self, p):
+        """For any agent whose estimate has drifted from truth (GNSS denied),
+        draw a faint ghost where it THINKS it is, joined to its true position.
+        TOP view only - it is a 2-D position error. This is the cost of GNSS
+        jamming, drawn: the gap between the solid car and its ghost."""
+        if self.mode != self.TOP:
+            return
+        for a in self.agents:
+            err = _num(a.get("position_error_m"))
+            bel = a.get("believed") or {}
+            if err <= 0.15 or "x" not in bel:
+                continue
+            pose = a.get("pose", {})
+            tp = self.to_screen(_num(pose.get("x")), _num(pose.get("y")), 0)
+            bp = self.to_screen(_num(bel.get("x")), _num(bel.get("y")), 0)
+            col = QColor("#E08A3C")
+            pen = QPen(col, 1.2, Qt.DotLine)
+            p.setPen(pen)
+            p.drawLine(tp, bp)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(col, 1.4))
+            p.drawEllipse(bp, 6, 6)
+            p.setFont(QFont("Consolas", 7))
+            p.setPen(QPen(col))
+            p.drawText(bp + QPointF(8, 3), f"thinks: {err:.1f} m off")
 
     def _range_rings(self, p):
         """Ring the influence area of a SELECTED jammer (TOP view only - a
@@ -883,13 +989,34 @@ class SensorView(QWidget):
                           _objective_label(obj, armed=self.state.get("armed")))
             elif self.state.get("mission"):
                 p.drawText(10, 60, f"objective  {self.state.get('mission')}")
-            top = 66
+            # POSITION KNOWLEDGE - the belief-vs-truth story, per agent.
+            # A GNSS-denied car is dead-reckoning; show how wrong its estimate
+            # has become. This is what makes jamming legible on one agent.
+            err = _num(self.state.get("position_error_m"))
+            denied = self.state.get("gnss_denied")
+            y = 74
+            if denied:
+                p.setPen(QPen(QColor("#E08A3C")))
+                p.drawText(10, y, f"GNSS DENIED - dead reckoning")
+                p.drawText(10, y + 14, f"est. position error  {err:5.2f} m")
+            else:
+                p.setPen(QPen(QColor(C_DIM)))
+                p.drawText(10, y, "GNSS ok" +
+                           (f"  (est. error {err:.2f} m)" if err > 0.05 else ""))
+                y -= 0
+            # The sensors this agent ACTUALLY carries - so the panel is the
+            # agent's, not a fixed lidar view.
+            sensors = self.state.get("sensors") or []
+            names = ", ".join(sen.get("type", "?") for sen in sensors) or "none"
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(10, y + 28, f"sensors: {names}")
+            top = y + 34
             p.setPen(QPen(QColor(C_LINE)))
             p.drawLine(8, top, self.width() - 8, top)
 
         if not self.scan or not self.scan.get("ranges"):
             p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(12, top + 20, "No lidar on this agent."
+            p.drawText(12, top + 20, "No lidar on this agent - nothing to plot."
                                      if self.agent_id else "Select an agent.")
             return
 
@@ -1316,11 +1443,19 @@ class ShellPanel(QWidget):
     real Ubuntu window, and the placeholder text says so.
     """
 
-    def __init__(self, repo_wsl_path, cwd=None):
+    # Cell doctrine: which SIDE a cell may issue tactical commands to.
+    # white = umpire, anything. blue/red = that side only. Bash is allowed in
+    # every cell (they are still terminals); only mission/attack commands are
+    # scoped. See docs/cells-and-network.md.
+    CELL_SIDE = {"blue": "blue", "red": "red", "white": None}
+
+    def __init__(self, repo_wsl_path, cwd=None, cell="white", console=None):
         super().__init__()
         self.repo = repo_wsl_path
         self.cwd = cwd or repo_wsl_path
         self.procs = []
+        self.cell = cell
+        self.console = console
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1330,9 +1465,15 @@ class ShellPanel(QWidget):
         self.out.setFont(QFont("Consolas", 9))
         self.inp = QLineEdit()
         self.inp.setFont(QFont("Consolas", 9))
+        remit = {"blue": "Blue cell — commands the BLUE network "
+                         "(SETMISSION, launch/halt, REOBJECTIVE).",
+                 "red": "Red cell — commands the RED network "
+                        "(red launch/halt, JAM).",
+                 "white": "White cell (umpire) — any command, any side, "
+                          "plus the shell."}.get(self.cell, "")
         self.inp.setPlaceholderText(
-            "Ubuntu command, then Enter.  Interactive tools (sudo prompts, vim) "
-            "need a real terminal.")
+            remit + "  Ubuntu commands also work; interactive tools "
+            "(sudo, vim) need a real terminal.")
         self.inp.returnPressed.connect(self.run)
         lay.addWidget(self.out, 1)
         lay.addWidget(self.inp)
@@ -1380,13 +1521,22 @@ class ShellPanel(QWidget):
         # the internal spaces - see docs/maps-missions-and-retasking.md.
         head = _tokenize_args(cmd) if _tokenize_args else cmd.split()
         if len(head) == 2 and head[1].lower() in ("launch", "halt"):
-            self._launch_halt(head[1].lower(), head[0])
+            if self._cell_allows("launch", scope=head[0]):
+                self._launch_halt(head[1].lower(), head[0])
             return
-        if head and head[0].upper() in ("REOBJECTIVE", "SETMISSION"):
-            self._retask(head)
+        if head and head[0].upper() == "SETMISSION":
+            if self._cell_allows("SETMISSION"):
+                self._retask(head)
+            return
+        if head and head[0].upper() == "REOBJECTIVE":
+            scope = head[1] if len(head) > 1 else None
+            if self._cell_allows("REOBJECTIVE", scope=scope):
+                self._retask(head)
             return
         if head and head[0].upper() == "JAM":
-            self._send_queue_line(cmd + "\n", cmd)
+            scope = head[1] if len(head) > 1 else None
+            if self._cell_allows("JAM", scope=scope):
+                self._send_queue_line(cmd + "\n", cmd)
             return
 
         full = (f"cd {self.cwd} 2>/dev/null; "
@@ -1407,6 +1557,42 @@ class ShellPanel(QWidget):
         if not proc.waitForStarted(3000):
             self.out.appendPlainText(
                 "[cannot start wsl.exe - is WSL installed and on PATH?]")
+
+    def _cell_allows(self, verb, scope=None):
+        """Is this cell permitted to issue this command? White may do
+        anything. Blue/red may act only on their own side. A refusal prints
+        why and is NOT sent. SETMISSION is blue-only (missions are blue);
+        JAM is red-only (jamming is the adversary's)."""
+        remit = ShellPanel.CELL_SIDE.get(self.cell)   # None = white = all
+        if remit is None:
+            return True
+        if verb == "SETMISSION":
+            if remit != "blue":
+                self.out.appendPlainText(
+                    "[blocked: missions are a BLUE-cell action]")
+                return False
+            return True
+        if verb == "JAM":
+            if remit != "red":
+                self.out.appendPlainText(
+                    "[blocked: JAM is a RED-cell action]")
+                return False
+            return True
+        # launch / halt / REOBJECTIVE: the scope must be on this cell's side.
+        side = None
+        if scope is not None and self.console is not None:
+            side = self.console.side_of(scope)
+        if side is None:
+            self.out.appendPlainText(
+                f"[blocked: {self.cell} cell cannot resolve '{scope}' on its "
+                f"side — is it a {remit} agent/network?]")
+            return False
+        if side != remit:
+            self.out.appendPlainText(
+                f"[blocked: '{scope}' is on the {side} side; this is the "
+                f"{remit} cell]")
+            return False
+        return True
 
     def _retask(self, tokens):
         """Write a retask/order command to the running sim's queue.
@@ -1705,12 +1891,30 @@ class Console(QMainWindow):
         tlrow.addWidget(self.speed_combo)
         tlrow.addWidget(self.live_button)
 
+        # BAND STRIP - one button per frequency in the scene. Selecting a band
+        # shows only that band's links (or, for GNSS, foregrounds the drift);
+        # "All" shows everything. A band button turns ORANGE while a jammer is
+        # emitting on it, so what is being jammed, and when, is evident at a
+        # glance. See docs/band-strip.md.
+        self.band_strip = QWidget()
+        bsrow = QHBoxLayout(self.band_strip)
+        bsrow.setContentsMargins(8, 2, 8, 2)
+        bsrow.setSpacing(4)
+        bsrow.addWidget(QLabel("Band"))
+        self.band_group = QButtonGroup(self)
+        self.band_group.setExclusive(True)
+        self._band_buttons = {}          # key -> QPushButton
+        self._bandrow = bsrow
+        bsrow.addStretch(1)
+        self._rebuild_band_strip()
+
         holder = QWidget()
         lay = QVBoxLayout(holder)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(bar)
         lay.addWidget(self.stack, 1)
+        lay.addWidget(self.band_strip)
         lay.addWidget(tl)
         self.setCentralWidget(holder)
 
@@ -1791,6 +1995,16 @@ class Console(QMainWindow):
         # ACTUALLY experiences. The gap between baseline and experienced is
         # jamming, as a number. Attack injection (spoofing, mobile jammers)
         # hangs off this next. See docs/contested-background.md.
+        # NETWORK - command structure, live: who decides for each agent and
+        # whether they can be reached (command_authority), and what the
+        # topology MEASURES as versus what it was declared (observed_topology
+        # vs the routing field). This is netcheck.py's tables, in the GUI -
+        # the thing that has been computed every frame but invisible.
+        self.tab_network = QTreeWidget()
+        self.tab_network.setHeaderHidden(True)
+        self.tab_network.setIndentation(12)
+        network = self.tab_network
+
         self.tab_contested = QTreeWidget()
         self.tab_contested.setHeaderHidden(True)
         self.tab_contested.setIndentation(12)
@@ -1866,6 +2080,7 @@ class Console(QMainWindow):
         self.tabs.addTab(setup, "Setup")
         self.tabs.addTab(self.tab_scn, "Overview")
         self.tabs.addTab(self.tab_msn, "Mission")
+        self.tabs.addTab(network, "Network")
         self.tabs.addTab(comms, "Comms")
         self.tabs.addTab(contested, "Contested")
         self.tabs.addTab(results, "Results")
@@ -1922,12 +2137,13 @@ class Console(QMainWindow):
         self.terminals.setContextMenuPolicy(Qt.CustomContextMenu)
         self.terminals.customContextMenuRequested.connect(self.terminal_menu)
         self.shells = []
+        self._cells_built = False
 
         bottom = QTabWidget()
         bottom.addTab(outputs, "Output")
         bottom.addTab(self.terminals, "Terminals")
         self.bottom = bottom
-        self.new_terminal()
+        self._build_cells()
         outputs.setDocumentMode(True)
         self.terminals.setDocumentMode(True)
         bottom.setDocumentMode(True)
@@ -2246,6 +2462,9 @@ class Console(QMainWindow):
         self._build_agent_tree(self.tab_scn, leaf="equipment")
         self._build_agent_tree(self.tab_msn, leaf="objective")
         self._build_contested_baseline()
+        self._build_network_declared()
+        if hasattr(self, "_band_buttons"):
+            self._rebuild_band_strip()
 
     def _systems(self, networks):
         """Group networks into systems. A SYSTEM is a side - one or more
@@ -2410,6 +2629,90 @@ class Console(QMainWindow):
             self.say(f"[sent: {summary}]")
         except OSError as exc:
             self.say(f"[send failed: {exc}]")
+
+    def side_of(self, token):
+        """Which side ('blue'/'red') a scope token belongs to - a network
+        name or an agent id - by its network's `system` (friendly->blue,
+        adversary->red). None if unknown. Used by the cell terminals to
+        refuse cross-side commands."""
+        view = getattr(self, "resolved", None) or self.doc or {}
+        nets = view.get("networks") or {}
+        def side_of_net(name):
+            sysname = ((nets.get(name) or {}).get("system") or "friendly")
+            return "red" if sysname == "adversary" else "blue"
+        if token in nets:
+            return side_of_net(token)
+        for a in (view.get("agents") or []):
+            if a.get("id") == token:
+                return side_of_net(a.get("network"))
+        return None
+
+    def _rebuild_band_strip(self):
+        """(Re)list the scene's distinct bands as buttons: All + each comms
+        band + GNSS. Called on load. Keys: "all", a float MHz for a comms
+        band, or "gnss"."""
+        for b in list(self._band_buttons.values()):
+            self.band_group.removeButton(b)
+            b.setParent(None)
+            b.deleteLater()
+        self._band_buttons = {}
+        # collect comms bands from the networks
+        bands = []
+        for net in (self._view().get("networks") or {}).values():
+            v = (net or {}).get("band")
+            if isinstance(v, dict):
+                v = v.get("value")
+            if v is not None and float(v) not in bands:
+                bands.append(float(v))
+        entries = [("all", "All")]
+        for b in sorted(bands):
+            entries.append((b, f"{b/1000:.1f} GHz" if b >= 1000
+                            else f"{b:.0f} MHz"))
+        entries.append(("gnss", "GNSS 1575"))
+        insert_at = self._bandrow.count() - 1   # before the stretch
+        for key, label in entries:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedHeight(20)
+            btn.setToolTip("Show only this band's links" if key != "all"
+                           else "Show every band")
+            btn.clicked.connect(lambda _c=False, k=key: self._on_band(k))
+            self.band_group.addButton(btn)
+            self._bandrow.insertWidget(insert_at, btn)
+            insert_at += 1
+            self._band_buttons[key] = btn
+        if "all" in self._band_buttons:
+            self._band_buttons["all"].setChecked(True)
+        self._on_band("all")
+
+    def _on_band(self, key):
+        """Set the viewport's band filter. None=all; a float=that comms band;
+        'gnss'=foreground positioning (dim the comms links)."""
+        self.viewport.band_filter = None if key == "all" else key
+        self.viewport.update()
+
+    def _refresh_band_strip(self, frame):
+        """Colour a band button orange while a jammer emits on it - the live
+        'what am I jamming' cue. GNSS counts a jammer within ~5 MHz of L1."""
+        emitters = frame.get("attacks_active") or []
+        jammed = set()
+        for e in emitters:
+            bm = e.get("band_mhz")
+            if bm is None:
+                continue
+            if abs(bm - 1575.42) < 5.0:
+                jammed.add("gnss")
+            else:
+                jammed.add(float(bm))
+        for key, btn in self._band_buttons.items():
+            if key == "all":
+                btn.setStyleSheet("QPushButton { color: %s; }"
+                                  % ("#E08A3C" if jammed else ""))
+                continue
+            on = key in jammed
+            btn.setStyleSheet(
+                "QPushButton { color: #E08A3C; font-weight: bold; }" if on
+                else "")
 
     def _push_scene_rf(self):
         """Hand the viewport the scene's noise floor and path-loss exponent so
@@ -2760,12 +3063,30 @@ class Console(QMainWindow):
         self.time_label.setText(
             f"t = {f.get('sim_time_s', 0):.1f} s   frame {index + 1}/{len(self.frames)}")
 
+    _CELL_COLOUR = {"blue": "#2E6FB0", "red": "#C4685A", "white": "#B8C0C6"}
+
+    def _build_cells(self):
+        """The three cells, in order: Blue (friendly command), Red (adversary),
+        White (umpire + shell). This is the command structure as a UI - a blue
+        operator, a red operator, and the umpire who sees and does everything.
+        See docs/cells-and-network.md."""
+        for cell in ("blue", "red", "white"):
+            shell = ShellPanel(REPO_WSL_PATH, cell=cell, console=self)
+            self.shells.append(shell)
+            idx = self.terminals.addTab(shell, f"{cell.capitalize()} cell")
+            self.terminals.tabBar().setTabTextColor(
+                idx, QColor(self._CELL_COLOUR[cell]))
+        self._cells_built = True
+
     def new_terminal(self, focus=False):
-        """Open another shell tab. Each has its own directory and processes."""
+        """Open another WHITE (umpire) shell tab - an extra plain terminal.
+        The three cells are made once at startup by _build_cells()."""
         self._terminal_count = getattr(self, "_terminal_count", 0) + 1
-        shell = ShellPanel(REPO_WSL_PATH)
+        shell = ShellPanel(REPO_WSL_PATH, cell="white", console=self)
         self.shells.append(shell)
         index = self.terminals.addTab(shell, f"Terminal {self._terminal_count}")
+        self.terminals.tabBar().setTabTextColor(
+            index, QColor(self._CELL_COLOUR["white"]))
         if focus:
             self.bottom.setCurrentIndex(1)
             self.terminals.setCurrentIndex(index)
@@ -2974,6 +3295,92 @@ class Console(QMainWindow):
             self.say(f"Recorded {len(self.frames)} frames to runs/{target.name}")
         except OSError as exc:
             self.say(f"ERROR  could not write run log: {exc}")
+
+    def _build_network_declared(self):
+        """The declared command structure, before a run: per network its
+        authority / routing / coordinator / squads / leader-loss doctrine.
+        The LIVE decider/reachable/measured-topology is filled by
+        _refresh_network from telemetry."""
+        tree = getattr(self, "tab_network", None)
+        if tree is None:
+            return
+        tree.clear()
+        nets = (self._view().get("networks") or {})
+        dec = QTreeWidgetItem(tree, ["Declared"])
+        for name, net in nets.items():
+            net = net or {}
+            n = QTreeWidgetItem(dec, [f"{name}"])
+            n.setForeground(0, QBrush(QColor(network_colour(name))))
+            auth = (net.get("authority") or net.get("architecture")
+                    or net.get("topology") or "centralized")
+            QTreeWidgetItem(n, [f"authority: {auth}"])
+            QTreeWidgetItem(n, [f"routing: {net.get('routing', '(default)')}"])
+            if net.get("coordinator"):
+                QTreeWidgetItem(n, [f"coordinator: {net['coordinator']}"])
+            if net.get("squads"):
+                sq = QTreeWidgetItem(n, ["squads"])
+                for sname, spec in (net.get("squads") or {}).items():
+                    spec = spec or {}
+                    QTreeWidgetItem(sq, [f"{sname}: {spec.get('leader')} leads "
+                                         f"{', '.join(spec.get('members') or [])}"])
+            # DOCTRINE - declarable, and the thing worth comparing: does a
+            # squad fall back to the coordinator when its leader drops, or is
+            # it stranded? See command_authority()'s leader_loss.
+            if auth == "hierarchical":
+                QTreeWidgetItem(n, [f"leader-loss doctrine: "
+                                    f"{net.get('leader_loss', 'fallback')}"])
+        dec.setExpanded(True)
+        self._net_live = QTreeWidgetItem(tree, ["Live (run to populate)"])
+        self._net_topo = QTreeWidgetItem(tree, ["Measured topology"])
+        self._net_live.setExpanded(True)
+        self._net_topo.setExpanded(True)
+
+    def _refresh_network(self, frame):
+        """Live half: each agent's decider/tier/reachable, and what the
+        topology measures as versus its declaration."""
+        if getattr(self, "tab_network", None) is None:
+            return
+        live = getattr(self, "_net_live", None)
+        if live is not None:
+            live.takeChildren()
+            live.setText(0, "Live — who decides for whom")
+            for a in frame.get("agents", []):
+                au = a.get("authority") or {}
+                dec = au.get("decider") or "—"
+                tier = au.get("tier", "")
+                reach = au.get("reachable", True)
+                txt = (f"{a['id']}: decider {dec}  ({tier})  "
+                       f"{'reachable' if reach else 'UNREACHABLE'}")
+                row = QTreeWidgetItem(live, [txt])
+                if not reach:
+                    row.setForeground(0, QBrush(QColor(NETWORK_COLOURS["red"])))
+        topo = getattr(self, "_net_topo", None)
+        if topo is not None:
+            topo.takeChildren()
+            t = frame.get("topology") or {}
+            shape = t.get("shape", "—")
+            topo.setText(0, f"Measured topology: {shape}")
+            if t.get("hub"):
+                QTreeWidgetItem(topo, [f"hub: {t['hub']}"])
+            if t.get("max_betweenness") is not None:
+                QTreeWidgetItem(topo, [f"max betweenness: "
+                                       f"{t['max_betweenness']:.2f}"])
+            links = frame.get("links", [])
+            active = sum(1 for l in links if l.get("active"))
+            spare = sum(1 for l in links
+                        if not l.get("active") and l.get("state") != "down")
+            down = sum(1 for l in links if l.get("state") == "down")
+            QTreeWidgetItem(topo, [f"links: {active} active, {spare} spare, "
+                                   f"{down} down"])
+            # The finding: does the measured shape match the declaration?
+            declared = {(net or {}).get("routing")
+                        for net in (self._view().get("networks") or {}).values()}
+            if shape and declared and shape not in declared and \
+                    None not in declared:
+                note = QTreeWidgetItem(
+                    topo, [f"⚠ measured '{shape}' ≠ declared "
+                           f"{'/'.join(sorted(d for d in declared if d))}"])
+                note.setForeground(0, QBrush(QColor(C_WARN)))
 
     def _build_contested_baseline(self):
         """The scene's declared contested BASELINE - the half of the
@@ -3621,6 +4028,8 @@ class Console(QMainWindow):
         self.fill_publications_from_telemetry(agents)
         self.fill_comms(frame.get("links", []))
         self._refresh_contested(frame)
+        self._refresh_network(frame)
+        self._refresh_band_strip(frame)
 
         down = sum(1 for l in self.viewport.links if l.get("state") != "up")
         source = "ROS 2" if frame.get("source") == "ros2" else "stub"

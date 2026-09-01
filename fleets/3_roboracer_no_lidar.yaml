@@ -1,0 +1,87 @@
+# =============================================================================
+# Deadband FLEET (BLUE) — 3_roboracer_no_lidar
+# =============================================================================
+# The clean measurement rig. Three cars and a ground station, BLUE, centralized
+# — but the cars carry NO LiDAR. They cannot see the room and cannot self-
+# correct; they simply go where the GCS tells them (start here, drive to that
+# point). That is deliberate: with no sensor loop closing on the world, any
+# error under jamming is PURE and MEASURABLE — it is the positioning/command
+# fault and nothing else, not a wall-follower quietly compensating.
+#
+# Each car keeps an IMU only. That is the dead-reckoning source: when the
+# planned GNSS-denial model lands (see docs/jamming-effects-research.md), a car
+# with no GNSS fix will estimate its position by integrating the IMU and DRIFT
+# — which is the effect we want to see. No LiDAR means nothing hides the drift.
+#
+# Use: Setup -> scene lab_box -> Blue fleet 3_roboracer_no_lidar -> Play ->
+# SETMISSION test -> blue launch. Same lanes as 3_roboracer, no lidar fan.
+# =============================================================================
+
+spec_version: 0.1
+name: 3_roboracer_no_lidar
+kind: fleet
+
+description: >
+  Three RoboRacer cars + a ground station, blue centralized, NO LiDAR — the
+  cars follow GCS waypoints open-loop. The clean rig for measuring positioning
+  and command faults under jamming, with no sensor loop masking the error.
+
+networks:
+  blue:
+    system: friendly
+    authority: centralized
+    routing: star
+    coordinator: gcs
+    topology: centralized
+    band: 2400
+
+agents:
+  - id: gcs
+    platform: ground_station
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
+    dimensions:
+      length: {value: 0.40, unit: m, source: "Nominal - measure the bench"}
+      width:  {value: 0.40, unit: m, source: "Nominal - measure the bench"}
+      height: {value: 1.00, unit: m, source: "Nominal - measure the bench"}
+    ghost: true
+  - id: car1
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car2
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #2, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #2, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #2, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car3
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #3, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #3, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #3, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}

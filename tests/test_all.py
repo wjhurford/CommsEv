@@ -903,6 +903,228 @@ def test_jammer_range_helper():
           > st.jammer_range_m(10, 2400, -80, 2.8))
 
 
+def test_missions_are_blue_only():
+    """A mission / REOBJECTIVE cannot task an adversary agent - red is
+    jamming, not manoeuvre. See docs/cells-and-network.md."""
+    print("\nMISSIONS ARE BLUE ONLY")
+    arena, agents, links = st.load_scenario(
+        {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"]})
+    abid = {a["id"]: a for a in agents}
+    nets = arena["networks"]
+    check("blue car is taskable", st._is_taskable(abid["car1"], nets))
+    check("gcs (blue) is taskable", st._is_taskable(abid["gcs"], nets))
+    check("red jammer is NOT taskable", not st._is_taskable(abid["jam1"], nets))
+
+    poses = _poses_for(agents)
+    # SETMISSION naming a red agent skips it with a reason
+    mpath = _mission_file({"jam1": {"do": "shuttle", "between": ["A", "B"]},
+                           "car1": {"do": "shuttle", "between": ["A", "B"]}},
+                          name="mixed")
+    changed, msgs, _ = st.apply_mission_file(mpath, abid, arena["points"],
+                                             arena)
+    tasked = {aid for aid, _ in changed}
+    check("SETMISSION tasks the blue car", "car1" in tasked)
+    check("SETMISSION skips the red jammer", "jam1" not in tasked)
+    check("and says why", any("adversary" in m for m in msgs), str(msgs))
+
+    # a live REOBJECTIVE on the jammer is ignored
+    before = dict(abid["jam1"]["mission"])
+    qd = Path(tempfile.mkdtemp())
+    _queue_with(qd, "jam1: pursue car1\n")
+    st.drain_retasks(qd, abid, arena, links, poses)
+    check("REOBJECTIVE on a red agent is ignored",
+          abid["jam1"]["mission"] == before)
+
+
+def test_leader_loss_doctrine():
+    """leader_loss doctrine, declarable per network: fallback (report up to
+    the coordinator) vs strand (on your own). See docs/cells-and-network.md."""
+    print("\nLEADER-LOSS DOCTRINE (fallback vs strand)")
+    def authority(doctrine):
+        net = {"authority": "hierarchical", "routing": "tiered",
+               "coordinator": "gcs", "leader_loss": doctrine,
+               "squads": {"alpha": {"leader": "car1", "members": ["car2"]}}}
+        poses = {"gcs": {"x": 0, "y": 0, "z": 0},
+                 "car1": {"x": 9000, "y": 0, "z": 0},   # leader out of range
+                 "car2": {"x": 1, "y": 0, "z": 0}}
+        links = [{"a": "gcs", "b": "car2", "network": "blue"},
+                 {"a": "car1", "b": "car2", "network": "blue"},
+                 {"a": "gcs", "b": "car1", "network": "blue"}]
+        return st.command_authority({"id": "car2", "network": "blue"}, {},
+                                    links, poses, {"blue": net})
+    fb = authority("fallback")
+    st_ = authority("strand")
+    check("fallback: the member reports up to the coordinator",
+          fb["decider"] == "gcs" and fb["reachable"])
+    check("strand: the member is orphaned when its leader drops",
+          not st_["reachable"] and st_["tier"] == "orphaned")
+    check("default (unset) behaves as fallback",
+          authority(None)["reachable"])
+
+
+def test_jamming_stops_a_centralized_fleet_but_not_a_decentralized_one():
+    """The causal link that makes jamming MATTER: an agent that loses its
+    commander applies its on_link_loss doctrine. A centralized car freezes
+    (no orders); a decentralized car keeps going (it commands itself). See
+    step()'s `unreachable` gate and docs/cells-and-network.md."""
+    print("\nJAMMING CHANGES BEHAVIOUR (hold vs self-command)")
+    import random
+
+    def run_under_jam(authority):
+        arena, agents, links = st.load_scenario(
+            {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"]})
+        arena["networks"]["blue"]["authority"] = authority
+        abid = {a["id"]: a for a in agents}
+        poses = _poses_for(agents)
+        for line in ("SETMISSION test\n", "LAUNCH blue\n",
+                     "LAUNCH red\n", "JAM jam1 power 30\n"):
+            qd = Path(tempfile.mkdtemp()); _queue_with(qd, line)
+            st.drain_retasks(qd, abid, arena, links, poses)
+        b = (poses["car1"]["x"], poses["car1"]["y"])
+        rng = random.Random(1)
+        for k in range(25):
+            st.frame(k * 0.1, 0.1, k, arena, agents, links, poses, rng)
+        moved = abs(poses["car1"]["x"] - b[0]) + abs(poses["car1"]["y"] - b[1])
+        f = st.frame(2.6, 0.1, 26, arena, agents, links, poses, rng)
+        held = next(x for x in f["agents"] if x["id"] == "car1")["link_loss_hold"]
+        return moved, held
+
+    cen_moved, cen_held = run_under_jam("centralized")
+    check("centralized car FREEZES under jamming (lost its coordinator)",
+          cen_moved < 0.05, f"moved {cen_moved:.3f}")
+    check("and reports it is holding on link loss", cen_held)
+
+    dec_moved, dec_held = run_under_jam("decentralized")
+    check("decentralized car KEEPS MOVING under the same jamming",
+          dec_moved > 0.5, f"moved {dec_moved:.3f}")
+    check("and is not flagged as holding", not dec_held)
+
+
+def test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists():
+    """The headline: GNSS-band jamming denies a no-lidar car its fix, its
+    belief dead-reckons and DRIFTS (~% of distance, emergent), the drift
+    recovers when the fix returns, and a lidar car resists entirely (it
+    localises without GNSS). Literature: UAV Navigation 4%/distance;
+    ArduPilot ~10 s usable then divergence. docs/gnss-drift-model.md."""
+    print("\nGNSS JAMMING -> POSITION DRIFT (belief vs truth)")
+    import random
+
+    def run(fleet, jam_band, ticks, scene="open_field"):
+        arena, agents, links = st.load_scenario(
+            {"scene": scene, "fleets": [fleet, "red_jammer"]})
+        abid = {a["id"]: a for a in agents}
+        abid["jam1"]["jammer"]["band"] = {"value": jam_band}
+        abid["jam1"]["jammer"]["tx_power"] = {"value": 30}
+        poses = _poses_for(agents)
+        for line in ("SETMISSION test\n", "LAUNCH blue\n"):
+            qd = Path(tempfile.mkdtemp()); _queue_with(qd, line)
+            st.drain_retasks(qd, abid, arena, links, poses)
+        rng = random.Random(3)
+        # warm up clean
+        for k in range(20):
+            st.frame(k * 0.1, 0.1, k, arena, agents, links, poses, rng)
+        clean = _car_err(arena, agents, links, poses, rng)
+        qd = Path(tempfile.mkdtemp()); _queue_with(qd, "LAUNCH red\n")
+        st.drain_retasks(qd, abid, arena, links, poses)
+        errs = []
+        for k in range(20, 20 + ticks):
+            st.frame(k * 0.1, 0.1, k, arena, agents, links, poses, rng)
+            if k % 25 == 24:
+                errs.append(_car_err(arena, agents, links, poses, rng))
+        qd = Path(tempfile.mkdtemp()); _queue_with(qd, "HALT red\n")
+        st.drain_retasks(qd, abid, arena, links, poses)
+        for k in range(20 + ticks, 40 + ticks):
+            st.frame(k * 0.1, 0.1, k, arena, agents, links, poses, rng)
+        recovered = _car_err(arena, agents, links, poses, rng)
+        return clean, errs, recovered
+
+    clean, errs, recovered = run("3_roboracer_no_lidar", 1575.42, 120)
+    check("with GNSS the no-lidar car knows where it is (error ~0)",
+          clean < 0.05, f"{clean}")
+    check("GNSS jamming makes the error GROW over time",
+          len(errs) >= 3 and errs[-1] > errs[0] > 0,
+          f"{errs}")
+    check("the drift is on the order of a few % of the ~18 m travelled",
+          0.3 < errs[-1] < 2.0, f"{errs[-1]}")
+    check("a regained fix recovers the position (error back to ~0)",
+          recovered < 0.05, f"{recovered}")
+
+    # In a FEATURELESS field, a lidar cannot localise either - it has
+    # nothing to scan - so a lidar car ALSO drifts under GNSS jamming here.
+    lclean, lerrs, _ = run("3_roboracer", 1575.42, 120)
+    check("a lidar car in an OPEN field also drifts (nothing to scan)",
+          lerrs[-1] > 0.1, f"{[lclean] + lerrs}")
+    # But WITH features (walls) a lidar localises with no GNSS at all - lab_box
+    # is indoors (no GNSS) yet the lidar car holds position.
+    llab, llerrs, _ = run("3_roboracer", 1575.42, 60, scene="lab_box")
+    check("a lidar car with walls holds position without GNSS (localises)",
+          max([llab] + llerrs) < 0.05, f"{[llab] + llerrs}")
+
+    # A COMMS-band jammer does NOT cause positional drift (wrong band).
+    cclean, cerrs, _ = run("3_roboracer_no_lidar", 2400.0, 80)
+    check("a comms-band jammer causes no positional drift (band separation)",
+          max([cclean] + cerrs) < 0.05, f"{[cclean] + cerrs}")
+
+
+def _car_err(arena, agents, links, poses, rng):
+    f = st.frame(0.0, 0.1, 0, arena, agents, links, poses, rng)
+    return next(a for a in f["agents"]
+                if a["id"] == "car1")["position_error_m"]
+
+
+def test_vehicle_dynamics_momentum_and_no_yaw_snap():
+    """A vehicle has momentum and a turning limit. It used to reach full
+    speed in one tick and TELEPORT its heading 180 degrees at a shuttle
+    turnaround - so a forward-mounted lidar snapped round with it. Now speed
+    is acceleration-limited, heading is rate-limited (v / turn_radius), and a
+    car too tight to turn REVERSES instead - pointing its lidar away from
+    travel, which is a real sensing gap."""
+    print("\nVEHICLE DYNAMICS - MOMENTUM AND TURNING")
+    import random
+    arena, agents, links = st.load_scenario(
+        {"scene": "lab_box", "fleet": "3_roboracer"})
+    abid = {a["id"]: a for a in agents}
+    poses = _poses_for(agents)
+    for line in ("SETMISSION test\n", "LAUNCH blue\n"):
+        qd = Path(tempfile.mkdtemp()); _queue_with(qd, line)
+        st.drain_retasks(qd, abid, arena, links, poses)
+    rng = random.Random(1)
+
+    st.frame(0.0, 0.1, 0, arena, agents, links, poses, rng)
+    v_first = poses["car1"]["speed"]
+    check("does NOT reach full speed in the first tick (momentum)",
+          0.0 < v_first < 1.0, f"{v_first}")
+
+    speeds, yaws, reversed_seen = [], [], False
+    for k in range(1, 80):
+        st.frame(k * 0.1, 0.1, k, arena, agents, links, poses, rng)
+        speeds.append(poses["car1"]["speed"])
+        yaws.append(poses["car1"]["yaw"])
+        if poses["car1"].get("reversing"):
+            reversed_seen = True
+    check("accelerates up to its speed cap", max(speeds) > 1.4, f"{max(speeds)}")
+    # The heading must never jump - no teleport-rotation.
+    biggest = max(abs(st.wrap_pi(yaws[i] - yaws[i - 1]))
+                  for i in range(1, len(yaws)))
+    check("heading never snaps (no 180 deg jump in one tick)",
+          biggest < math.radians(45), f"max jump {math.degrees(biggest):.1f} deg")
+    check("a car too tight to turn reverses instead", reversed_seen)
+
+    # A quadcopter is holonomic - it may translate any direction.
+    q = {"spec_version": 0.1, "name": "q", "kind": "fleet",
+         "arena": {"type": "box", "extent": {"x": 40, "y": 40, "z": 20}},
+         "networks": {"blue": {"topology": "decentralized"}},
+         "agents": [{"id": "q1", "platform": "quadcopter", "network": "blue",
+                     "pose": {"x": 0, "y": 0, "z": 2},
+                     "performance": {"max_speed": 8.0}}]}
+    tmp = Path(tempfile.mkdtemp()) / "q.yaml"
+    tmp.write_text(yaml.safe_dump(q))
+    _a, _ag, _l = st.load_scenario(str(tmp))
+    check("a quadcopter is holonomic, a car is ackermann",
+          _ag[0]["motion"] == "holonomic"
+          and abid["car1"]["motion"] == "ackermann")
+
+
 def test_origin_passthrough():
     print("\nGEODETIC ORIGIN - SCHEMA SEAM, NO CONVERSION")
     arena, _, _ = st.load_scenario(str(REPO / "scenes" / "lab_box.yaml"))
@@ -939,6 +1161,10 @@ if __name__ == "__main__":
                test_scene_baseline_feeds_rf,
                test_two_fleets_compose_and_stay_separate,
                test_jam_command_tunes_live, test_jammer_range_helper,
+               test_missions_are_blue_only, test_leader_loss_doctrine,
+               test_vehicle_dynamics_momentum_and_no_yaw_snap,
+               test_jamming_stops_a_centralized_fleet_but_not_a_decentralized_one,
+               test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists,
                test_retask_spool_is_one_file_per_command,
                test_retask_claim_failure_is_never_silent_and_not_lost,
                test_origin_passthrough):
