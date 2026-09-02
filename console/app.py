@@ -622,10 +622,35 @@ class Viewport(QWidget):
         yaw = _num(pose.get("yaw"))
         L, W, H = _num(dims.get("length"), .4), _num(dims.get("width"), .4), _num(dims.get("height"), .2)
 
-        colour = QColor(agent.get("colour") or "#2E6FB0")
+        # TWO INDEPENDENT CHANNELS, because there are two independent failures
+        # and one mark cannot carry both:
+        #
+        #   FILL    = command state. Is anyone telling this thing what to do?
+        #             Network colour when its decider is reachable, ORANGE when
+        #             it is not - whatever the agent then DOES about it (hold or
+        #             act on intent) is the label underneath, not the fill.
+        #   GHOST   = position knowledge. Does it know where it is? Drawn
+        #             separately in _belief_ghosts as the dotted offset.
+        #
+        # The OUTLINE always stays the agent's own colour, so a cut-off blue car
+        # still reads as blue force at a glance - it is in trouble, it has not
+        # changed sides.
+        #
+        # The four combinations are exactly the experiment's four conditions:
+        #   blue  + no ghost  nothing jammed
+        #   blue  + ghost     GNSS jammed - commanded, obeying, and wrong. The
+        #                     dangerous one: no alarm anywhere says so.
+        #   orange + no ghost comms jammed - cut off, knows exactly where it is
+        #   orange + ghost    both - cut off AND lost
+        base = QColor(agent.get("colour") or "#2E6FB0")
+        cut_off = not (agent.get("authority") or {}).get("reachable", True)
+        colour = QColor("#E08A3C") if cut_off else base
         selected = agent.get("id") in self.selected
         p.setBrush(QBrush(colour))
-        p.setPen(QPen(QColor(C_TEXT) if selected else colour.lighter(150), 2 if selected else 1))
+        # A cut-off agent gets a thicker outline so the identity ring stays
+        # legible against the orange rather than being lost in it.
+        p.setPen(QPen(QColor(C_TEXT) if selected else base.lighter(150),
+                      2 if (selected or cut_off) else 1))
 
         cy, sy = math.cos(yaw), math.sin(yaw)
 
@@ -975,6 +1000,19 @@ class Viewport(QWidget):
             y0 += 13
         p.setPen(QPen(QColor(C_DIM)))
         p.drawText(10, y0, "no line = out of range")
+        y0 += 17
+        # AGENT FILL. The second channel: links say what the network is doing,
+        # fill says whether any of it is reaching this particular vehicle.
+        for label, fill in (("commanded", QColor(base)),
+                            ("cut off - no reachable commander",
+                             QColor("#E08A3C"))):
+            p.setBrush(QBrush(fill))
+            p.setPen(QPen(QColor(base).lighter(150), 1))
+            p.drawRect(QRectF(10, y0 - 9, 22, 9))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(40, y0, label)
+            y0 += 13
         s = self.scale()
         if s > 2:
             p.drawLine(10, self.height() - 16, 10 + int(s), self.height() - 16)
