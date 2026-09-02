@@ -86,6 +86,26 @@ GNSS_RECOVER_MPS = 1.0
 # design trade and now an experimental variable.
 DEFAULT_DEADLINE_MS = 100.0     # used only if a network declares none
 
+# --- Adjacent Channel Interference (ACI).
+# Band separation was a BINARY test: within 0.5 MHz = full interference, else
+# none. Real receivers are not that clean - a strong nearby transmitter leaks
+# into neighbouring channels through imperfect filters, and a close UAV can
+# swamp a distant one on an adjacent channel (the near-far problem).
+#
+# Zhou, Chen, Hong, Jin & Shi, "Joint Channel Assignment and Power Allocation
+# for Multi-UAV Communication" (arXiv:2008.08212, 2020) model this with an
+# interference correlation coefficient mu(f1,f2) with exactly three properties:
+#   0 <= mu <= 1,  mu is symmetric,
+#   mu = 1  when |f1 - f2| = 0        (same channel: full interference)
+#   mu -> 0 when |f1 - f2| -> infinity (well separated: none)
+# and note mu "is proportional to the intensity of ACI and can be measured in
+# practical systems". We adopt that STRUCTURE and parameterise the rolloff by
+# adjacent-channel rejection, which is a real receiver spec: 30 dB of rejection
+# one channel away is a typical commodity figure. The exact curve is a declared
+# free parameter; the shape is the paper's.
+CHANNEL_BW_MHZ = 20.0           # nominal channel width
+ACR_DB_PER_CHANNEL = 30.0       # adjacent-channel rejection, one channel away
+
 
 def _num(v, default=0.0):
     """Accept a bare number or a {value, unit, source} quantity."""
@@ -1362,8 +1382,10 @@ def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=()):
             continue
         jcfg = j.get("jammer") or {}
         jband = _qty(jcfg.get("band"), 2400.0)
-        if band_mhz and abs(jband - band_mhz) > 0.5:
-            continue
+        # ACI: a jammer off the victim's channel still leaks in, by mu.
+        mu = aci_mu(jband - band_mhz, jcfg.get("bandwidth")) if band_mhz else 1.0
+        if mu < 1e-9:
+            continue                     # far enough away to be irrelevant
         tx = _qty(jcfg.get("tx_power"), 20.0)
         jp = poses.get(j["id"])
         if not jp:
@@ -1375,7 +1397,7 @@ def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=()):
             continue
         pl_d0 = 20.0 * math.log10(jband) + 20.0 * math.log10(0.001) + 32.44
         rx_dbm = tx - (pl_d0 + 10.0 * plexp * math.log10(d))
-        total += 10.0 ** (rx_dbm / 10.0)
+        total += mu * 10.0 ** (rx_dbm / 10.0)
     return total
 
 
@@ -1418,6 +1440,17 @@ def _scene_has_features(arena):
     for a in (arena.get("_obstacles") or []):
         return True
     return False
+
+
+def aci_mu(df_mhz, bw_mhz=None, acr_db=None):
+    """Interference correlation coefficient between two channels separated by
+    `df_mhz` - the fraction of a transmitter's power that lands in the victim's
+    channel. 1.0 on the same frequency, falling by `acr_db` per channel width.
+    See Zhou et al. 2020 for the model's properties."""
+    bw = max(_num(bw_mhz, CHANNEL_BW_MHZ), 1e-6)
+    acr = _num(acr_db, ACR_DB_PER_CHANNEL)
+    channels_away = abs(_num(df_mhz, 0.0)) / bw
+    return min(1.0, 10.0 ** (-acr * channels_away / 10.0))
 
 
 def radio_horizon_m(h1_m, h2_m):
@@ -1511,8 +1544,10 @@ def _co_channel_contenders(a, b, agents, networks, poses, band, rf,
             continue
         onet = (networks or {}).get(other.get("network")) or {}
         oband = _qty(onet.get("band"), 2400.0)
-        if abs(oband - band) > 0.5:
-            continue                     # different channel: no contention
+        # Only agents whose energy substantially lands in this channel contend
+        # for it; ACI decides "substantially" rather than an exact match.
+        if aci_mu(oband - band) < 0.5:
+            continue                     # separated enough: no contention
         if routing == "tiered" and my_squad is not None:
             osq, oleader = squads_of.get(oid, (None, None))
             if osq != my_squad and oid != oleader:
@@ -1944,6 +1979,15 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         # What the topology MEASURES as, independent of what it was declared
         # to be. The gap between this and the declared routing is the finding.
         "topology": observed_topology(links_out),
+        # MAX-MIN FAIRNESS: the fleet's capability is governed by its WORST
+        # link, not its average - which is the objective Zhou et al. optimise
+        # ("maximize the minimum SINR among all the UAVs"). Reported so an
+        # experiment can score on the worst case rather than hide it in a mean.
+        "worst_link": (min(
+            ({"pair": f"{l['a']}-{l['b']}", "sinr_db": l["sinr_db"],
+              "pdr": l["pdr"]}
+             for l in links_out if l.get("active")),
+            key=lambda x: x["sinr_db"], default=None)),
         # Jammers currently transmitting - the Contested tab's "what is
         # degrading the spectrum right now" list.
         "attacks_active": [
