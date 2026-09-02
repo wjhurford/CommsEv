@@ -1054,11 +1054,16 @@ def test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists():
     lclean, lerrs, _ = run("3_roboracer", 1575.42, 120)
     check("a lidar car in an OPEN field also drifts (nothing to scan)",
           lerrs[-1] > 0.1, f"{[lclean] + lerrs}")
-    # But WITH features (walls) a lidar localises with no GNSS at all - lab_box
-    # is indoors (no GNSS) yet the lidar car holds position.
-    llab, llerrs, _ = run("3_roboracer", 1575.42, 60, scene="lab_box")
-    check("a lidar car with walls holds position without GNSS (localises)",
-          max([llab] + llerrs) < 0.05, f"{[llab] + llerrs}")
+    # WITH features (walls) a lidar localises without GNSS - but it is NOT
+    # perfect: scan-matching error still accumulates (~1% of distance, UAV
+    # Navigation VNS in unknown terrain). So it drifts, just far slower than
+    # inertial-only. Claiming zero was an over-claim.
+    llab, llerrs, _ = run("3_roboracer", 1575.42, 120, scene="lab_box")
+    check("a lidar car with walls still drifts a little (SLAM is not perfect)",
+          llerrs[-1] > 0.0, f"{[llab] + llerrs}")
+    check("...but far less than an unaided car over the same ground",
+          llerrs[-1] < errs[-1] / 2.0,
+          f"lidar {llerrs[-1]} vs unaided {errs[-1]}")
 
     # A COMMS-band jammer does NOT cause positional drift (wrong band).
     cclean, cerrs, _ = run("3_roboracer_no_lidar", 2400.0, 80)
@@ -1125,6 +1130,114 @@ def test_vehicle_dynamics_momentum_and_no_yaw_snap():
           and abid["car1"]["motion"] == "ackermann")
 
 
+def test_fleet_self_interference_grows_with_size():
+    """The README's "8 or more drones start jamming each other". Modelled as
+    CONTENTION, not SINR: co-channel fleet members share airtime and collide,
+    so delivered quality falls and latency rises as the fleet grows. An
+    external jammer is different - it ignores the protocol, which is what
+    makes it a jammer."""
+    print("\nFLEET SELF-INTERFERENCE (channel contention)")
+    import random, tempfile as _t
+    def mean_pdr(n):
+        ags = [{"id": "gcs", "platform": "ground_station", "network": "blue",
+                "ghost": True, "pose": {"x": 0, "y": -10, "z": 0, "yaw": 0}}]
+        for i in range(n):
+            ags.append({"id": f"d{i+1}", "platform": "quadcopter",
+                        "network": "blue",
+                        "pose": {"x": (i % 5) * 3 - 6, "y": (i // 5) * 3,
+                                 "z": 5, "yaw": 0},
+                        "performance": {"max_speed": 8}})
+        doc = {"spec_version": 0.1, "name": f"f{n}",
+               "arena": {"type": "box", "extent": {"x": 60, "y": 60, "z": 30}},
+               "networks": {"blue": {"topology": "centralized",
+                                     "coordinator": "gcs", "band": 2400}},
+               "agents": ags}
+        tmp = Path(_t.mkdtemp()) / "f.yaml"
+        tmp.write_text(yaml.safe_dump(doc))
+        arena, agents, links = st.load_scenario(str(tmp))
+        poses = _poses_for(agents)
+        f = st.frame(0.0, 0.1, 0, arena, agents, links, poses,
+                     random.Random(1))
+        act = [l for l in f["links"] if l["active"]]
+        return (sum(l["pdr"] for l in act) / len(act),
+                sum(l["latency_ms"] for l in act) / len(act),
+                max(l["contenders"] for l in act))
+
+    p2, lat2, c2 = mean_pdr(2)
+    p8, lat8, c8 = mean_pdr(8)
+    p16, lat16, c16 = mean_pdr(16)
+    check("a bigger fleet has more co-channel contenders", c16 > c8 > c2)
+    check("delivered quality falls as the fleet grows",
+          p16 < p8 < p2, f"{p2:.2f} / {p8:.2f} / {p16:.2f}")
+    check("latency rises as airtime is shared",
+          lat16 > lat8 > lat2, f"{lat2:.0f} / {lat8:.0f} / {lat16:.0f} ms")
+    check("a small fleet is barely affected", p2 > 0.9, f"{p2:.2f}")
+    check("a large fleet is materially degraded by itself alone",
+          p16 < 0.6, f"{p16:.2f}")
+
+    # HOW THE FLEET IS ORGANISED changes the answer: tiered routing keeps
+    # intra-squad traffic local, so it PARTITIONS contention. One of the real
+    # reasons militaries organise hierarchically.
+    def tiered16():
+        ids = [f"d{i+1}" for i in range(16)]
+        ags = [{"id": "gcs", "platform": "ground_station", "network": "blue",
+                "ghost": True, "pose": {"x": 0, "y": -10, "z": 0, "yaw": 0}}]
+        for i, aid in enumerate(ids):
+            ags.append({"id": aid, "platform": "quadcopter", "network": "blue",
+                        "pose": {"x": (i % 4) * 3 - 5, "y": (i // 4) * 3,
+                                 "z": 5, "yaw": 0},
+                        "performance": {"max_speed": 8}})
+        net = {"topology": "hierarchical", "coordinator": "gcs", "band": 2400,
+               "routing": "tiered", "qos": {"deadline_ms": 100},
+               "squads": {"a": {"leader": ids[0], "members": ids[1:8]},
+                          "b": {"leader": ids[8], "members": ids[9:]}}}
+        doc = {"spec_version": 0.1, "name": "t16",
+               "arena": {"type": "box", "extent": {"x": 60, "y": 60, "z": 30}},
+               "networks": {"blue": net}, "agents": ags}
+        tmp = Path(_t.mkdtemp()) / "t.yaml"
+        tmp.write_text(yaml.safe_dump(doc))
+        arena, agents, links = st.load_scenario(str(tmp))
+        poses = _poses_for(agents)
+        f = st.frame(0.0, 0.1, 0, arena, agents, links, poses,
+                     random.Random(1))
+        act = [l for l in f["links"] if l["active"]]
+        return (sum(l["pdr"] for l in act) / len(act),
+                max(l["contenders"] for l in act))
+    pt, ct = tiered16()
+    check("tiered routing partitions contention (fewer contenders)",
+          ct < c16, f"tiered {ct} vs star/mesh {c16}")
+    check("...so the same 16 agents communicate better when tiered",
+          pt > p16, f"tiered {pt:.2f} vs flat {p16:.2f}")
+
+    # A network's own declared deadline decides how much contention costs it.
+    def with_deadline(ms):
+        ags = [{"id": "gcs", "platform": "ground_station", "network": "blue",
+                "ghost": True, "pose": {"x": 0, "y": -10, "z": 0, "yaw": 0}}]
+        for i in range(16):
+            ags.append({"id": f"d{i+1}", "platform": "quadcopter",
+                        "network": "blue",
+                        "pose": {"x": (i % 4) * 3 - 5, "y": (i // 4) * 3,
+                                 "z": 5, "yaw": 0},
+                        "performance": {"max_speed": 8}})
+        doc = {"spec_version": 0.1, "name": "d",
+               "arena": {"type": "box", "extent": {"x": 60, "y": 60, "z": 30}},
+               "networks": {"blue": {"topology": "centralized",
+                                     "coordinator": "gcs", "band": 2400,
+                                     "qos": {"deadline_ms": ms}}},
+               "agents": ags}
+        tmp = Path(_t.mkdtemp()) / "d.yaml"
+        tmp.write_text(yaml.safe_dump(doc))
+        arena, agents, links = st.load_scenario(str(tmp))
+        poses = _poses_for(agents)
+        f = st.frame(0.0, 0.1, 0, arena, agents, links, poses,
+                     random.Random(1))
+        act = [l for l in f["links"] if l["active"]]
+        return sum(l["pdr"] for l in act) / len(act)
+    check("a tight real-time deadline suffers more from contention "
+          "than a lax one", with_deadline(50) < with_deadline(500),
+          f"{with_deadline(50):.2f} vs {with_deadline(500):.2f}")
+
+
 def test_origin_passthrough():
     print("\nGEODETIC ORIGIN - SCHEMA SEAM, NO CONVERSION")
     arena, _, _ = st.load_scenario(str(REPO / "scenes" / "lab_box.yaml"))
@@ -1163,6 +1276,7 @@ if __name__ == "__main__":
                test_jam_command_tunes_live, test_jammer_range_helper,
                test_missions_are_blue_only, test_leader_loss_doctrine,
                test_vehicle_dynamics_momentum_and_no_yaw_snap,
+               test_fleet_self_interference_grows_with_size,
                test_jamming_stops_a_centralized_fleet_but_not_a_decentralized_one,
                test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists,
                test_retask_spool_is_one_file_per_command,

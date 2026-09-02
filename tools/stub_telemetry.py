@@ -52,16 +52,39 @@ GNSS_DENIAL_DBM = -120.0
 # Reckoning Operations".
 DRIFT_RATE_UNAIDED = 0.04
 DRIFT_RATE_AIDED = 0.01
-# A sensor that gives an RF-immune position fix (lidar/vision localisation) all
-# but removes the drift - the GNSS-denied-navigation result. Modelled as a
-# near-zero rate; real visual odometry is richer (flagged simplification).
-DRIFT_RATE_LIDAR = 0.0
+# A sensor that gives an RF-immune position fix (lidar/vision localisation)
+# greatly reduces drift but does NOT remove it: scan-matching and loop-closure
+# error accumulate too. UAV Navigation measured ~1% of distance with their
+# Visual Navigation System in UNKNOWN terrain, and "no measurable drift" only
+# against KNOWN terrain (a surveyed map). 1% is the honest default; a scene
+# that declares a surveyed map could justify less. Zero was an over-claim.
+DRIFT_RATE_LIDAR = 0.01
 # Heading of the accumulating error random-walks; this is its per-tick sigma
 # (rad). Free parameter - it sets how the error meanders, not how fast it grows.
 DRIFT_TURN_SIGMA = 0.15
 # When a fix returns, the estimate is pulled back to truth at this rate (m/s),
 # not snapped - matches ArduPilot's EKF offset correction "reducing at 1 m/s".
 GNSS_RECOVER_MPS = 1.0
+# --- Self-interference: a fleet degrading its OWN comms as it grows.
+# The README's "8 or more drones start jamming each other". In a coordinated
+# fleet this is NOT an SINR problem - the radios share a medium-access
+# protocol, so they take turns rather than shouting over each other. (An
+# external jammer is different precisely because it IGNORES the protocol -
+# that is what makes it a jammer.) What degrades is AIRTIME.
+#
+# The model uses no invented penalty coefficient. Two grounded steps:
+#   1. AIRTIME SHARE. n contenders sharing one channel each get 1/(n+1) of it,
+#      so the delay to get a packet out scales by (n+1). That is arithmetic,
+#      not a fitted constant.
+#   2. DEADLINE MISSES. A packet is not "lost" by contention, it is DELAYED -
+#      it only counts as lost if it misses the deadline the network declares
+#      in its own QoS block (`deadline_ms`, already in the schema). Service
+#      time is taken as exponential (the standard M/M/1 queueing assumption),
+#      so the fraction arriving in time is 1 - exp(-deadline / delay).
+# Consequence worth noting: a network that declares a lax deadline tolerates
+# a crowded channel; a tight real-time deadline does not. That is a real
+# design trade and now an experimental variable.
+DEFAULT_DEADLINE_MS = 100.0     # used only if a network declares none
 
 
 def _num(v, default=0.0):
@@ -1458,6 +1481,53 @@ def active_jammers(agents):
     return [a for a in agents if a.get("jammer") and a.get("armed")]
 
 
+def _co_channel_contenders(a, b, agents, networks, poses, band, rf,
+                           routing="mesh", squads_of=None):
+    """How many OTHER agents actually compete for this receiver's channel.
+
+    Two filters, and the second is where ROUTING matters - how the fleet is
+    ORGANISED changes who shares a channel with whom:
+
+      star    every member talks to the hub, so every member contends with
+              every other. Contention concentrates at one point and scales
+              with the whole fleet.
+      mesh    every in-range peer relays, so everyone in earshot contends -
+              the same crowd as a star, plus relayed traffic.
+      tiered  intra-squad traffic stays inside the squad, so a member contends
+              only with its own squad and its leader. Contention is PARTITIONED
+              by the hierarchy - which is one of the real reasons militaries
+              organise this way.
+
+    "In earshot" = the other agent's signal arrives above receiver sensitivity,
+    i.e. loud enough to collide. Jammers are excluded: they are already counted
+    as interference power, and they do not obey the protocol.
+    """
+    squads_of = squads_of or {}
+    my_squad = (squads_of.get(b) or (None, None))[0]
+    n = 0
+    for other in agents:
+        oid = other["id"]
+        if oid in (a, b) or other.get("jammer"):
+            continue
+        onet = (networks or {}).get(other.get("network")) or {}
+        oband = _qty(onet.get("band"), 2400.0)
+        if abs(oband - band) > 0.5:
+            continue                     # different channel: no contention
+        if routing == "tiered" and my_squad is not None:
+            osq, oleader = squads_of.get(oid, (None, None))
+            if osq != my_squad and oid != oleader:
+                continue                 # a different squad's traffic is not
+                                         # on this receiver's local channel
+        try:
+            r = rf_link(poses[oid], poses[b], plexp=rf["plexp"],
+                        noise_dbm=rf["noise_dbm"])
+        except KeyError:
+            continue
+        if r["rx_dbm"] > -85.0:          # audible => can collide
+            n += 1
+    return n
+
+
 def apply_routing(links, agents, networks, poses, world=None):
     """Decide which physically-reachable candidates are actually USED.
 
@@ -1526,9 +1596,31 @@ def apply_routing(links, agents, networks, poses, world=None):
                              exclude=(a, b)))
         state = rf_link(poses[a], poses[b], plexp=_rf["plexp"],
                         noise_dbm=_rf["noise_dbm"], interference_mw=interf)
+
+        # CONTENTION: every other agent sharing this band and within earshot of
+        # the receiver competes for airtime. Each costs a little delivered
+        # throughput and adds collision risk; latency rises with the share.
+        # This is the fleet jamming ITSELF - a crowding effect, distinct from
+        # the external jammer already in the SINR above.
+        contenders = _co_channel_contenders(a, b, agents, networks, poses,
+                                            band, _rf, routing, squads_of)
+        if contenders > 0:
+            # 1. Airtime share: n contenders -> delay scales by (n + 1).
+            delay = state["latency_ms"] * (1.0 + contenders)
+            # 2. A packet is lost only if it misses the declared deadline.
+            deadline = _qty((net.get("qos") or {}).get("deadline_ms"),
+                            DEFAULT_DEADLINE_MS)
+            on_time = 1.0 - math.exp(-max(deadline, 1e-6) / max(delay, 1e-6))
+            state["latency_ms"] = round(delay, 2)
+            state["pdr"] = round(state["pdr"] * on_time, 3)
+            state["quality"] = state["pdr"]
+            state["state"] = ("up" if state["pdr"] > 0.85
+                              else ("degraded" if state["pdr"] > 0.25
+                                    else "down"))
         out.append({**l, **state,
                     "routing": routing,
                     "band_mhz": band,          # so the UI can filter by band
+                    "contenders": contenders,
                     "active": active,
                     "usable": state["state"] != "down"})
     return out
@@ -1738,9 +1830,15 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         aided = _position_aiding(a, arena)   # None, or a (low) drift rate
         gnss_ok = (_gnss_present
                    and not gnss_denied(a, poses, _jam0, _rf0["plexp"]))
-        if gnss_ok or aided is not None:
-            _drift_rates[aid] = (aided if aided is not None
-                                 else DRIFT_RATE_AIDED)
+        if gnss_ok:
+            # An absolute fix: the estimate tracks truth exactly.
+            _drift_rates[aid] = 0.0
+        elif aided is not None:
+            # No GNSS, but a lidar/vision loop: localises, yet still drifts
+            # slowly (scan-matching error accumulates). Much better than
+            # inertial-only, not perfect.
+            _position_lost.add(aid)
+            _drift_rates[aid] = aided
         else:
             _position_lost.add(aid)
             _drift_rates[aid] = DRIFT_RATE_UNAIDED

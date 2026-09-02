@@ -753,10 +753,16 @@ class Viewport(QWidget):
         jamming, drawn: the gap between the solid car and its ghost."""
         if self.mode != self.TOP:
             return
+        gnss_view = (self.band_filter == "gnss")
         for a in self.agents:
             err = _num(a.get("position_error_m"))
             bel = a.get("believed") or {}
-            if err <= 0.15 or "x" not in bel:
+            if "x" not in bel:
+                continue
+            # Normally only a meaningful drift is worth drawing. On the GNSS
+            # band the drift IS the subject, so show every agent's, however
+            # small, with the distance spelled out.
+            if not gnss_view and err <= 0.15:
                 continue
             pose = a.get("pose", {})
             tp = self.to_screen(_num(pose.get("x")), _num(pose.get("y")), 0)
@@ -770,7 +776,9 @@ class Viewport(QWidget):
             p.drawEllipse(bp, 6, 6)
             p.setFont(QFont("Consolas", 7))
             p.setPen(QPen(col))
-            p.drawText(bp + QPointF(8, 3), f"thinks: {err:.1f} m off")
+            p.drawText(bp + QPointF(8, 3),
+                       (f"{a.get('id')}: believes it is {err:.2f} m from here"
+                        if gnss_view else f"thinks: {err:.1f} m off"))
 
     def _range_rings(self, p):
         """Ring the influence area of a SELECTED jammer (TOP view only - a
