@@ -39,8 +39,9 @@ networks:
     # SQUADS - one, because three cars is what this lab actually has. A squad
     # is a leader plus members; a leader with nobody to lead is not a squad,
     # it is a car wired to the coordinator with a label on it. For genuine
-    # two-squad hierarchy see scenes/squad_hall.yaml, which has the agents for
-    # it. This scene stays faithful to the real fleet.
+    # two-squad hierarchy you need six cars; that scene was retired and the
+    # shape now lives as a generated fixture in tests/test_all.py
+    # (_two_squad_path). This fleet stays faithful to the real lab.
     squads:
       alpha: {leader: car1, members: [car2, car3]}
     topology: centralized      # legacy alias for authority; still read

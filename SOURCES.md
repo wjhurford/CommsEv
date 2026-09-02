@@ -39,3 +39,38 @@ Status: `TODO` · `FOUND` · `MEASURED` · `NO SOURCE` (declared free parameter)
 | --- | --- | --- |
 | Fiber tether mass/m, drag, bend radius, spool | NO SOURCE | Manufacturer data plus our own measurement. Model should say so. |
 | Emissions detectability, time-to-geolocate | NO SOURCE | Open literature thins out fast. Model parametrically, declare free. |
+
+---
+
+## Model constants (added Aug–Sep 2026)
+
+The RF / jamming / navigation model. Status per the rules above.
+
+| Parameter | Value | Status | Source |
+| --- | --- | --- | --- |
+| Path-loss form `20lg(f)+20lg(d)+32.44` | — | FOUND | Friis; independently matched by Zhou et al. 2020 (arXiv:2008.08212) |
+| Path-loss exponent (indoor) | 2.8 | NO SOURCE | Defensible indoor-multipath default; scene declares it |
+| Path-loss exponent (open field) | 2.2 | NO SOURCE | Near-free-space default; scene declares it |
+| Noise floor | −95 dBm | NO SOURCE | Defensible default; measure with an SDR to upgrade |
+| Receiver sensitivity | −85 dBm | NO SOURCE | Commodity 2.4 GHz figure; module datasheet would upgrade |
+| PDR-vs-SINR curve | logistic, k=0.8 | NO SOURCE | **Stand-in for a modulation/coding curve. Shape is right, values are not a real radio.** |
+| Radio horizon `4120(√h₁+√h₂)` | — | FOUND | Standard 4/3-earth radio horizon |
+| GNSS band | 1575.42 MHz | FOUND | GPS L1, standard |
+| GNSS denial threshold | −120 dBm | NO SOURCE | GNSS arrives ~−128 dBm ("weak and easily jammed", Critical Analysis of Spoofing & Jamming); −120 is a declared free parameter |
+| Dead-reckoning drift, unaided | 4% of distance | FOUND | UAV Navigation, VECTOR autopilot, MEMS inertial (~33 m/min) |
+| Dead-reckoning drift, vision/lidar aided | 1% of distance | FOUND | UAV Navigation, Visual Navigation System, unknown terrain |
+| GNSS usable window before divergence | ~10 s | FOUND | ArduPilot Copter, GPS Failsafe & Glitch Protection |
+| Drift heading random-walk σ | 0.15 rad/tick | NO SOURCE | Free parameter; sets how error meanders, not how fast it grows |
+| ACI correlation coefficient μ(Δf) | — | FOUND (structure) | Zhou et al. 2020 — properties (μ=1 at Δf=0, →0 far apart, symmetric, measurable) |
+| Adjacent-channel rejection | 30 dB/channel | NO SOURCE | Commodity receiver figure; declared free parameter |
+| Channel bandwidth | 20 MHz | NO SOURCE | Nominal |
+| Contention airtime share `1/(n+1)` | — | FOUND | Channel-sharing arithmetic, not a fitted constant |
+| Contention deadline model `1−exp(−deadline/delay)` | — | FOUND | Standard M/M/1 exponential service assumption; deadline comes from the network's own declared QoS |
+| Contention audibility threshold | −85 dBm | NO SOURCE | Same as receiver sensitivity; declared free parameter |
+| Vehicle max accel (default) | 2.0 m/s² | NO SOURCE | Nominal for a 1:10 car; **measure the real cars** |
+| Vehicle min turn radius (default) | 0.6 m | NO SOURCE | Nominal; **measure the real cars** |
+| LoS / NLoS excess path loss | 3 dB / 23 dB | FOUND, NOT YET USED | Zhou et al. 2020 — we do not model an LoS/NLoS split yet |
+
+**Honest total (live files, Sep 2026): 35 of 57 declared quantities carry a
+source. 22 do not.** Every unsourced one above is a declared free parameter,
+not a disguised guess — but a result that turns on any of them must say so.

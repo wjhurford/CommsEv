@@ -384,6 +384,12 @@ def load_scenario(path):
             # (belief - truth), `drift_dir` the heading it is currently
             # accumulating along. See step() and docs/gnss-drift-model.md.
             "belief": {"x": _num(pose.get("x")), "y": _num(pose.get("y"))},
+            # WHAT THIS AGENT KNOWS ABOUT THE OTHERS. Not ground truth - each
+            # entry is the other agent's OWN BELIEF about itself, as reported
+            # over the network, and it only updates while a route exists. Lose
+            # the link and the entry goes STALE: you keep acting on where they
+            # last said they were. Missions read this, never the true poses.
+            "knowledge": {},
             "drift": {"x": 0.0, "y": 0.0},
             "drift_dir": 0.0,
             # What this agent does when it cannot reach its commander: hold
@@ -934,7 +940,9 @@ def step(agents, poses, t, dt, arena, unreachable=None,
         # agent's own speed, so the agent keeps catching it exactly and stopping
         # for a frame - which is what put the regular dropouts to zero in the
         # speed plot. A moving target must always be a step away.
-        tx, ty = mission_target(a, t + dt, poses, arena)
+        # THE KEY LINE: a mission is handed what this agent KNOWS - its own
+        # drifted belief and the reports it has received - never ground truth.
+        tx, ty = mission_target(a, t + dt, a.get("knowledge") or poses, arena)
         # A vehicle steers toward its target from where it BELIEVES it is - it
         # has no other position to use. While it has a fix, belief == truth
         # and this is the old behaviour. Under GNSS denial, belief has drifted,
@@ -1436,9 +1444,6 @@ def _scene_has_features(arena):
     for face, kind in (arena.get("boundaries") or {}).items():
         if kind == "solid":
             return True
-    # A non-ghost body an agent could scan counts as a feature too.
-    for a in (arena.get("_obstacles") or []):
-        return True
     return False
 
 
@@ -1772,68 +1777,77 @@ def rf_link(pa, pb, tx_dbm=20.0, freq_mhz=2400.0, plexp=2.8,
 
 
 def link_state(pa, pb):
-    """Link quality between two poses, from the SINR model.
+    """Link quality between two poses on a CLEAN SPECTRUM.
 
-    Kept as a thin wrapper because several callers want "just tell me if this
-    pair can talk" without assembling radio parameters. Callers that DO have
-    the radio and interference picture should call rf_link directly.
+    A thin wrapper for callers that want "can this pair talk" without
+    assembling radio parameters. LIMITATION, stated because it matters: this
+    ignores jamming, the scene's declared noise floor and path-loss exponent,
+    and contention - it is clean-spectrum geometry only. Anything that has the
+    real picture must call rf_link() directly and pass it. command_authority()
+    only falls back to this when no scored link states are supplied; every
+    call inside frame() supplies them.
     """
     return rf_link(pa, pb)
 
 
-def _unused_enforce_bounds(agents, poses, arena):
-    """Walls and other agents are solid.
+def update_knowledge(agents, poses, links_out, t):
+    """Share position reports along the routes that actually carry traffic.
 
-    This is a KINEMATIC CONSTRAINT, not a physics engine: a mission path that
-    would leave the room or overlap another agent is clipped back to the nearest
-    legal position, and no momentum, restitution or contact force is modelled.
-    That is the honest level for a stub. What it does guarantee is that no agent
-    is ever reported somewhere it could not physically be, which is what makes
-    the lidar and the link distances trustworthy.
+    Each agent knows its OWN belief exactly (it is its own estimate) and knows
+    other agents only as the belief THEY reported. A report reaches an agent if
+    a path of active, non-down links connects them - so this is multi-hop and
+    routing-dependent: in a star, two members exchange positions via the hub;
+    in a mesh, directly; in a tiered network, within the squad. Agents in
+    different connected components keep whatever they last heard, timestamped,
+    and act on stale information - which is what actually happens.
+
+    This replaces missions reading ground truth. Fixes the hole where a pursuit
+    under total GNSS denial still knew exactly where its target really was.
     """
-    hx = arena["extent"]["x"] / 2.0
-    hy = arena["extent"]["y"] / 2.0
-    b = arena.get("boundaries") or {}
-    radii = {a["id"]: max(a["dimensions"]["length"],
-                          a["dimensions"]["width"]) / 2.0 for a in agents}
-    contacts = []
+    adj = {}
+    for l in links_out:
+        if l.get("active") and l.get("state") != "down":
+            adj.setdefault(l["a"], set()).add(l["b"])
+            adj.setdefault(l["b"], set()).add(l["a"])
 
-    # Walls, for boundaries that are actually solid.
+    by_id = {a["id"]: a for a in agents}
+
+    def reported(aid):
+        """What agent `aid` would transmit about itself: its own belief for
+        position (which drifts), plus heading/height, which a compass, IMU and
+        barometer give it without GNSS."""
+        ag = by_id.get(aid) or {}
+        b = ag.get("belief") or {}
+        p = poses.get(aid) or {}
+        return {"x": _num(b.get("x"), _num(p.get("x"))),
+                "y": _num(b.get("y"), _num(p.get("y"))),
+                "z": _num(p.get("z")), "yaw": _num(p.get("yaw")),
+                "speed": _num(p.get("speed")), "t": t}
+
+    seen, comps = set(), []
     for a in agents:
-        p, r = poses[a["id"]], radii[a["id"]]
-        if b.get("x_min", "solid") == "solid" and p["x"] < -hx + r:
-            p["x"] = -hx + r; contacts.append((a["id"], "wall x_min"))
-        if b.get("x_max", "solid") == "solid" and p["x"] > hx - r:
-            p["x"] = hx - r; contacts.append((a["id"], "wall x_max"))
-        if b.get("y_min", "solid") == "solid" and p["y"] < -hy + r:
-            p["y"] = -hy + r; contacts.append((a["id"], "wall y_min"))
-        if b.get("y_max", "solid") == "solid" and p["y"] > hy - r:
-            p["y"] = hy - r; contacts.append((a["id"], "wall y_max"))
-        if p["z"] < 0.0:
-            p["z"] = 0.0
+        aid = a["id"]
+        if aid in seen:
+            continue
+        comp, stack = set(), [aid]
+        while stack:
+            n = stack.pop()
+            if n in comp:
+                continue
+            comp.add(n)
+            seen.add(n)
+            stack += [m for m in adj.get(n, ()) if m not in comp]
+        comps.append(comp)
 
-    # Agent against agent, only where they share vertical extent. Two agents at
-    # different altitudes are not in contact however close their footprints.
-    ids = [a["id"] for a in agents]
-    heights = {a["id"]: a["dimensions"]["height"] for a in agents}
-    for i in range(len(ids)):
-        for j in range(i + 1, len(ids)):
-            pa, pb = poses[ids[i]], poses[ids[j]]
-            if pa["z"] + heights[ids[i]] < pb["z"] or pb["z"] + heights[ids[j]] < pa["z"]:
-                continue
-            dx, dy = pb["x"] - pa["x"], pb["y"] - pa["y"]
-            d = math.hypot(dx, dy)
-            need = radii[ids[i]] + radii[ids[j]]
-            if d >= need:
-                continue
-            if d < 1e-6:
-                dx, dy, d = 1.0, 0.0, 1.0
-            push = (need - d) / 2.0
-            ux, uy = dx / d, dy / d
-            pa["x"] -= ux * push; pa["y"] -= uy * push
-            pb["x"] += ux * push; pb["y"] += uy * push
-            contacts.append((ids[i], f"contact {ids[j]}"))
-    return contacts
+    for comp in comps:
+        shared = {aid: reported(aid) for aid in comp if aid in by_id}
+        for aid in comp:
+            ag = by_id.get(aid)
+            if ag is not None:
+                ag.setdefault("knowledge", {}).update(shared)
+    # An agent always knows its own current belief, connected or not.
+    for a in agents:
+        a.setdefault("knowledge", {})[a["id"]] = reported(a["id"])
 
 
 def frame(t, dt, seq, arena, agents, links, poses, rng):
@@ -1877,6 +1891,9 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         else:
             _position_lost.add(aid)
             _drift_rates[aid] = DRIFT_RATE_UNAIDED
+    # Distribute position reports over the routes as they stand entering this
+    # tick, THEN act. An agent acts on what it has been told, not on truth.
+    update_knowledge(agents, poses, _pre, t)
     contacts = step(agents, poses, t, dt, arena, unreachable=_unreachable,
                     position_lost=_position_lost, drift_rates=_drift_rates,
                     rng=rng)

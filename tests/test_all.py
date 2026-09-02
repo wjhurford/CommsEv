@@ -1259,6 +1259,78 @@ def test_origin_passthrough():
           str(arena2["origin"]))
 
 
+def test_missions_read_belief_not_ground_truth():
+    """THE FIX for the review's critical finding. A mission is handed what the
+    agent KNOWS - its own drifted belief plus the position reports it has
+    actually received over live links - never the simulator's ground truth.
+
+    Three things are asserted, and the first two are what the old code failed:
+      1. under GNSS denial, a pursuer's picture of its target DIVERGES from the
+         target's true pose (before this fix the error was identically zero);
+      2. that picture tracks the target's own BELIEF, which is the only thing
+         the target could have transmitted;
+      3. when the comms link drops, the picture FREEZES and AGES - the pursuer
+         keeps acting on the last report it heard, which is what really happens.
+    See docs/gnss-drift-model.md and the critical review."""
+    print("\nMISSIONS READ BELIEF, NOT GROUND TRUTH")
+    import random, copy
+
+    arena, agents, links = st.load_scenario(
+        {"scene": "open_field", "fleets": ["3_roboracer_no_lidar", "red_jammer"]})
+    by = {a["id"]: a for a in agents}
+
+    # jam1 denies GNSS outright; jam2 (armed later) cuts the comms band.
+    by["jam1"]["armed"] = True
+    by["jam1"]["jammer"]["tx_power"] = {"value": 40}
+    by["jam1"]["jammer"]["band"] = {"value": st.GNSS_BAND_MHZ}
+    j2 = copy.deepcopy(by["jam1"])
+    j2["id"], j2["armed"] = "jam2", False
+    j2["jammer"]["band"] = {"value": 2400}
+    j2["start"] = dict(by["jam1"]["start"]); j2["start"]["y"] = 1.0
+    agents.append(j2); by["jam2"] = j2
+
+    by["car1"]["mission"] = {"type": "pursuit", "target": "car3", "standoff": 1.2}
+    by["car3"]["mission"] = {"type": "shuttle", "between": ["E", "F"]}
+    for a in agents:
+        if a["id"].startswith("car"):
+            a["armed"] = True
+
+    rng = random.Random(1)
+    poses = _poses_for(agents)
+    dt, err_at, know = 0.1, {}, {}
+    for k in range(300):
+        t = k * dt
+        if k == 120:
+            by["jam2"]["armed"] = True          # comms cut at t = 12 s
+        st.frame(t, dt, k, arena, agents, links, poses, rng)
+        kn = (by["car1"].get("knowledge") or {}).get("car3") or {}
+        b3 = by["car3"].get("belief") or {}
+        p3 = poses["car3"]
+        err_at[k] = math.hypot(kn.get("x", 0.0) - p3["x"], kn.get("y", 0.0) - p3["y"])
+        know[k] = (dict(kn), dict(b3), t)
+
+    check("a pursuer's picture of its target DIVERGES under GNSS denial "
+          "(the old code had it exactly right, forever)",
+          err_at[115] > 0.25, f"error at t=11.5s: {err_at[115]:.3f} m")
+    kn, b3, _ = know[115]
+    check("that picture tracks the target's own BELIEF, not its true pose",
+          math.hypot(kn["x"] - b3.get("x", 0.0), kn["y"] - b3.get("y", 0.0)) < 0.25,
+          f"knowledge {kn['x']:.2f},{kn['y']:.2f} vs belief "
+          f"{b3.get('x', 0):.2f},{b3.get('y', 0):.2f}")
+
+    kn_cut, _, t_cut = know[130]
+    kn_end, _, t_end = know[299]
+    check("when the comms link drops the picture FREEZES",
+          math.hypot(kn_end["x"] - kn_cut["x"], kn_end["y"] - kn_cut["y"]) < 1e-9,
+          f"{kn_cut['x']:.3f},{kn_cut['y']:.3f} -> {kn_end['x']:.3f},{kn_end['y']:.3f}")
+    check("...and AGES, so staleness is visible rather than hidden",
+          (t_end - kn_end["t"]) > 15.0,
+          f"age {t_end - kn_end['t']:.1f}s")
+
+    check("an agent always knows its OWN belief, connected or not",
+          "car1" in (by["car1"].get("knowledge") or {}))
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -1281,7 +1353,8 @@ if __name__ == "__main__":
                test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists,
                test_retask_spool_is_one_file_per_command,
                test_retask_claim_failure_is_never_silent_and_not_lost,
-               test_origin_passthrough):
+               test_origin_passthrough,
+               test_missions_read_belief_not_ground_truth):
         try:
             fn()
         except Exception:

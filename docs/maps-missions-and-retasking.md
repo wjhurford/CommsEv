@@ -1,3 +1,7 @@
+> **SUPERSEDED (1 Sep 2026).** Written against the old map/mission vocabulary and the retired `scenarios/` files.
+> The live model is **scene + fleet, composed by a mission** - see `docs/vocabulary.md`.
+> Kept for provenance; do not follow the file names or commands here.
+
 # Maps, missions, and retasking
 
 This is the split that stops a run being welded to one arena. Read it once and

@@ -31,7 +31,14 @@ QUANTITY_KEYS = {"value", "unit", "source"}
 REQUIRED_TOP_LEVEL = ["spec_version", "name", "arena", "agents"]
 
 VALID_BOUNDARIES = {"solid", "open", "absorbing"}
-VALID_TOPOLOGIES = {"centralized", "decentralized", "hierarchical"}
+# AUTHORITY = who decides. ROUTING = how packets travel. They are independent
+# axes (docs/vocabulary.md, the authority x topology matrix), so they are
+# validated separately. `topology` is the legacy name for authority and is
+# still accepted so older files load.
+VALID_AUTHORITIES = {"centralized", "decentralized", "hierarchical"}
+VALID_ROUTINGS = {"star", "mesh", "tiered"}
+VALID_LEADER_LOSS = {"fallback", "strand"}
+VALID_TOPOLOGIES = VALID_AUTHORITIES        # legacy alias
 
 
 @dataclass
@@ -142,12 +149,40 @@ def _check_structure(doc: dict, report: Report) -> None:
 
     networks = doc.get("networks") or {}
     for net_name, net in networks.items():
-        topology = (net or {}).get("topology")
-        if topology not in VALID_TOPOLOGIES:
+        net = net or {}
+        # authority (or its legacy alias topology/architecture) must be named
+        # and valid - a silent typo here changes who commands whom.
+        authority = (net.get("authority") or net.get("architecture")
+                     or net.get("topology"))
+        if authority not in VALID_AUTHORITIES:
             report.errors.append(
-                f"networks.{net_name}.topology: '{topology}' is not one of "
-                f"{sorted(VALID_TOPOLOGIES)}"
+                f"networks.{net_name}.authority: '{authority}' is not one of "
+                f"{sorted(VALID_AUTHORITIES)}"
             )
+        routing = net.get("routing")
+        if routing is not None and routing not in VALID_ROUTINGS:
+            report.errors.append(
+                f"networks.{net_name}.routing: '{routing}' is not one of "
+                f"{sorted(VALID_ROUTINGS)}"
+            )
+        leader_loss = net.get("leader_loss")
+        if leader_loss is not None and leader_loss not in VALID_LEADER_LOSS:
+            report.errors.append(
+                f"networks.{net_name}.leader_loss: '{leader_loss}' is not one "
+                f"of {sorted(VALID_LEADER_LOSS)}"
+            )
+        # A hierarchy needs squads to be a hierarchy at all.
+        if authority == "hierarchical" and not net.get("squads"):
+            report.warnings.append(
+                f"networks.{net_name}: authority is 'hierarchical' but no "
+                f"squads are declared - it will behave as a star on the "
+                f"coordinator"
+            )
+        for sq_name, spec_ in (net.get("squads") or {}).items():
+            spec_ = spec_ or {}
+            if not spec_.get("leader"):
+                report.errors.append(
+                    f"networks.{net_name}.squads.{sq_name}: no leader")
 
     # Cross-references: every agent must point at things that exist.
     agent_ids = set()
