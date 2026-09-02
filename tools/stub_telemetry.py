@@ -1292,18 +1292,54 @@ def command_authority(agent, arena, links, poses, networks,
     aid = agent["id"]
 
     def _reaches(other):
-        """Is there a usable link between aid and other, right now?
+        """Can a command from `other` reach this agent, right now?
+
+        NOT "is there a direct link". Two corrections that the routing axis
+        is meaningless without:
+
+          ACTIVE ONLY. A link the routing does not carry cannot deliver an
+          order, however good its SINR. A star does not carry peer links; a
+          tiered network does not carry member-to-coordinator links. Scoring
+          those anyway is what made star, mesh and tiered produce IDENTICAL
+          command availability in the first sweep - the axis was declared,
+          measured, and silently ignored.
+
+          MULTI-HOP. Authority follows a PATH, not one hop. In a tiered
+          network car2 has no direct link to the coordinator and is still
+          commanded, via its leader. Asking only about the direct link
+          would stand the whole squad down the moment it was tiered.
 
         When the caller has already scored the links (frame() computes them
-        WITH jamming and the scene baseline), that verdict is used - so
+        WITH jamming and the scene baseline), that verdict is used, so
         authority genuinely degrades when the spectrum does. The fallback
         re-derives from clean-spectrum geometry, for callers with no frame
-        in hand."""
+        in hand - single-hop only, and honest about it.
+        """
         if other is None or other == aid:
             return True
         if link_states is not None:
-            st_ = link_states.get(frozenset((aid, other)))
-            return st_ is not None and st_ != "down"
+            adj = {}
+            for pair, meta in link_states.items():
+                # Accept both the scored-dict form {pair: {...}} and the older
+                # {pair: state_string} form, so nothing that calls this breaks.
+                if isinstance(meta, dict):
+                    if not meta.get("active") or meta.get("state") == "down":
+                        continue
+                elif meta == "down":
+                    continue
+                x, y = tuple(pair)
+                adj.setdefault(x, set()).add(y)
+                adj.setdefault(y, set()).add(x)
+            seen, stack = set(), [aid]
+            while stack:
+                n = stack.pop()
+                if n in seen:
+                    continue
+                seen.add(n)
+                if n == other:
+                    return True
+                stack += [m for m in adj.get(n, ()) if m not in seen]
+            return False
         for l in links:
             if {l["a"], l["b"]} == {aid, other}:
                 return link_state(poses[l["a"]], poses[l["b"]])["state"] != "down"
@@ -1859,7 +1895,10 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     # acts on the link it last had, not one it cannot yet know. Without this,
     # a jammed centralized car kept driving as if still commanded.
     _pre = apply_routing(links, agents, _nets0, poses, world=arena)
-    _pre_states = {frozenset((l["a"], l["b"])): l["state"] for l in _pre}
+    # The full verdict per pair - state AND whether the routing carries it.
+    _pre_states = {frozenset((l["a"], l["b"])):
+                   {"state": l["state"], "active": l.get("active", True)}
+                   for l in _pre}
     _unreachable = {a["id"] for a in agents
                     if not command_authority(a, arena, links, poses, _nets0,
                                              link_states=_pre_states
@@ -1901,7 +1940,9 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     # Re-score after movement for the DISPLAY (positions changed).
     links_out = apply_routing(links, agents, arena.get("networks") or {},
                               poses, world=arena)
-    _states = {frozenset((l["a"], l["b"])): l["state"] for l in links_out}
+    _states = {frozenset((l["a"], l["b"])):
+               {"state": l["state"], "active": l.get("active", True)}
+               for l in links_out}
     _rf = scene_rf(arena)
     _jam = active_jammers(agents)
     _noise_mw = 10.0 ** (_rf["noise_dbm"] / 10.0)

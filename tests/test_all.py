@@ -1331,6 +1331,77 @@ def test_missions_read_belief_not_ground_truth():
           "car1" in (by["car1"].get("knowledge") or {}))
 
 
+def test_routing_gates_authority_not_just_geometry():
+    """REGRESSION. Authority must follow the routes the network actually
+    carries, over a PATH, not over any link that happens to have good SINR.
+
+    Found by the first sweep: star, mesh and tiered produced byte-identical
+    command availability at every jammer power. The axis was declared, swept
+    and silently ignored, because command_authority() asked link_states for a
+    pair's SINR state and never asked whether the routing carried that pair.
+
+    Two properties are asserted:
+      1. a link the routing does NOT carry confers no authority;
+      2. authority relays - a tiered member with no direct link to the
+         coordinator is still commanded THROUGH its leader, and is stranded
+         only when that leader is lost."""
+    print("\nROUTING GATES AUTHORITY (multi-hop, active links only)")
+    net = {"blue": {"authority": "centralized", "coordinator": "gcs",
+                    "routing": "tiered"}}
+    agent = {"id": "car2", "network": "blue"}
+    poses = {}
+
+    # gcs--car1--car2 : no direct gcs-car2 link is carried.
+    carried = {frozenset(("gcs", "car1")): {"state": "up", "active": True},
+               frozenset(("car1", "car2")): {"state": "up", "active": True},
+               frozenset(("gcs", "car2")): {"state": "up", "active": False}}
+    a = st.command_authority(agent, {}, [], poses, net, link_states=carried)
+    check("a tiered member is commanded THROUGH its relay, not stranded",
+          a["reachable"], str(a))
+
+    # Same geometry, relay link cut. The unused direct link is still 'up' and
+    # must NOT rescue it - that is the exact bug.
+    cut = dict(carried)
+    cut[frozenset(("car1", "car2"))] = {"state": "down", "active": True}
+    a = st.command_authority(agent, {}, [], poses, net, link_states=cut)
+    check("losing the relay strands the member - an inactive link does not "
+          "quietly confer authority", not a["reachable"], str(a))
+
+    # And the routing axis must MOVE the answer, end to end.
+    import random
+    def commanded(routing, jam_dbm):
+        arena, agents, links = st.load_scenario(
+            {"scene": "open_field", "fleets": ["3_roboracer_no_lidar", "red_jammer"]})
+        by = {x["id"]: x for x in agents}
+        blue = arena["networks"]["blue"]
+        blue["routing"] = routing
+        blue["squads"] = {"alpha": {"leader": "car1", "members": ["car2", "car3"]}}
+        by["jam1"]["armed"] = True
+        by["jam1"]["jammer"]["tx_power"] = {"value": jam_dbm}
+        by["jam1"]["jammer"]["band"] = {"value": 2400}
+        poses_ = _poses_for(agents)
+        for line in ("SETMISSION test\n", "LAUNCH blue\n"):
+            qd = Path(tempfile.mkdtemp()); _queue_with(qd, line)
+            st.drain_retasks(qd, by, arena, links, poses_)
+        rng = random.Random(1)
+        got = []
+        for k in range(150):
+            f = st.frame(k * 0.1, 0.1, k, arena, agents, links, poses_, rng)
+            cars = [x for x in f["agents"] if x["id"].startswith("car")]
+            got.append(sum(1 for x in cars
+                           if (x["authority"] or {}).get("reachable")) / len(cars))
+        return sum(got) / len(got)
+
+    star, mesh, tiered = (commanded(r, 10) for r in ("star", "mesh", "tiered"))
+    check("routing CHANGES command availability under the same jamming "
+          "(mesh relays, tiered has one relay to lose)",
+          not (abs(star - mesh) < 1e-9 and abs(star - tiered) < 1e-9),
+          f"star {star:.3f} mesh {mesh:.3f} tiered {tiered:.3f}")
+    check("mesh is the most resilient of the three, tiered the least",
+          mesh >= star >= tiered,
+          f"star {star:.3f} mesh {mesh:.3f} tiered {tiered:.3f}")
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -1354,7 +1425,8 @@ if __name__ == "__main__":
                test_retask_spool_is_one_file_per_command,
                test_retask_claim_failure_is_never_silent_and_not_lost,
                test_origin_passthrough,
-               test_missions_read_belief_not_ground_truth):
+               test_missions_read_belief_not_ground_truth,
+               test_routing_gates_authority_not_just_geometry):
         try:
             fn()
         except Exception:
