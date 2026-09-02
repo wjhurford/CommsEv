@@ -577,6 +577,32 @@ class Viewport(QWidget):
             if float(link.get("quality", 1.0)) <= 0.0:
                 continue
             state = link.get("state", "up")
+            # CARRIED vs SPARE. `active` is set by apply_routing: it is whether
+            # THIS ROUTING uses this pair, not whether the pair could hear each
+            # other. Drawing all six lines whatever routing was picked made a
+            # star look exactly like a mesh - the map was showing geometry, not
+            # the network, which is the same mistake command_authority() was
+            # making before it was fixed to walk only carried links.
+            #
+            # Spare links are drawn, faintly, rather than hidden. The gap
+            # between what a topology COULD use and what it DOES use is the
+            # whole star-vs-mesh finding: hiding the spares would hide the
+            # capacity a star is choosing not to spend. Full weight = the
+            # network is using it; hairline = it exists and is going unused.
+            carried = bool(link.get("active", True))
+            if not carried:
+                spare = QColor(C_DIM)
+                spare.setAlpha(70)
+                pen = QPen(spare, 0.8)
+                pen.setStyle(Qt.DotLine)
+                p.setPen(pen)
+                pa, pb = a.get("pose", {}), b.get("pose", {})
+                p.drawLine(
+                    self.to_screen(_num(pa.get("x")), _num(pa.get("y")),
+                                   _num(pa.get("z"))),
+                    self.to_screen(_num(pb.get("x")), _num(pb.get("y")),
+                                   _num(pb.get("z"))))
+                continue
             # A DOWN link is drawn ORANGE (not the network colour) so a broken
             # link is unmistakable at a glance; up/degraded stay the network
             # colour, solid vs dashed.
@@ -928,9 +954,19 @@ class Viewport(QWidget):
         nets = {l.get("network") for l in self.links} or {"blue"}
         base = network_colour(sorted(str(n) for n in nets)[0])
         y0 = 34
-        for label, style in (("up", Qt.SolidLine), ("degraded", Qt.DashLine),
-                             ("down", Qt.DashDotLine)):
-            pen = QPen(QColor(base), 1.6)
+        spare = QColor(C_DIM)
+        spare.setAlpha(70)
+        # Colour matters as much as style here: a DOWN link is drawn orange,
+        # not in the network colour, and a SPARE one is a grey hairline. A
+        # legend that showed all four in the network colour would be telling
+        # a different story from the map.
+        for label, style, col, w in (
+                ("up", Qt.SolidLine, QColor(base), 1.6),
+                ("degraded", Qt.DashLine, QColor(base), 1.6),
+                ("down", Qt.DashDotLine, QColor("#E08A3C"), 1.6),
+                ("spare - not carried by this routing",
+                 Qt.DotLine, spare, 0.8)):
+            pen = QPen(col, w)
             pen.setStyle(style)
             p.setPen(pen)
             p.drawLine(10, y0 - 3, 34, y0 - 3)
