@@ -1,0 +1,57 @@
+# =============================================================================
+# Deadband FLEET (RED) — red_comms
+# =============================================================================
+# One arm of the JAMMING AXIS. The experiment varies WHICH SPECTRUM is attacked
+# by choosing a different red fleet in the Setup tab - not by editing numbers -
+# so the axis is a first-class, named, version-controlled thing.
+#
+#   red_comms   the command band only  -> attacks AUTHORITY
+#   red_gnss    the GNSS band only     -> attacks POSITION KNOWLEDGE
+#   red_both    both at once           -> attacks both
+#   (none)      the control
+#
+# Separating them matters because they cause OPPOSITE behaviours and a single
+# combined emitter hides that: comms jamming stops a `hold` vehicle, and a
+# stopped vehicle does not dead-reckon, so comms jamming SUPPRESSES the drift
+# that GNSS jamming causes. Swept together, the two effects race and the result
+# is uninterpretable.
+#
+# Doctrinal basis for treating interference as a command problem rather than a
+# radio one: "harmful interference may result in a degradation or complete loss
+# of receptibility that, in turn, could severely hamper the ability to maintain
+# SA and to create effects in the engagement space" - AJP-3 Edition D Version 1,
+# para C.21.
+#
+# Power is set live from the RED cell terminal:  JAM jam1 power <dBm>
+# =============================================================================
+
+spec_version: 0.1
+name: red_comms
+kind: fleet
+
+description: >
+  One red emitter on the 2.4 GHz command band. Attacks command authority only: vehicles keep their GNSS fix and lose their orders.
+
+networks:
+  red:
+    system: adversary
+    authority: decentralized
+    routing: mesh
+    topology: decentralized
+    band: 2400
+
+agents:
+  - id: jam1
+    platform: jammer
+    network: red
+    colour: "#C4685A"
+    pose: {x: 0.0, y: 3.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      width:  {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      height: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+    jammer:
+      # 10 dBm is a visible-gradient default, not a claim. Set it live:
+      #   JAM jam1 power <dBm>
+      tx_power: {value: 10, unit: dBm, source: ""}   # <-- module datasheet
+      band:     {value: 2400, unit: MHz, source: "Blue's command band - see the fleet file"}

@@ -39,6 +39,49 @@ WALL_MARGIN_M = 0.6
 # --- GNSS / dead-reckoning drift model. See docs/jamming-effects-research.md
 # and docs/gnss-drift-model.md. Every figure here is a declared free parameter
 # with a source; none is invented.
+# LINK-LOSS DOCTRINE. What a vehicle does when it cannot reach whoever
+# commands it. This is a DOCTRINAL choice, not a physical one, so it is a
+# declared field on the agent rather than a rule baked into the simulator.
+#
+#   hold      Freeze until the link returns. The subordinate has no orders it
+#             is authorised to act on, so it stops. This is the conservative
+#             default and it is what most small-UAS/UGV autopilot failsafes
+#             actually do.
+#
+#   intent    Keep executing the objective already assigned, from the picture
+#             the vehicle already has, without further direction. This is
+#             MISSION COMMAND, and it is NATO's stated philosophy of command:
+#             "centralized planning that includes provision of clear guidance
+#             and intent combined with DECENTRALIZED EXECUTION based on
+#             mission-type orders and disciplined initiative; describing the
+#             'what', without necessarily prescribing the 'how'"
+#             (AJP-3 Edition D Version 1, para 3.8). The subordinate's
+#             authority to execute was delegated when the objective was
+#             issued, so losing the link costs INFORMATION, not AUTHORITY:
+#             "subordinates should decide and act within the scope of the
+#             commander's intent" (ibid., para 3.11).
+#
+#             Note what makes this measurable rather than a label: an intent
+#             vehicle steers from its OWN belief and from position reports
+#             that have gone stale (see update_knowledge). It keeps working,
+#             and it keeps getting more wrong. That trade is the finding.
+#
+#   continue  Accepted as a legacy alias for `intent`. It named the same
+#             mechanism before the doctrine had a source; the two are
+#             identical for a cyclic objective. They would diverge for a
+#             TERMINATING objective, where mission command requires the
+#             subordinate to seek new direction once the assigned effect is
+#             achieved rather than invent a next task - not yet modelled.
+#
+# See docs/jamming-model-justification.md and SOURCES.md.
+LINK_LOSS_KEEPS_GOING = {"intent", "continue"}
+
+
+def keeps_going_on_link_loss(agent):
+    """Does this agent's doctrine let it act without a reachable commander?"""
+    return (agent.get("on_link_loss") or "hold").lower() in LINK_LOSS_KEEPS_GOING
+
+
 GNSS_BAND_MHZ = 1575.42          # GPS L1 - the band a GNSS jammer occupies
 # Jammer power (received, dBm) above which an agent loses its GNSS fix. GNSS
 # signals arrive at about -128 dBm, so a jammer only tens of dB stronger denies
@@ -898,9 +941,10 @@ def step(agents, poses, t, dt, arena, unreachable=None,
                        agent that loses its coordinator has no orders, so it
                        stops. THIS is what makes jamming change behaviour, not
                        just a readout.
-      continue       - keep executing the last objective regardless (the old
-                       behaviour; a control condition, and what a decentralized
-                       agent effectively does since it never loses authority).
+      intent         - keep executing the assigned objective from the picture
+                       already held, without further direction. NATO mission
+                       command: centralized intent, decentralized execution
+                       (AJP-3 3.8, 3.11). `continue` is a legacy alias.
     A decentralized agent is never in `unreachable` (it decides for itself),
     so it keeps moving under jamming - the robustness story, made physical.
     """
@@ -928,10 +972,12 @@ def step(agents, poses, t, dt, arena, unreachable=None,
                            rng)
             continue
         # Command lost: apply the agent's link-loss doctrine. `hold` freezes;
-        # `continue` ignores the loss. This is the causal step that was
-        # missing - jamming that strips authority now stops the vehicle.
-        if a["id"] in unreachable \
-                and (a.get("on_link_loss") or "hold") != "continue":
+        # `intent` carries on executing the objective it already holds, on the
+        # picture it already has (AJP-3 3.8/3.11 - see LINK_LOSS_KEEPS_GOING).
+        # This is the causal step that was missing: jamming that strips
+        # authority now stops a `hold` vehicle, and only degrades an `intent`
+        # one.
+        if a["id"] in unreachable and not keeps_going_on_link_loss(a):
             p["speed"] = 0.0
             _update_belief(a, poses, 0.0, 0.0, dt, position_lost, drift_rates,
                            rng)
@@ -1981,9 +2027,17 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             "motion": a.get("motion"),
             # Is this agent holding because it lost its commander this tick?
             "link_loss_hold": (a["id"] in _unreachable
-                               and (a.get("on_link_loss") or "hold")
-                               != "continue"
+                               and not keeps_going_on_link_loss(a)
                                and a["mission"].get("type") != "static"),
+            # The doctrine itself, so a run's CSV records WHY a vehicle behaved
+            # as it did rather than leaving it to be inferred from the fleet.
+            "on_link_loss": (a.get("on_link_loss") or "hold"),
+            # Acting on delegated intent with no reachable commander - the
+            # mission-command condition. Distinct from link_loss_hold: this
+            # vehicle is still working, on information that is going stale.
+            "on_intent": (a["id"] in _unreachable
+                          and keeps_going_on_link_loss(a)
+                          and a["mission"].get("type") != "static"),
             # POSITION ESTIMATE vs truth. `believed` is where the agent thinks
             # it is; `position_error_m` is how wrong that is (0 with a fix,
             # growing under GNSS denial). `gnss_denied` flags the cause.

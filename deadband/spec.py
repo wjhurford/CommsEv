@@ -38,6 +38,10 @@ VALID_BOUNDARIES = {"solid", "open", "absorbing"}
 VALID_AUTHORITIES = {"centralized", "decentralized", "hierarchical"}
 VALID_ROUTINGS = {"star", "mesh", "tiered"}
 VALID_LEADER_LOSS = {"fallback", "strand"}
+# What a vehicle does with no reachable commander. `intent` is NATO mission
+# command - decentralized execution on delegated intent (AJP-3 3.8, 3.11);
+# `continue` is its legacy alias. See stub_telemetry.LINK_LOSS_KEEPS_GOING.
+VALID_LINK_LOSS = {"hold", "intent", "continue"}
 VALID_TOPOLOGIES = VALID_AUTHORITIES        # legacy alias
 
 

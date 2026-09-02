@@ -1,0 +1,101 @@
+# =============================================================================
+# Deadband FLEET (BLUE) — 3_roboracer_intent
+# =============================================================================
+# IDENTICAL to 3_roboracer_no_lidar in every respect but ONE WORD: every car
+# declares `on_link_loss: intent` instead of `on_link_loss: hold`. That is the
+# whole experiment.
+#
+#   hold    A car that cannot reach the ground station freezes. It has no
+#           orders it is authorised to act on. Conservative, and it is what
+#           most small-platform autopilot failsafes actually do.
+#
+#   intent  A car that cannot reach the ground station KEEPS EXECUTING the
+#           objective it was already given, from the picture it already has.
+#           NATO mission command: "centralized planning that includes
+#           provision of clear guidance and intent combined with decentralized
+#           execution based on mission-type orders and disciplined initiative;
+#           describing the 'what', without necessarily prescribing the 'how'"
+#           - AJP-3 Edition D Version 1, para 3.8. The authority to execute was
+#           delegated when the objective was issued, so losing the link costs
+#           INFORMATION, not AUTHORITY: "subordinates should decide and act
+#           within the scope of the commander's intent" (ibid., para 3.11).
+#
+# WHY THIS IS A REAL TEST AND NOT A RIGGED ONE. Acting on intent is not free.
+# Such a car steers from its own belief and from position reports that have
+# gone stale, so under GNSS jamming it keeps working and keeps getting more
+# wrong - while a `hold` car stops, and a stopped car does not dead-reckon.
+# Which doctrine wins should depend on WHICH SPECTRUM is attacked, and that is
+# exactly what red_comms / red_gnss / red_both vary.
+#
+# Pair with 3_roboracer_no_lidar as the control: same scene, same mission, same
+# jammer, same seed, one word different.
+# =============================================================================
+
+spec_version: 0.1
+name: 3_roboracer_intent
+kind: fleet
+
+description: >
+  3_roboracer_no_lidar with one word changed: the cars act on the commander's
+  intent when the link drops instead of freezing. The mission-command arm of
+  the doctrine experiment; pair with 3_roboracer_no_lidar as the control.
+
+networks:
+  blue:
+    system: friendly
+    authority: centralized
+    routing: star
+    coordinator: gcs
+    topology: centralized
+    band: 2400
+
+agents:
+  - id: gcs
+    platform: ground_station
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
+    dimensions:
+      length: {value: 0.40, unit: m, source: "Nominal - measure the bench"}
+      width:  {value: 0.40, unit: m, source: "Nominal - measure the bench"}
+      height: {value: 1.00, unit: m, source: "Nominal - measure the bench"}
+    ghost: true
+  - id: car1
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: intent
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car2
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #2, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #2, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #2, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: intent
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car3
+    platform: roboracer
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #3, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #3, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #3, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: intent
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
