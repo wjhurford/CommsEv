@@ -1119,6 +1119,17 @@ def discover_series(frame):
             # The useful scalar from a scan is the nearest return: it is the
             # collision-risk number and it plots meaningfully over time.
             out.append(f"agents.{aid}.scan.min_range")
+        # THE EXPERIMENT METRICS. Pose alone cannot answer "did jamming stop
+        # this fleet doing its job, and did it know where it was" - which is
+        # the whole question. Exported as 0/1 where the source is a flag, so
+        # a column means the same thing whether you average it or plot it.
+        if a.get("platform") != "ground_station" and not a.get("jammer"):
+            out += [f"agents.{aid}.commanded",        # decider reachable
+                    f"agents.{aid}.held",             # frozen by doctrine
+                    f"agents.{aid}.on_intent",        # acting on delegated intent
+                    f"agents.{aid}.gnss_denied",
+                    f"agents.{aid}.position_error_m",  # belief vs truth
+                    f"agents.{aid}.noise_floor_dbm"]
     for l in frame.get("links", []):
         tag = f"{l.get('a')}-{l.get('b')}"
         for k, v in l.items():
@@ -1133,7 +1144,9 @@ def discover_series(frame):
 # Link reliability and vehicle speed/turn-rate ARE those measurements. Anything
 # outside this set is available in Custom, but it is not what the study is for.
 KEY_METRICS = [
-    ("Link reliability", ["pdr", "latency_ms", "quality"]),
+    ("Link reliability", ["pdr", "latency_ms", "quality", "sinr_db"]),
+    ("Command", ["commanded", "held", "on_intent"]),
+    ("Position knowledge", ["gnss_denied", "position_error_m"]),
     ("Vehicle response", ["pose.speed", "yaw_rate"]),
     ("Safety", ["scan.min_range"]),
 ]
@@ -1165,9 +1178,33 @@ def series_value(frames, i, path):
         except (KeyError, StopIteration, TypeError):
             return None
 
+    # The experiment metrics. Flags become 0/1 so a column is numeric all the
+    # way down and means the same thing averaged or plotted.
+    _FLAGS = {"commanded": ("authority", "reachable"),
+              "held": ("link_loss_hold",), "on_intent": ("on_intent",),
+              "gnss_denied": ("gnss_denied",)}
+    if parts[0] == "agents" and len(parts) == 3 and parts[2] in _FLAGS:
+        try:
+            agent = next(a for a in frame["agents"] if a.get("id") == parts[1])
+            node = agent
+            for k in _FLAGS[parts[2]]:
+                node = node[k]
+            return 1 if node else 0
+        except (KeyError, StopIteration, TypeError):
+            return None
+    if parts[0] == "agents" and len(parts) == 3 and parts[2] == "noise_floor_dbm":
+        try:
+            agent = next(a for a in frame["agents"] if a.get("id") == parts[1])
+            return agent["rf"]["noise_floor_dbm"]
+        except (KeyError, StopIteration, TypeError):
+            return None
+
     try:
         if parts[0] == "agents":
             agent = next(a for a in frame["agents"] if a.get("id") == parts[1])
+            if len(parts) == 3:
+                v = agent.get(parts[2])
+                return v if isinstance(v, (int, float)) else None
             if parts[2] == "scan":
                 hits = [r for r in agent["scan"]["ranges"] if r is not None]
                 return min(hits) if hits else None
@@ -3495,6 +3532,30 @@ class Console(QMainWindow):
                 for i, f in enumerate(self.frames):
                     w.writerow([f.get("sim_time_s")] +
                                [series_value(self.frames, i, c) for c in cols])
+            # A results file without the configuration that produced it is an
+            # orphan. The sidecar says what was composed, what doctrine the
+            # blue fleet declared and what every jammer was emitting - so a
+            # CSV can be read months later, or by somebody else.
+            import json as _json
+            meta = {
+                "run": Path(path).stem,
+                "scene": getattr(self, "_setup_scene", None),
+                "blue_fleet": getattr(self, "_setup_fleet", None),
+                "red_fleet": getattr(self, "_setup_red", None),
+                "mission": (self.frames[-1] or {}).get("mission"),
+                "frames": len(self.frames),
+                "sim_time_s": (self.frames[-1] or {}).get("sim_time_s"),
+                "agents": [
+                    {"id": a.get("id"), "network": a.get("network"),
+                     "platform": a.get("platform"),
+                     "on_link_loss": a.get("on_link_loss"),
+                     "jammer": a.get("jammer")}
+                    for a in (self.frames[-1] or {}).get("agents", [])],
+                "networks": ((self.frames[-1] or {}).get("arena")
+                             or {}).get("networks"),
+            }
+            Path(path).with_suffix(".meta.json").write_text(
+                _json.dumps(meta, indent=2), encoding="utf-8")
         except OSError as exc:
             self.say(f"ERROR  export failed: {exc}")
             return
