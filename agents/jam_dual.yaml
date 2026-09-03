@@ -1,0 +1,49 @@
+# =============================================================================
+# Deadband AGENT — jam_dual
+# =============================================================================
+# An AGENT FILE IS HARDWARE. It describes a thing you could buy, bolt together
+# and put on a bench: its size, what it can do, and what sensors and radios are
+# fitted. Nothing here is a decision.
+#
+# What is deliberately NOT in this file, and never will be:
+#
+#   network / authority / routing   who it answers to and how packets travel -
+#                                   chosen in the Console's Setup tab
+#   on_link_loss                    what it does when cut off - chosen per
+#                                   agent in the spawn dialog
+#   pose                            where it starts - chosen when you spawn it
+#   objective                       what it is told to do - issued as a mission
+#
+# That line is the whole point. Freezing a decision into a hardware file is how
+# seven fleet files came to describe three vehicles. Build fleets in the
+# Console from these; save the ones worth keeping.
+# =============================================================================
+
+spec_version: 0.1
+name: jam_dual
+kind: agent
+
+description: >
+  Two co-located emitters, so one vehicle can attack the command band and
+  GNSS at once, at full power on each, rather than splitting one radio.
+
+platform: jammer
+colour: "#C4685A"
+
+dimensions:
+  length: {value: 0.3, unit: m, source: "Nominal - not measured"}
+  width: {value: 0.3, unit: m, source: "Nominal - not measured"}
+  height: {value: 0.3, unit: m, source: "Nominal - not measured"}
+
+# EMITTERS. How many radios this vehicle carries is HARDWARE.
+# Which band each one sits on, and at what power, is set live
+# from the red cell:  JAM <id> power <dBm> | band <MHz>
+emitters:
+  # Command band by default
+  - id: a
+    tx_power: {value: 10, unit: dBm, source: ""}   # <-- module datasheet
+    band:     {value: 2400, unit: MHz, source: "Default only - retune live"}
+  # GPS L1 by default
+  - id: b
+    tx_power: {value: 10, unit: dBm, source: ""}   # <-- module datasheet
+    band:     {value: 1575.42, unit: MHz, source: "Default only - retune live"}

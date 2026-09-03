@@ -26,9 +26,6 @@ description: >
 networks:
   red:
     system: adversary
-    authority: decentralized
-    routing: mesh
-    topology: decentralized
     band: 2400              # same band as blue - that is the whole point
 
 agents:

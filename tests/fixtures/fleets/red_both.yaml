@@ -1,5 +1,5 @@
 # =============================================================================
-# Deadband FLEET (RED) — red_comms
+# Deadband FLEET (RED) — red_both
 # =============================================================================
 # One arm of the JAMMING AXIS. The experiment varies WHICH SPECTRUM is attacked
 # by choosing a different red fleet in the Setup tab - not by editing numbers -
@@ -26,18 +26,15 @@
 # =============================================================================
 
 spec_version: 0.1
-name: red_comms
+name: red_both
 kind: fleet
 
 description: >
-  One red emitter on the 2.4 GHz command band. Attacks command authority only: vehicles keep their GNSS fix and lose their orders.
+  Two co-located red emitters, one on the command band and one on GPS L1. Attacks authority and position knowledge at once.
 
 networks:
   red:
     system: adversary
-    authority: decentralized
-    routing: mesh
-    topology: decentralized
     band: 2400
 
 agents:
@@ -45,7 +42,7 @@ agents:
     platform: jammer
     network: red
     colour: "#C4685A"
-    pose: {x: 0.0, y: 3.0, z: 0.0, yaw: 0.0}
+    pose: {x: -0.4, y: 3.0, z: 0.0, yaw: 0.0}
     dimensions:
       length: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
       width:  {value: 0.30, unit: m, source: "Nominal emitter footprint"}
@@ -55,3 +52,17 @@ agents:
       #   JAM jam1 power <dBm>
       tx_power: {value: 10, unit: dBm, source: ""}   # <-- module datasheet
       band:     {value: 2400, unit: MHz, source: "Blue's command band - see the fleet file"}
+  - id: jam2
+    platform: jammer
+    network: red
+    colour: "#B8862B"
+    pose: {x: 0.4, y: 3.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      width:  {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      height: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+    jammer:
+      # 10 dBm is a visible-gradient default, not a claim. Set it live:
+      #   JAM jam2 power <dBm>
+      tx_power: {value: 10, unit: dBm, source: ""}   # <-- module datasheet
+      band:     {value: 1575.42, unit: MHz, source: "GPS L1 centre frequency, 1575.42 MHz"}

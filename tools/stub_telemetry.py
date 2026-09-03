@@ -225,8 +225,17 @@ def _base_path(kind, ref):
     if p.parent != Path("."):
         return REPO_ROOT / p
     if kind == "fleet":
-        cand = REPO_ROOT / "fleets" / p
-        return cand if cand.exists() else (REPO_ROOT / p)
+        # fleets/ is USER OUTPUT: it holds only fleets somebody built and saved
+        # in the Console. The test suite needs fixed inputs, and putting those
+        # in fleets/ would make them appear in the operator's dropdown as
+        # fleets they did not make - which is exactly the junk-file problem
+        # this layout exists to remove. So fixtures live apart and are found
+        # here as a fallback.
+        for folder in ("fleets", "tests/fixtures/fleets"):
+            cand = REPO_ROOT / folder / p
+            if cand.exists():
+                return cand
+        return REPO_ROOT / p
     # kind == "scene"
     cand = REPO_ROOT / "scenes" / p
     return cand if cand.exists() else (REPO_ROOT / "maps" / p)

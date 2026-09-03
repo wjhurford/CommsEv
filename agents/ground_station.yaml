@@ -1,0 +1,46 @@
+# =============================================================================
+# Deadband AGENT — ground_station
+# =============================================================================
+# An AGENT FILE IS HARDWARE. It describes a thing you could buy, bolt together
+# and put on a bench: its size, what it can do, and what sensors and radios are
+# fitted. Nothing here is a decision.
+#
+# What is deliberately NOT in this file, and never will be:
+#
+#   network / authority / routing   who it answers to and how packets travel -
+#                                   chosen in the Console's Setup tab
+#   on_link_loss                    what it does when cut off - chosen per
+#                                   agent in the spawn dialog
+#   pose                            where it starts - chosen when you spawn it
+#   objective                       what it is told to do - issued as a mission
+#
+# That line is the whole point. Freezing a decision into a hardware file is how
+# seven fleet files came to describe three vehicles. Build fleets in the
+# Console from these; save the ones worth keeping.
+# =============================================================================
+
+spec_version: 0.1
+name: ground_station
+kind: agent
+
+description: >
+  A bench with a radio. It does not move and nothing collides with it.
+  Whether it COMMANDS anything is an authority decision made in Setup,
+  not a property of the bench.
+
+platform: ground_station
+colour: "#2E6FB0"
+
+dimensions:
+  length: {value: 0.4, unit: m, source: "Nominal - measure the bench"}
+  width: {value: 0.4, unit: m, source: "Nominal - measure the bench"}
+  height: {value: 1.0, unit: m, source: "Nominal - measure the bench"}
+
+performance:
+  max_speed:       {value: 0.0, unit: m/s, source: "Nominal - measure the bench"}
+  max_accel:       {value: 1.0, unit: m/s^2, source: "Nominal - measure the bench"}
+  min_turn_radius: {value: 1.0, unit: m, source: "Nominal - measure the bench"}
+
+# Furniture: drawn, and it scatters lidar, but nothing
+# collides with it.
+ghost: true

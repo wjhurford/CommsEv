@@ -18,6 +18,7 @@ why this whole file fits in one sitting.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import sys
@@ -293,6 +294,10 @@ class Viewport(QWidget):
         self.selected = set()   # highlighted agent ids
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
         self.show_axes = False
+        # The key is collapsed by default: once you know it, it is clutter
+        # sitting on top of the arena. Click "key" in the corner to open it.
+        self.show_key = False
+        self._key_hit = None      # QRectF of the clickable header
         self.zoom = 1.0
         self.pan = QPointF(0, 0)
         self._drag = None
@@ -343,6 +348,14 @@ class Viewport(QWidget):
     on_pick = None
 
     def mousePressEvent(self, ev):
+        # The key header is a control, not scenery: a click there toggles it
+        # and does NOT start a pan or fall through to agent selection.
+        if self._key_hit is not None and self._key_hit.contains(ev.position()):
+            self.show_key = not self.show_key
+            self._drag = None
+            self._press_at = None
+            self.update()
+            return
         self._drag = ev.position()
         self._press_at = ev.position()
 
@@ -999,58 +1012,111 @@ class Viewport(QWidget):
         p.setFont(QFont("Consolas", 9))
         p.drawText(10, 18, f"{self.mode}   1 m grid   zoom {self.zoom:.2f}x")
 
-        # Legend. Style is state; colour is whichever network the link is on.
+        # THE KEY. Collapsed by default - it is a reference, not a readout, and
+        # once you know it, it sits on top of the arena. The header is a hit
+        # target handled in mousePressEvent.
         nets = {l.get("network") for l in self.links} or {"blue"}
         base = network_colour(sorted(str(n) for n in nets)[0])
-        y0 = 34
+        head = ("\u25be  key" if self.show_key else "\u25b8  key")
+        p.setPen(QPen(QColor(C_ACCENT)))
+        p.setFont(QFont("Consolas", 9))
+        p.drawText(10, 36, head)
+        self._key_hit = QRectF(6, 24, 64, 16)
+        if not self.show_key:
+            s_ = self.scale()
+            if s_ > 2:
+                p.setPen(QPen(QColor(C_DIM)))
+                p.drawLine(10, self.height() - 16, 10 + int(s_), self.height() - 16)
+                p.drawText(14 + int(s_), self.height() - 12, "1 m")
+            return
+
+        # A panel behind it, so the key never has to compete with the arena
+        # grid for legibility. Sized to its content rather than guessed.
+        rows_link = (("up", Qt.SolidLine, QColor(base), 1.6),
+                     ("degraded", Qt.DashLine, QColor(base), 1.6),
+                     ("down", Qt.DashDotLine, QColor("#E08A3C"), 1.6))
         spare = QColor(C_DIM)
-        spare.setAlpha(70)
-        # Colour matters as much as style here: a DOWN link is drawn orange,
-        # not in the network colour, and a SPARE one is a grey hairline. A
-        # legend that showed all four in the network colour would be telling
-        # a different story from the map.
-        for label, style, col, w in (
-                ("up", Qt.SolidLine, QColor(base), 1.6),
-                ("degraded", Qt.DashLine, QColor(base), 1.6),
-                ("down", Qt.DashDotLine, QColor("#E08A3C"), 1.6),
-                ("spare - not carried by this routing",
-                 Qt.DotLine, spare, 0.8)):
-            pen = QPen(col, w)
-            pen.setStyle(style)
-            p.setPen(pen)
-            p.drawLine(10, y0 - 3, 34, y0 - 3)
-            p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(40, y0, label)
-            y0 += 13
-        p.setPen(QPen(QColor(C_DIM)))
-        p.drawText(10, y0, "no line = out of range")
-        y0 += 17
-        # AGENT FILL. The second channel: links say what the network is doing,
-        # fill says whether any of it is reaching this particular vehicle.
-        for label, fill, solid in (
-                ("commanded", QColor(base), True),
-                ("cut off - no reachable commander", QColor("#E08A3C"), True),
-                ("hollow = where it BELIEVES it is", QColor(base), False)):
-            p.setBrush(QBrush(fill) if solid else Qt.NoBrush)
-            p.setPen(QPen(QColor(base).lighter(150) if solid
-                          else QColor(base).lighter(130), 1))
-            p.drawRect(QRectF(10, y0 - 9, 22, 9))
+        spare.setAlpha(90)
+        LH, x_sw, x_tx = 15, 12, 46
+        y = 52
+        top = y - 14
+        height = 14 + LH * 11 + 10
+        panel = QColor(20, 24, 27)
+        panel.setAlpha(215)
+        p.setBrush(QBrush(panel))
+        p.setPen(QPen(QColor(C_DIM).darker(140), 1))
+        p.drawRect(QRectF(6, top, 250, height))
+        p.setBrush(Qt.NoBrush)
+
+        def section(title):
+            nonlocal y
+            p.setPen(QPen(QColor(C_DIM).darker(115)))
+            p.setFont(QFont("Consolas", 7))
+            p.drawText(x_sw, y, title)
+            y += LH - 2
+
+        def row(label, draw):
+            nonlocal y
+            draw(y - 4)
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(40, y0, label)
-            y0 += 13
-        # The two labels a cut-off vehicle can carry. Which one appears is the
-        # doctrine it is following, and it is the experiment's whole variable.
+            p.setFont(QFont("Consolas", 8))
+            p.drawText(x_tx, y, label)
+            y += LH
+
+        section("LINKS")
+        for label, style, col, w in rows_link:
+            def d(yy, style=style, col=col, w=w):
+                pen = QPen(col, w)
+                pen.setStyle(style)
+                p.setPen(pen)
+                p.drawLine(x_sw, yy, x_sw + 26, yy)
+            row(label, d)
+
+        def d_spare(yy):
+            pen = QPen(spare, 0.9)
+            pen.setStyle(Qt.DotLine)
+            p.setPen(pen)
+            p.drawLine(x_sw, yy, x_sw + 26, yy)
+        row("spare (routing does not carry it)", d_spare)
+        row("no line = out of range", lambda yy: None)
+
+        # VEHICLES. Two independent channels, and every combination of them is
+        # a real condition, so all four swatches are drawn rather than leaving
+        # the reader to infer that hollow-orange exists.
+        section("VEHICLES   fill = command   hollow = its own estimate")
+
+        def swatch(fill, solid):
+            def d(yy):
+                p.setBrush(QBrush(fill) if solid else Qt.NoBrush)
+                p.setPen(QPen(QColor(base).lighter(150) if solid
+                              else QColor(fill).lighter(130), 1))
+                p.drawRect(QRectF(x_sw, yy - 5, 24, 10))
+            return d
+
+        blue_f, orange_f = QColor(base), QColor("#E08A3C")
+        row("commanded", swatch(blue_f, True))
+        row("commanded, but lost (GNSS)", swatch(blue_f, False))
+        row("cut off - no reachable commander", swatch(orange_f, True))
+        row("cut off AND lost", swatch(orange_f, False))
+
+        section("DOCTRINE, once cut off")
         p.setPen(QPen(QColor("#E08A3C")))
         p.setFont(QFont("Consolas", 8))
-        p.drawText(10, y0, "\u2298 held   \u2192 intent")
+        p.drawText(x_sw, y, "\u2298 held")
         p.setPen(QPen(QColor(C_DIM)))
-        p.drawText(88, y0, "= doctrine, once cut off")
-        y0 += 13
-        s = self.scale()
-        if s > 2:
-            p.drawLine(10, self.height() - 16, 10 + int(s), self.height() - 16)
-            p.drawText(14 + int(s), self.height() - 12, "1 m")
+        p.drawText(x_tx + 30, y, "frozen until the link returns")
+        y += LH
+        p.setPen(QPen(QColor("#E08A3C")))
+        p.drawText(x_sw, y, "\u2192 intent")
+        p.setPen(QPen(QColor(C_DIM)))
+        p.drawText(x_tx + 30, y, "still executing its last order")
+
+        s_ = self.scale()
+        if s_ > 2:
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawLine(10, self.height() - 16, 10 + int(s_), self.height() - 16)
+            p.drawText(14 + int(s_), self.height() - 12, "1 m")
 
 
 # ---------------------------------------------------------------------------
@@ -1841,27 +1907,33 @@ class ShellPanel(QWidget):
 # The "build one now" entry that appears at the bottom of each fleet picker.
 CUSTOM_FLEET_ENTRY = "+ Build custom fleet..."
 
-PLATFORM_DEFAULTS = {
-    "roboracer": {
-        "dims": (0.55, 0.30, 0.20), "speed": 1.5, "accel": 2.0,
-        "turn_radius": 0.6, "colour": "#2E6FB0",
-        "sensors": [("lidar", "ust10lx"), ("imu", "generic_imu")]},
-    "roboracer_no_lidar": {
-        "dims": (0.55, 0.30, 0.20), "speed": 1.5, "accel": 2.0,
-        "turn_radius": 0.6, "colour": "#2E6FB0",
-        "sensors": [("imu", "generic_imu")]},
-    "quadcopter": {
-        "dims": (0.40, 0.40, 0.15), "speed": 8.0, "accel": 4.0,
-        "turn_radius": 0.1, "colour": "#4FA3D1",
-        "sensors": [("imu", "generic_imu")]},
-    "ground_station": {
-        "dims": (0.40, 0.40, 1.00), "speed": 0.0, "accel": 1.0,
-        "turn_radius": 1.0, "colour": "#2E6FB0", "sensors": [], "ghost": True},
-    "jammer": {
-        "dims": (0.30, 0.30, 0.30), "speed": 0.0, "accel": 1.0,
-        "turn_radius": 1.0, "colour": "#C4685A", "sensors": [],
-        "jammer": True},
-}
+def _load_agent_types():
+    """Read agents/*.yaml - the HARDWARE catalogue the fleet builder offers.
+
+    An agent file is a thing you could buy: size, performance, sensors,
+    emitters. It carries no network, no authority, no doctrine and no pose,
+    because those are DECISIONS and decisions are made in the Console. Adding
+    a type is dropping a file in agents/ - no code change, and later an
+    agent-creation console writes here.
+    """
+    out = {}
+    folder = REPO_ROOT / "agents"
+    if not folder.exists():
+        return out
+    for f in sorted(folder.glob("*.yaml")):
+        try:
+            import yaml as _y
+            with open(f, encoding="utf-8") as fh:
+                doc = _y.safe_load(fh) or {}
+        except Exception:
+            continue
+        if doc.get("kind") != "agent":
+            continue
+        out[doc.get("name") or f.stem] = doc
+    return out
+
+
+PLATFORM_DEFAULTS = _load_agent_types()
 
 
 class CustomFleetDialog(QDialog):
@@ -1887,7 +1959,7 @@ class CustomFleetDialog(QDialog):
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["id", "platform", "x", "y", "z", "yaw"])
+            ["id", "agent type", "x", "y", "z", "yaw"])
         self.table.verticalHeader().setVisible(False)
         lay.addWidget(self.table, 1)
 
@@ -1913,17 +1985,20 @@ class CustomFleetDialog(QDialog):
 
         # Seed with something sensible for the side.
         if side == "red":
-            self.add_row(("jam1", "jammer", 0.0, 0.0, 0.0, 0.0))
+            self.add_row(("jam1", "jam_single", 0.0, 3.0, 0.0, 0.0))
         else:
             self.add_row(("gcs", "ground_station", 0.0, -3.4, 0.0, 0.0))
             self.add_row(("car1", "roboracer", -3.0, 2.0, 0.0, 0.0))
+            self.add_row(("car2", "roboracer", -3.0, 0.0, 0.0, 0.0))
+            self.add_row(("car3", "roboracer", -3.0, -2.0, 0.0, 0.0))
 
     def add_row(self, preset=None):
         r = self.table.rowCount()
         self.table.insertRow(r)
         n = r + 1
         vals = preset if isinstance(preset, tuple) else (
-            f"agent{n}", "roboracer", 0.0, 0.0, 0.0, 0.0)
+            f"agent{n}", next(iter(PLATFORM_DEFAULTS), "roboracer"),
+            0.0, 0.0, 0.0, 0.0)
         self.table.setItem(r, 0, QTableWidgetItem(str(vals[0])))
         combo = QComboBox()
         combo.addItems(list(PLATFORM_DEFAULTS))
@@ -1939,7 +2014,19 @@ class CustomFleetDialog(QDialog):
             self.table.removeRow(r)
 
     def fleet_doc(self):
-        """The fleet YAML this dialog describes."""
+        """The fleet YAML this dialog describes.
+
+        A fleet is a COMPOSITION: which agents, with which ids, on which
+        side. It deliberately declares NO authority, NO routing and NO
+        doctrine - those are picked in the Setup tab and in the spawn dialog,
+        and baking them in here is what produced seven fleet files describing
+        three vehicles.
+
+        The only network property written is the band, because which radio is
+        fitted is hardware, and `coordinator`, because naming the ground
+        station is structural rather than a policy: WHETHER anyone obeys it is
+        the authority setting.
+        """
         agents = []
         for r in range(self.table.rowCount()):
             def num(c):
@@ -1949,62 +2036,47 @@ class CustomFleetDialog(QDialog):
                     return 0.0
             aid = (self.table.item(r, 0).text() or f"agent{r+1}").strip()
             w = self.table.cellWidget(r, 1)
-            plat = w.currentText() if w else "roboracer"
-            d = PLATFORM_DEFAULTS.get(plat, PLATFORM_DEFAULTS["roboracer"])
-            L, W, H = d["dims"]
-            src = "Console custom fleet - nominal, NOT measured"
+            tname = w.currentText() if w else next(iter(PLATFORM_DEFAULTS), "")
+            spec_doc = PLATFORM_DEFAULTS.get(tname) or {}
             a = {"id": aid,
-                 "platform": ("roboracer" if plat == "roboracer_no_lidar"
-                              else plat),
+                 "platform": spec_doc.get("platform", "roboracer"),
+                 # Which agent FILE this came from, kept so a saved fleet says
+                 # what hardware it is made of rather than only what shape.
+                 "agent_type": tname,
                  "network": self.side,
-                 "colour": d["colour"],
+                 "colour": spec_doc.get("colour", "#2E6FB0"),
                  "pose": {"x": num(2), "y": num(3), "z": num(4),
-                          "yaw": num(5)},
-                 "dimensions": {
-                     "length": {"value": L, "unit": "m", "source": src},
-                     "width": {"value": W, "unit": "m", "source": src},
-                     "height": {"value": H, "unit": "m", "source": src}},
-                 "performance": {
-                     "max_speed": {"value": d["speed"], "unit": "m/s",
-                                   "source": src},
-                     "max_accel": {"value": d["accel"], "unit": "m/s^2",
-                                   "source": src},
-                     "min_turn_radius": {"value": d["turn_radius"],
-                                         "unit": "m", "source": src}}}
-            if d.get("ghost"):
-                a["ghost"] = True
-            if d.get("sensors"):
-                a["sensors"] = [
-                    {"id": sid, "type": stype,
-                     "mount": {"offset": {"x": 0.1, "y": 0.0, "z": 0.15}}}
-                    for sid, stype in d["sensors"]]
-            if d.get("jammer"):
-                a["jammer"] = {
-                    "tx_power": {"value": 10, "unit": "dBm", "source": ""},
-                    "band": {"value": 2400, "unit": "MHz",
-                             "source": "Console custom fleet"}}
+                          "yaw": num(5)}}
+            for key in ("dimensions", "performance", "sensors", "ghost"):
+                if spec_doc.get(key) is not None:
+                    a[key] = copy.deepcopy(spec_doc[key])
+            # EMITTERS. The agent file says how many radios are fitted and
+            # what each defaults to; power and band are retuned live from the
+            # red cell. One emitter collapses to the single `jammer:` block
+            # the model already understands.
+            em = spec_doc.get("emitters") or []
+            if len(em) == 1:
+                a["jammer"] = {"tx_power": copy.deepcopy(em[0]["tx_power"]),
+                               "band": copy.deepcopy(em[0]["band"])}
+            elif len(em) > 1:
+                a["jammer"] = {"tx_power": copy.deepcopy(em[0]["tx_power"]),
+                               "band": copy.deepcopy(em[0]["band"])}
+                a["emitters"] = copy.deepcopy(em)
             agents.append(a)
         net = {"system": "adversary" if self.side == "red" else "friendly",
-               "authority": ("decentralized" if self.side == "red"
-                             else "centralized"),
-               "routing": "mesh" if self.side == "red" else "star",
-               "topology": ("decentralized" if self.side == "red"
-                            else "centralized"),
                "band": 2400}
-        if self.side != "red":
-            gcs = next((a["id"] for a in agents
-                        if a["platform"] == "ground_station"), None)
-            if gcs:
-                net["coordinator"] = gcs
-            else:
-                net["authority"] = net["topology"] = "decentralized"
-                net["routing"] = "mesh"
+        gcs = next((a["id"] for a in agents
+                    if a["platform"] == "ground_station"), None)
+        if gcs and self.side != "red":
+            net["coordinator"] = gcs
         name = (self.name.text() or f"custom_{self.side}").strip()
-        return name, {"spec_version": 0.1, "name": name, "kind": "fleet",
-                      "description": "Built in the Console's custom fleet "
-                                     "builder. Values are nominal, not "
-                                     "measured.",
-                      "networks": {self.side: net}, "agents": agents}
+        return name, {
+            "spec_version": 0.1, "name": name, "kind": "fleet",
+            "description": "Composed in the Console from agents/. Declares no "
+                           "authority, routing or doctrine - those are picked "
+                           "in Setup.",
+            "networks": {self.side: net}, "agents": agents}
+
 
 
 # ---------------------------------------------------------------------------
@@ -2361,8 +2433,8 @@ class Console(QMainWindow):
         # from the results is worse than no setting.
         slay.addWidget(QLabel("Command authority (who decides)"))
         self.auth_combo = QComboBox()
-        self.auth_combo.addItems(["(from fleet)", "centralized",
-                                  "decentralized", "hierarchical"])
+        self.auth_combo.addItems(["centralized", "decentralized",
+                                  "hierarchical"])
         self.auth_combo.setToolTip(
             "centralized    one coordinator decides for everyone. Lose the\n"
             "               link to it and you have no orders.\n"
@@ -2375,7 +2447,7 @@ class Console(QMainWindow):
         slay.addWidget(self.auth_combo)
         slay.addWidget(QLabel("Routing (how packets travel)"))
         self.route_combo = QComboBox()
-        self.route_combo.addItems(["(from fleet)", "star", "mesh", "tiered"])
+        self.route_combo.addItems(["star", "mesh", "tiered"])
         self.route_combo.setToolTip(
             "star    every agent to the hub, no peer links.\n"
             "mesh    everything to everything. Authority can relay.\n"
@@ -2776,8 +2848,6 @@ class Console(QMainWindow):
         auth = self.auth_combo.currentText()
         route = self.route_combo.currentText()
         note = []
-        if auth != "(from fleet)" or route != "(from fleet)":
-            note.append("OVERRIDE - recorded in the run and its CSV sidecar.")
         # A hierarchy over a star is not a hierarchy. Star carries no peer
         # links, so every squad member reaches its leader VIA the coordinator,
         # and its fallback goes to the same coordinator - which is identical
@@ -2797,12 +2867,15 @@ class Console(QMainWindow):
         over = {}
         auth = getattr(self, "auth_combo", None)
         route = getattr(self, "route_combo", None)
-        if auth is not None and auth.currentText() != "(from fleet)":
+        # ALWAYS written, never "whatever the file said". A fleet declares no
+        # command policy at all now, so if these were not written the model
+        # would fall back to an invisible default - and an invisible default
+        # is the thing that made the routing axis silently do nothing for a
+        # whole sweep. What the dropdown shows is what runs.
+        if auth is not None:
             # `topology` is the legacy alias command_authority() falls back on.
-            # Leaving a stale value there would silently override the axis
-            # under test, so it is kept in step rather than left to rot.
             over["authority"] = over["topology"] = auth.currentText()
-        if route is not None and route.currentText() != "(from fleet)":
+        if route is not None:
             over["routing"] = route.currentText()
         if over.get("authority") == "hierarchical" or \
                 over.get("routing") == "tiered":

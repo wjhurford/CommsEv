@@ -43,6 +43,11 @@ from unittest import mock
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
+# Fleets the suite composes from. These are FIXTURES, not shipped
+# fleets: the repo's fleets/ folder holds only what an operator built
+# and saved in the Console, and a test fixture sitting there would
+# show up in their dropdown as a fleet they did not make.
+FIXTURE_FLEETS = REPO / "tests" / "fixtures" / "fleets"
 sys.path.insert(0, str(REPO / "tools"))
 sys.path.insert(0, str(REPO))
 
@@ -220,8 +225,25 @@ def test_blast_radius():
 # Scenes and missions must all load
 # --------------------------------------------------------------------------
 def test_files_load():
-    print("\nEVERY SCENE AND MISSION LOADS")
-    for folder in ("scenes", "fleets", "missions"):
+    print("\nEVERY SCENE, AGENT, FLEET AND MISSION LOADS")
+    # agents/ is HARDWARE and is checked for the opposite property to the
+    # others: an agent file must carry NO command decision. A network,
+    # authority, routing or doctrine in an agent file is the junk-file bug
+    # coming back, so the suite fails on it rather than tolerating it.
+    for f in sorted((REPO / "agents").glob("*.yaml")):
+        try:
+            doc = st._load_yaml(str(f))
+            banned = [k for k in ("networks", "network", "authority",
+                                  "routing", "topology", "on_link_loss",
+                                  "pose", "objectives", "mission")
+                      if k in doc]
+            ok = (isinstance(doc, dict) and doc.get("kind") == "agent"
+                  and doc.get("platform") and not banned)
+            check(f"agents/{f.name} is hardware only", ok,
+                  f"carries decisions: {banned}" if banned else "malformed")
+        except Exception as exc:
+            check(f"agents/{f.name}", False, repr(exc))
+    for folder in ("scenes", "tests/fixtures/fleets", "missions"):
         for f in sorted((REPO / folder).glob("*.yaml")):
             try:
                 doc = st.resolve_mission(str(f))
@@ -261,7 +283,7 @@ def test_three_layer_chain():
     check("scene has NO networks", not scene.get("networks"))
 
     # A fleet is the agents and their wiring, no world, no tasking.
-    fleet = st.resolve_mission(str(REPO / "fleets" / "3_roboracer.yaml"))
+    fleet = st.resolve_mission(str(FIXTURE_FLEETS / "3_roboracer.yaml"))
     check("fleet defines the lab agents",
           {a.get("id") for a in fleet.get("agents") or []}
           == {"gcs", "car1", "car2", "car3"})

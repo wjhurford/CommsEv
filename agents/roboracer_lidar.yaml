@@ -1,0 +1,48 @@
+# =============================================================================
+# Deadband AGENT — roboracer_lidar
+# =============================================================================
+# An AGENT FILE IS HARDWARE. It describes a thing you could buy, bolt together
+# and put on a bench: its size, what it can do, and what sensors and radios are
+# fitted. Nothing here is a decision.
+#
+# What is deliberately NOT in this file, and never will be:
+#
+#   network / authority / routing   who it answers to and how packets travel -
+#                                   chosen in the Console's Setup tab
+#   on_link_loss                    what it does when cut off - chosen per
+#                                   agent in the spawn dialog
+#   pose                            where it starts - chosen when you spawn it
+#   objective                       what it is told to do - issued as a mission
+#
+# That line is the whole point. Freezing a decision into a hardware file is how
+# seven fleet files came to describe three vehicles. Build fleets in the
+# Console from these; save the ones worth keeping.
+# =============================================================================
+
+spec_version: 0.1
+name: roboracer_lidar
+kind: agent
+
+description: >
+  F1TENTH-class ground vehicle with a Hokuyo UST-10LX. The lidar gives it
+  a scan-matching position loop, so it keeps localising without GNSS -
+  but only in a scene with features to match against.
+
+platform: roboracer
+colour: "#2E6FB0"
+
+dimensions:
+  length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+  width: {value: 0.3, unit: m, source: "Measured, car #1, 2026-07-21"}
+  height: {value: 0.2, unit: m, source: "Measured, car #1, 2026-07-21"}
+
+performance:
+  max_speed:       {value: 1.5, unit: m/s, source: "Measured, car #1, 2026-07-21"}
+  max_accel:       {value: 2.0, unit: m/s^2, source: "Measured, car #1, 2026-07-21"}
+  min_turn_radius: {value: 0.6, unit: m, source: "Measured, car #1, 2026-07-21"}
+
+sensors:
+  # Hokuyo UST-10LX, forward, on the roll hoop
+  - {id: lidar, type: ust10lx, mount: {offset: {x: 0.1, y: 0.0, z: 0.15}}}
+  # Inertial only - the dead-reckoning source under GNSS denial
+  - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}

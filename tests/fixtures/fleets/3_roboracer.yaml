@@ -29,12 +29,10 @@ description: >
 networks:
   blue:
     # AUTHORITY - who decides. centralized | decentralized | hierarchical
-    authority: centralized
     # ROUTING - how packets travel. star | mesh | tiered
     # Deliberately a SEPARATE key from authority: a mesh can carry centralized
     # decision-making, and then the mesh survives the hub dying while the
     # decision-making does not. That gap is the thing worth measuring.
-    routing: star
     coordinator: gcs
     # SQUADS - one, because three cars is what this lab actually has. A squad
     # is a leader plus members; a leader with nobody to lead is not a squad,
@@ -44,7 +42,6 @@ networks:
     # (_two_squad_path). This fleet stays faithful to the real lab.
     squads:
       alpha: {leader: car1, members: [car2, car3]}
-    topology: centralized      # legacy alias for authority; still read
     encrypted: true
     band: 2400                 # MHz
     qos:
