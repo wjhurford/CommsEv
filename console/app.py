@@ -51,7 +51,8 @@ from PySide6.QtCore import (
     QMimeData, QPointF, QProcess, QRectF, Qt, QThread, Signal,
 )
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QDrag, QFont, QPainter, QPen, QPolygonF,
+    QAction, QBrush, QColor, QDrag, QFont, QPainter, QPen, QPixmap,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -2248,19 +2249,23 @@ class SweepWorker(QThread):
         self.done.emit(self._outdir)
 
 
-class ResultPlot(QWidget):
+class ResultPlot(QLabel):
     """The swept result: penetration against jammer advantage.
 
-    TWO VISUAL CHANNELS FOR TWO INDEPENDENT VARIABLES, which is the whole
-    reason the plot is readable at all with nine series on it:
+    RENDERED INTO A PIXMAP, not painted in a paintEvent. Two attempts at the
+    custom-paint version produced a blank rectangle that could not be
+    diagnosed from the outside - no border, no error text, nothing - so the
+    mechanism was changed rather than debugged further. A QLabel showing a
+    pixmap has no paint-path subtleties: if the pixmap has pixels in it, they
+    appear. It also means the chart can be rendered and inspected without a
+    screen at all, which is how it is now tested.
 
+    TWO VISUAL CHANNELS FOR TWO INDEPENDENT VARIABLES:
         COLOUR = command authority   (who decides)
         DASH   = routing             (how packets travel)
-
-    They are independent axes in the model, so they get independent channels
-    here. Encoding both in colour would have needed nine hues nobody can tell
-    apart, and would have hidden the fact that they are separable - which is
-    the finding.
+    They are independent axes in the model, so they get independent channels.
+    Nine hues would be indistinguishable AND would hide that the two are
+    separable, which is the finding.
     """
 
     AUTH_COLOUR = {"centralized": "#D2694F",
@@ -2274,15 +2279,21 @@ class ResultPlot(QWidget):
         self.rows = []
         self.metric = "penetration_m"
         self.highlight = None       # (authority, routing) of the opened run
-        self.setMinimumHeight(300)
+        self.setMinimumHeight(320)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setAutoFillBackground(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background:#181C1F;")
+        self.setText("No results yet - press Run.")
 
     def set_rows(self, rows):
         self.rows = rows
-        self.update()
+        self.render_chart()
 
-    def _series(self):
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.render_chart()
+
+    def series(self):
         """{(authority, routing): [(x, mean y), ...]} - seeds averaged."""
         acc = {}
         for r in self.rows:
@@ -2296,61 +2307,46 @@ class ResultPlot(QWidget):
         return {k: sorted((x, sum(v) / len(v)) for x, v in d.items())
                 for k, d in acc.items()}
 
-    def paintEvent(self, _):
-        # A CHART THAT FAILS MUST SAY SO. A blank rectangle is the worst
-        # possible outcome: it looks like "no data" when it may be a crash in
-        # the drawing code, and there is no way to tell them apart by looking.
-        # Any exception is caught and printed ON the widget.
-        p = QPainter(self)
+    def render_chart(self, size=None):
+        """Draw the chart into a pixmap and show it. Returns the pixmap, so a
+        test can render one with no window on screen and check its pixels."""
+        w = int(size[0] if size else max(self.width(), 320))
+        h = int(size[1] if size else max(self.height(), 240))
+        pm = QPixmap(w, h)
+        pm.fill(QColor("#181C1F"))
+        p = QPainter(pm)
         try:
-            self._paint(p)
-        except Exception as exc:                      # noqa: BLE001
-            p.fillRect(self.rect(), QColor(24, 28, 31))
+            self._draw(p, w, h)
+        except Exception as exc:                       # noqa: BLE001
             p.setPen(QPen(QColor("#D2694F")))
             p.setFont(QFont("Consolas", 9))
-            p.drawText(14, 24, "plot failed to draw:")
-            p.drawText(14, 42, f"{type(exc).__name__}: {exc}")
-            p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(14, 66, f"{len(self.rows)} rows held")
+            p.drawText(14, 26, f"chart failed: {type(exc).__name__}: {exc}")
         p.end()
+        self.setPixmap(pm)
+        return pm
 
-    def _paint(self, p):
+    def _draw(self, p, W, H):
         p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(24, 28, 31))
-        series = self._series()
-        # PROOF OF LIFE, drawn before anything else can fail. A blank black
-        # rectangle is ambiguous between "no data", "crashed while drawing"
-        # and "this widget is never painted at all", and you cannot tell
-        # which by looking - which cost an afternoon. The border and this one
-        # line make all three distinguishable at a glance.
-        p.setPen(QPen(QColor(60, 68, 74), 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawRect(0, 0, self.width() - 1, self.height() - 1)
-        p.setPen(QPen(QColor(C_DIM).darker(120)))
-        p.setFont(QFont("Consolas", 7))
-        p.drawText(6, 11, f"{self.width()}x{self.height()}  "
-                          f"{len(self.rows)} rows  {len(series)} series")
-        L, R, T, B = 66, 20, 26, 44
-        w, h = self.width() - L - R, self.height() - T - B
+        series = self.series()
+        L, R, T, B = 70, 24, 22, 46
+        w, h = W - L - R, H - T - B
         if w < 60 or h < 40:
-            p.setPen(QPen(QColor("#D2694F")))
+            p.setPen(QPen(QColor(C_DIM)))
             p.setFont(QFont("Consolas", 9))
-            p.drawText(10, 30, f"too small to draw ({w} x {h})")
+            p.drawText(10, 24, f"too small: {W}x{H}")
             return
         if not series:
             p.setPen(QPen(QColor(C_DIM)))
             p.setFont(QFont("Consolas", 9))
-            p.drawText(L, T + 24,
-                       "No rows selected. Run an experiment, or tick a "
-                       "P_j/P_t value below.")
+            p.drawText(L, T + 30, "No rows selected - tick a P_j/P_t value.")
             return
 
         xs = [x for pts in series.values() for x, _ in pts]
         ys = [y for pts in series.values() for _, y in pts]
         x0, x1 = min(xs), max(xs)
         if x1 - x0 < 1e-9:
-            x0, x1 = x0 - 1, x1 + 1
-        y1 = max(ys) * 1.08 or 1.0
+            x0, x1 = x0 - 1.0, x1 + 1.0
+        y1 = (max(ys) or 1.0) * 1.10
 
         def sx(v):
             return L + (v - x0) / (x1 - x0) * w
@@ -2358,35 +2354,35 @@ class ResultPlot(QWidget):
         def sy(v):
             return T + h - (v / y1) * h
 
-        # grid + axes
         p.setFont(QFont("Consolas", 8))
         for i in range(5):
             v = y1 * i / 4.0
-            p.setPen(QPen(QColor(44, 50, 55)))
+            p.setPen(QPen(QColor("#2C3236")))
             p.drawLine(int(L), int(sy(v)), int(L + w), int(sy(v)))
             p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(6, int(sy(v)) + 4, f"{v:7.0f}")
+            p.drawText(8, int(sy(v)) + 4, f"{v:6.0f}")
+        p.setPen(QPen(QColor("#4A5257")))
+        p.drawLine(int(L), int(T), int(L), int(T + h))
+        p.drawLine(int(L), int(T + h), int(L + w), int(T + h))
         for x in sorted(set(xs)):
             p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(int(sx(x)) - 12, int(T + h + 16), f"{x:+.0f}")
-        p.setPen(QPen(QColor(C_DIM)))
-        p.drawText(L, T + h + 34,
-                   "JAMMER ADVANTAGE  P_j / P_t  (dB)   -   "
-                   "dimensionless: absolute powers cancel")
+            p.drawText(int(sx(x)) - 14, int(T + h + 18), f"{x:+.0f} dB")
+        p.drawText(int(L), int(T + h + 38),
+                   "JAMMER ADVANTAGE  P_j / P_t   (dimensionless: the "
+                   "absolute powers cancel)")
         p.save()
-        p.translate(14, T + h / 2 + 60)
+        p.translate(18, T + h)
         p.rotate(-90)
         p.drawText(0, 0, "PENETRATION (m advanced)")
         p.restore()
 
         for (auth, route), pts in sorted(series.items()):
             # THE RUN YOU OPENED IS ORANGE. Double-click a row and its line
-            # lights up, so "the one I am watching" is answerable by looking
-            # rather than by reading the legend back to yourself.
+            # lights up, so "the one I am watching" is answerable by looking.
             lit = self.highlight == (auth, route)
             col = (QColor("#E08A3C") if lit
                    else QColor(self.AUTH_COLOUR.get(auth, "#AAAAAA")))
-            pen = QPen(col, 3.2 if lit else 2.0)
+            pen = QPen(col, 3.4 if lit else 2.0)
             pen.setStyle(self.ROUTE_DASH.get(route, Qt.SolidLine))
             p.setPen(pen)
             for i in range(len(pts) - 1):
@@ -2396,6 +2392,7 @@ class ResultPlot(QWidget):
             p.setBrush(QBrush(col))
             for x, y in pts:
                 p.drawEllipse(QPointF(sx(x), sy(y)), 3.0, 3.0)
+        p.setBrush(Qt.NoBrush)
 
 
 class ExperimentWindow(QDialog):
@@ -2585,7 +2582,7 @@ class ExperimentWindow(QDialog):
                     frames.append(json.loads(ln))
         row_d = self.rows[row]
         self.plot.highlight = (row_d.get("authority"), row_d.get("routing"))
-        self.plot.update()
+        self.plot.render_chart()
         if self.console is not None and frames:
             self.console.play_frames(frames, title=cell)
         self.bar.setFormat(f"opened {cell}  ({len(frames)} frames) - "
@@ -2725,7 +2722,8 @@ class Console(QMainWindow):
         self.play_button.clicked.connect(self.toggle_playback)
 
         self.speed_combo = QComboBox()
-        self.speed_combo.addItems(["0.25x", "0.5x", "1x", "2x", "4x"])
+        self.speed_combo.addItems(["0.25x", "0.5x", "1x", "2x", "4x",
+                           "8x", "16x"])
         self.speed_combo.setCurrentText("1x")
         self.speed_combo.setToolTip("Playback speed")
         self.speed_combo.setFixedWidth(66)
@@ -3349,6 +3347,26 @@ class Console(QMainWindow):
         # hid the mechanism, which is the interesting half.
         self.timeline.setValue(0)
         self.on_scrub(0)
+        # SPEED IT UP, AND FIT THE VIEW. A 200 m advance at 1.5 m/s is a run
+        # of well over a minute, and at 1x the vehicles creep - which reads as
+        # "nothing is happening" rather than as a slow advance. Pick a rate
+        # that plays the whole thing in roughly fifteen seconds, and reset the
+        # view so the corridor is on screen rather than wherever the last run
+        # left the pan.
+        try:
+            span = (self.frames[-1].get("sim_time_s", 0.0)
+                    - self.frames[0].get("sim_time_s", 0.0))
+            want = span / 15.0
+            best = min((float(self.speed_combo.itemText(i).rstrip("x")), i)
+                       for i in range(self.speed_combo.count())
+                       if float(self.speed_combo.itemText(i).rstrip("x")) >= want) \
+                if any(float(self.speed_combo.itemText(i).rstrip("x")) >= want
+                       for i in range(self.speed_combo.count())) else None
+            if best is not None:
+                self.speed_combo.setCurrentIndex(best[1])
+        except Exception:                              # noqa: BLE001
+            pass
+        self.viewport.reset_view()
         if hasattr(self, "play_button"):
             self.play_button.setChecked(True)
             self.toggle_playback(True)
