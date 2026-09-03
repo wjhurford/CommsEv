@@ -16,3 +16,4 @@ ros2/build/
 ros2/install/
 ros2/log/
 missions/__pycache__/
+console/_experiment_panel_src.py*

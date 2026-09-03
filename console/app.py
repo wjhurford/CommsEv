@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import math
 import sys
 import time
@@ -46,7 +47,9 @@ BAG_PIDFILE = "/tmp/deadband_bag.pid"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from PySide6.QtCore import QMimeData, QPointF, QProcess, QRectF, Qt
+from PySide6.QtCore import (
+    QMimeData, QPointF, QProcess, QRectF, Qt, QThread, Signal,
+)
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QDrag, QFont, QPainter, QPen, QPolygonF,
 )
@@ -56,7 +59,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
     QComboBox, QDialog, QInputDialog, QLineEdit, QMenu, QSizePolicy,
-    QSlider, QSplitter,
+    QSlider, QSplitter, QProgressBar, QCheckBox,
     QVBoxLayout, QWidget,
 )
 
@@ -2195,6 +2198,356 @@ class SpawnDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Experiment runner and results viewer
+# ---------------------------------------------------------------------------
+# Deliberately a SEPARATE WINDOW rather than another tab. An experiment is a
+# different mode of working from a sandbox run - many runs, headless, nothing
+# to interfere with - and it needs the whole canvas for its result. It also
+# means nothing here can break the live tabs.
+#
+# The flow is the one the demo needs, end to end:
+#   Run       -> tools/sweep.py in a worker thread, progress on a bar
+#   Results   -> the table appears the moment it finishes
+#   Click     -> that one run is re-executed and played back in the viewport
+#
+# Nothing is stored to make playback work. Every run is a pure function of
+# (config, seed), so clicking a row RE-RUNS that cell in a fraction of a second
+# and the frames are identical to the ones the sweep saw. Storing recordings
+# for hundreds of runs would cost gigabytes to save you nothing.
+
+
+class SweepWorker(QThread):
+    """Runs tools/sweep.py out-of-process so a long grid cannot freeze the UI."""
+
+    line = Signal(str)
+    done = Signal(str)
+
+    def __init__(self, experiment, parent=None):
+        super().__init__(parent)
+        self.experiment = experiment
+        self._outdir = ""
+
+    def run(self):
+        import subprocess
+        cmd = [sys.executable, str(REPO_ROOT / "tools" / "sweep.py"),
+               str(self.experiment)]
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        except OSError as exc:
+            self.line.emit(f"cannot start sweep: {exc}")
+            self.done.emit("")
+            return
+        for ln in proc.stdout:
+            ln = ln.rstrip()
+            self.line.emit(ln)
+            if "->" in ln and "results.csv" in ln:
+                self._outdir = ln.split("->", 1)[1].strip()
+        proc.wait()
+        self.done.emit(self._outdir)
+
+
+class ResultPlot(QWidget):
+    """The swept result: penetration against jammer advantage.
+
+    TWO VISUAL CHANNELS FOR TWO INDEPENDENT VARIABLES, which is the whole
+    reason the plot is readable at all with nine series on it:
+
+        COLOUR = command authority   (who decides)
+        DASH   = routing             (how packets travel)
+
+    They are independent axes in the model, so they get independent channels
+    here. Encoding both in colour would have needed nine hues nobody can tell
+    apart, and would have hidden the fact that they are separable - which is
+    the finding.
+    """
+
+    AUTH_COLOUR = {"centralized": "#D2694F",
+                   "decentralized": "#4FA3D1",
+                   "hierarchical": "#6FAE7E"}
+    ROUTE_DASH = {"star": Qt.SolidLine, "mesh": Qt.DashLine,
+                  "tiered": Qt.DotLine}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rows = []
+        self.metric = "penetration_m"
+        self.setMinimumHeight(300)
+
+    def set_rows(self, rows):
+        self.rows = rows
+        self.update()
+
+    def _series(self):
+        """{(authority, routing): [(x, mean y), ...]} - seeds averaged."""
+        acc = {}
+        for r in self.rows:
+            try:
+                x = float(r.get("jam_rel_db"))
+                y = float(r.get(self.metric))
+            except (TypeError, ValueError):
+                continue
+            acc.setdefault((r.get("authority"), r.get("routing")), {}) \
+               .setdefault(x, []).append(y)
+        return {k: sorted((x, sum(v) / len(v)) for x, v in d.items())
+                for k, d in acc.items()}
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor(24, 28, 31))
+        series = self._series()
+        L, R, T, B = 66, 20, 18, 44
+        w, h = self.width() - L - R, self.height() - T - B
+        if w < 60 or h < 40:
+            return
+        if not series:
+            p.setPen(QPen(QColor(C_DIM)))
+            p.setFont(QFont("Consolas", 9))
+            p.drawText(L, T + 24, "Run an experiment to see results.")
+            return
+
+        xs = [x for pts in series.values() for x, _ in pts]
+        ys = [y for pts in series.values() for _, y in pts]
+        x0, x1 = min(xs), max(xs)
+        if x1 - x0 < 1e-9:
+            x0, x1 = x0 - 1, x1 + 1
+        y1 = max(ys) * 1.08 or 1.0
+
+        def sx(v):
+            return L + (v - x0) / (x1 - x0) * w
+
+        def sy(v):
+            return T + h - (v / y1) * h
+
+        # grid + axes
+        p.setFont(QFont("Consolas", 8))
+        for i in range(5):
+            v = y1 * i / 4.0
+            p.setPen(QPen(QColor(44, 50, 55)))
+            p.drawLine(int(L), int(sy(v)), int(L + w), int(sy(v)))
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(6, int(sy(v)) + 4, f"{v:7.0f}")
+        for x in sorted(set(xs)):
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(int(sx(x)) - 12, int(T + h + 16), f"{x:+.0f}")
+        p.setPen(QPen(QColor(C_DIM)))
+        p.drawText(L, T + h + 34,
+                   "JAMMER ADVANTAGE  P_j / P_t  (dB)   -   "
+                   "dimensionless: absolute powers cancel")
+        p.save()
+        p.translate(14, T + h / 2 + 60)
+        p.rotate(-90)
+        p.drawText(0, 0, "PENETRATION (m advanced)")
+        p.restore()
+
+        for (auth, route), pts in sorted(series.items()):
+            col = QColor(self.AUTH_COLOUR.get(auth, "#AAAAAA"))
+            pen = QPen(col, 2.0)
+            pen.setStyle(self.ROUTE_DASH.get(route, Qt.SolidLine))
+            p.setPen(pen)
+            for i in range(len(pts) - 1):
+                p.drawLine(int(sx(pts[i][0])), int(sy(pts[i][1])),
+                           int(sx(pts[i + 1][0])), int(sy(pts[i + 1][1])))
+            p.setPen(QPen(col, 1))
+            p.setBrush(QBrush(col))
+            for x, y in pts:
+                p.drawEllipse(QPointF(sx(x), sy(y)), 3, 3)
+        p.end()
+
+
+class ExperimentWindow(QDialog):
+    """Run a sweep, see the table, click a row to watch that run."""
+
+    def __init__(self, console, parent=None):
+        super().__init__(parent)
+        self.console = console
+        self.setWindowTitle("Experiment")
+        self.resize(1100, 760)
+        self.rows = []
+        self.outdir = None
+        lay = QVBoxLayout(self)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Experiment"))
+        self.exp_combo = QComboBox()
+        for f in sorted((REPO_ROOT / "experiments").glob("*.yaml")):
+            self.exp_combo.addItem(f.stem, str(f))
+        top.addWidget(self.exp_combo, 1)
+        self.run_btn = QPushButton("Run")
+        self.run_btn.clicked.connect(self.start)
+        top.addWidget(self.run_btn)
+        lay.addLayout(top)
+
+        # A LOAD BAR, NOT AN ESTIMATE. An estimate is a guess you then have to
+        # defend; a bar is a fact, and it cannot be wrong.
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(True)
+        self.bar.setFormat("idle")
+        lay.addWidget(self.bar)
+
+        self.plot = ResultPlot()
+        lay.addWidget(self.plot, 2)
+
+        # The power tickboxes: which jammer advantages are drawn. Opens on ONE
+        # of them, because nine lines is a chart and twenty-seven is a wall.
+        self.filt = QHBoxLayout()
+        self.filt.addWidget(QLabel("Show P_j/P_t:"))
+        self.filt.addStretch(1)
+        lay.addLayout(self.filt)
+        self._boxes = []
+
+        leg = QLabel(
+            "colour = authority   centralized / decentralized / hierarchical"
+            "        dash = routing   — star   – – mesh   "
+            "··· tiered")
+        leg.setObjectName("hint")
+        lay.addWidget(leg)
+
+        self.table = QTableWidget(0, 0)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.cellDoubleClicked.connect(self.replay_row)
+        lay.addWidget(self.table, 3)
+
+        hint = QLabel("Double-click a row to re-run that exact cell and watch "
+                      "it in the viewport. Nothing is stored to make this "
+                      "work — every run is a pure function of its config "
+                      "and seed, so the replay is the same run, not a "
+                      "recording of it.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+    # -- running -----------------------------------------------------------
+    def start(self):
+        path = self.exp_combo.currentData()
+        if not path:
+            return
+        self.run_btn.setEnabled(False)
+        self.bar.setRange(0, 0)          # indeterminate until the total lands
+        self.bar.setFormat("starting...")
+        self.worker = SweepWorker(path, self)
+        self.worker.line.connect(self.on_line)
+        self.worker.done.connect(self.on_done)
+        self.worker.start()
+
+    def on_line(self, ln):
+        if self.console is not None:
+            self.console.say(ln)
+        m = re.search(r"(\d+)\s*/\s*(\d+)", ln)
+        if m:
+            i, n = int(m.group(1)), int(m.group(2))
+            self.bar.setRange(0, n)
+            self.bar.setValue(i)
+            self.bar.setFormat(f"{i} / {n} runs")
+
+    def on_done(self, outdir):
+        self.run_btn.setEnabled(True)
+        self.bar.setRange(0, 1)
+        self.bar.setValue(1)
+        if not outdir:
+            self.bar.setFormat("failed - see the log")
+            return
+        self.outdir = Path(outdir).parent
+        self.load_csv(Path(outdir))
+
+    # -- results -----------------------------------------------------------
+    def load_csv(self, path):
+        import csv as _csv
+        try:
+            with open(path, newline="", encoding="utf-8") as fh:
+                self.rows = list(_csv.DictReader(fh))
+        except OSError as exc:
+            self.bar.setFormat(f"cannot read results: {exc}")
+            return
+        self.bar.setFormat(f"{len(self.rows)} runs")
+        self._build_filter()
+        self._fill_table()
+        self._apply_filter()
+
+    def _build_filter(self):
+        for b in self._boxes:
+            b.setParent(None)
+        self._boxes = []
+        powers = sorted({r.get("jam_rel_db") for r in self.rows
+                         if r.get("jam_rel_db") not in (None, "")},
+                        key=lambda v: float(v))
+        for i, pw in enumerate(powers):
+            b = QCheckBox(f"{float(pw):+.0f} dB")
+            b.setChecked(i == 0)     # open on ONE power, not all of them
+            b.stateChanged.connect(self._apply_filter)
+            self.filt.insertWidget(self.filt.count() - 1, b)
+            self._boxes.append(b)
+
+    def _apply_filter(self):
+        keep = {b.text().replace(" dB", "").strip()
+                for b in self._boxes if b.isChecked()}
+
+        def shown(r):
+            try:
+                return f"{float(r.get('jam_rel_db')):+.0f}" in keep
+            except (TypeError, ValueError):
+                return False
+        self.plot.set_rows([r for r in self.rows if shown(r)])
+
+    def _fill_table(self):
+        cols = [c for c in ("authority", "routing", "jam_rel_db", "seed",
+                            "penetration_m", "penetration_frac", "arrived",
+                            "complete_success", "commanded_fraction",
+                            "ended_s", "cell")
+                if self.rows and c in self.rows[0]]
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        self.table.setRowCount(len(self.rows))
+        for r, row in enumerate(self.rows):
+            for c, key in enumerate(cols):
+                it = QTableWidgetItem(str(row.get(key, "")))
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                if key == "authority":
+                    it.setForeground(QBrush(QColor(
+                        ResultPlot.AUTH_COLOUR.get(row.get(key), "#AAAAAA"))))
+                self.table.setItem(r, c, it)
+        self.table.resizeColumnsToContents()
+
+    # -- playback ----------------------------------------------------------
+    def replay_row(self, row, _col):
+        """Re-run this one cell and hand its frames to the Console viewport."""
+        if row < 0 or row >= len(self.rows):
+            return
+        cell = self.rows[row].get("cell")
+        exp = self.exp_combo.currentData()
+        if not cell or not exp:
+            return
+        self.bar.setFormat(f"replaying {cell} ...")
+        import subprocess
+        try:
+            subprocess.run(
+                [sys.executable, str(REPO_ROOT / "tools" / "sweep.py"), exp,
+                 "--replay", cell],
+                cwd=str(REPO_ROOT), check=True, capture_output=True, text=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            self.bar.setFormat(f"replay failed: {exc}")
+            return
+        stem = cell.replace(",", "_").replace("=", "")
+        jl = REPO_ROOT / "runs" / (
+            f"replay_{Path(exp).stem}_{stem}.jsonl")
+        if not jl.exists():
+            self.bar.setFormat("replay produced no frames")
+            return
+        frames = []
+        with open(jl, encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if ln:
+                    frames.append(json.loads(ln))
+        if self.console is not None and frames:
+            self.console.play_frames(frames, title=cell)
+        self.bar.setFormat(f"replaying {cell}  ({len(frames)} frames)")
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -2476,6 +2829,11 @@ class Console(QMainWindow):
         # SAVE FLEET AS. The only thing that writes into fleets/. Explicit,
         # because a fleet you are still experimenting with is not one you have
         # decided to keep.
+        expb = QPushButton("Run an experiment...")
+        expb.setToolTip("Sweep authority x routing x jammer power headless, "
+                        "then double-click any result to watch that run.")
+        expb.clicked.connect(self.open_experiment)
+        slay.addWidget(expb)
         savrow = QHBoxLayout()
         for _side, _lab in (("blue", "Save blue fleet as..."),
                             ("red", "Save red fleet as...")):
@@ -2695,6 +3053,15 @@ class Console(QMainWindow):
         a.triggered.connect(self.close)
         m.addAction(a)
 
+        # EXPERIMENT is its own window, not another tab: many runs, headless,
+        # nothing to interfere with, and it needs the whole canvas for the
+        # result. Ctrl+E from anywhere.
+        e = self.menuBar().addMenu("&Experiment")
+        a = QAction("&Run an experiment...", self)
+        a.setShortcut("Ctrl+E")
+        a.triggered.connect(self.open_experiment)
+        e.addAction(a)
+
     # -- setup: compose a run ----------------------------------------------
 
     def _run_stem(self):
@@ -2906,6 +3273,38 @@ class Console(QMainWindow):
             if aid in ids:
                 self._doctrines.pop(aid, None)
 
+
+    def play_frames(self, frames, title=""):
+        """Load a finished run into the viewport and scrub it on the timeline.
+
+        Used by the experiment window: double-clicking a result row re-runs
+        that cell and hands the frames here. It replaces the live stream's
+        buffer, so it behaves exactly like a run you watched happen - the same
+        timeline, the same map, the same plots.
+        """
+        if not frames:
+            return
+        self.frames = list(frames)
+        self.plots.frames = self.frames
+        self.refresh_series_tree(self.frames[0])
+        if hasattr(self, "live_button"):
+            self.live_button.setChecked(False)
+        self.timeline.blockSignals(True)
+        self.timeline.setEnabled(True)
+        self.timeline.setMaximum(len(self.frames) - 1)
+        self.timeline.setValue(0)
+        self.timeline.blockSignals(False)
+        self.on_scrub(0)
+        if title:
+            self.say(f"Replaying {title} - {len(self.frames)} frames. "
+                     f"Scrub the timeline.")
+
+    def open_experiment(self):
+        """The experiment window: run a sweep, read the table, watch a run."""
+        if getattr(self, "_expwin", None) is None:
+            self._expwin = ExperimentWindow(self, self)
+        self._expwin.show()
+        self._expwin.raise_()
 
     def _on_mode_chosen(self, _index):
         """Sandbox enables the live controls; Experiment will disable them and
