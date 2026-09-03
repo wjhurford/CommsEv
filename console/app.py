@@ -2217,36 +2217,22 @@ class SpawnDialog(QDialog):
 # for hundreds of runs would cost gigabytes to save you nothing.
 
 
-class SweepWorker(QThread):
-    """Runs tools/sweep.py out-of-process so a long grid cannot freeze the UI."""
+def _sweep_module():
+    """tools/sweep.py, imported as a module.
 
-    line = Signal(str)
-    done = Signal(str)
-
-    def __init__(self, experiment, parent=None):
-        super().__init__(parent)
-        self.experiment = experiment
-        self._outdir = ""
-
-    def run(self):
-        import subprocess
-        cmd = [sys.executable, str(REPO_ROOT / "tools" / "sweep.py"),
-               str(self.experiment)]
-        try:
-            proc = subprocess.Popen(
-                cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1)
-        except OSError as exc:
-            self.line.emit(f"cannot start sweep: {exc}")
-            self.done.emit("")
-            return
-        for ln in proc.stdout:
-            ln = ln.rstrip()
-            self.line.emit(ln)
-            if "->" in ln and "results.csv" in ln:
-                self._outdir = ln.split("->", 1)[1].strip()
-        proc.wait()
-        self.done.emit(self._outdir)
+    The sweep runs IN-PROCESS. It used to be a QThread driving a subprocess,
+    which is machinery for a problem that does not exist: 81 runs take two
+    seconds. What it bought instead was a whole class of failure - a worker
+    thread, a pipe, cross-thread signals and a second Python interpreter - and
+    it crashed the Console on Windows. A loop with processEvents() is simpler,
+    cannot crash that way, and gives finer progress.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "deadband_sweep", str(REPO_ROOT / "tools" / "sweep.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class ResultPlot(QLabel):
@@ -2484,36 +2470,72 @@ class ExperimentWindow(QDialog):
 
     # -- running -----------------------------------------------------------
     def start(self):
+        """Run the sweep here and now, one cell at a time, updating the bar.
+
+        No thread, no subprocess. Every failure is an ordinary Python
+        exception that lands in the log with a traceback instead of taking the
+        Console down with it.
+        """
         path = self.exp_combo.currentData()
         if not path:
             return
         self.run_btn.setEnabled(False)
-        self.bar.setRange(0, 0)          # indeterminate until the total lands
-        self.bar.setFormat("starting...")
-        self.worker = SweepWorker(path, self)
-        self.worker.line.connect(self.on_line)
-        self.worker.done.connect(self.on_done)
-        self.worker.start()
-
-    def on_line(self, ln):
-        if self.console is not None:
-            self.console.say(ln)
-        m = re.search(r"(\d+)\s*/\s*(\d+)", ln)
-        if m:
-            i, n = int(m.group(1)), int(m.group(2))
-            self.bar.setRange(0, n)
-            self.bar.setValue(i)
-            self.bar.setFormat(f"{i} / {n} runs")
-
-    def on_done(self, outdir):
-        self.run_btn.setEnabled(True)
         self.bar.setRange(0, 1)
-        self.bar.setValue(1)
-        if not outdir:
-            self.bar.setFormat("failed - see the log")
-            return
-        self.outdir = Path(outdir).parent
-        self.load_csv(Path(outdir))
+        self.bar.setValue(0)
+        self.bar.setFormat("loading...")
+        QApplication.processEvents()
+        try:
+            self._run_sweep(Path(path))
+        except Exception as exc:                       # noqa: BLE001
+            import traceback
+            self.bar.setFormat(f"failed: {exc}")
+            if self.console is not None:
+                self.console.say("EXPERIMENT FAILED\n" + traceback.format_exc())
+        finally:
+            self.run_btn.setEnabled(True)
+
+    def _run_sweep(self, exp_path):
+        import csv as _csv
+        import yaml as _yaml
+        from datetime import datetime
+        sweep = _sweep_module()
+        cfg = _yaml.safe_load(exp_path.read_text(encoding="utf-8"))
+        cells, names = sweep.cells_of(cfg)
+        n = len(cells)
+        self.bar.setRange(0, n)
+        self._cfg, self._names, self._exp_path = cfg, names, exp_path
+
+        rows = []
+        for i, cell in enumerate(cells, 1):
+            rows.append(sweep.run_one((cfg, cell, False)))
+            self.bar.setValue(i)
+            self.bar.setFormat(f"%v / %m runs")
+            if i % 3 == 0 or i == n:
+                QApplication.processEvents()
+        rows.sort(key=lambda r: r.get("cell", ""))
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        outdir = REPO_ROOT / "runs" / f"sweep_{cfg['name']}_{stamp}"
+        outdir.mkdir(parents=True, exist_ok=True)
+        fields = list(dict.fromkeys(
+            [k for r in rows for k in r.keys()]))
+        csv_path = outdir / "results.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        # The experiment file goes with its results. A CSV without the
+        # configuration that produced it is an orphan.
+        (outdir / "experiment.yaml").write_text(
+            exp_path.read_text(encoding="utf-8"), encoding="utf-8")
+        bad = [r for r in rows if r.get("error")]
+        if self.console is not None:
+            self.console.say(f"{len(rows)} runs -> {csv_path}"
+                             + (f"  ({len(bad)} FAILED)" if bad else ""))
+            for r in bad[:5]:
+                self.console.say(f"  FAILED {r.get('cell')}: {r['error']}")
+        self.outdir = outdir
+        self.load_csv(csv_path)
 
     # -- results -----------------------------------------------------------
     def load_csv(self, path):
@@ -2575,42 +2597,49 @@ class ExperimentWindow(QDialog):
 
     # -- playback ----------------------------------------------------------
     def replay_row(self, row, _col):
-        """Re-run this one cell and hand its frames to the Console viewport."""
+        """Re-run this one cell here and hand its frames to the viewport.
+
+        In-process, like the sweep: no subprocess, no JSONL file on disk, and
+        no second interpreter that can fail in ways this one cannot see. The
+        run is a pure function of (config, seed), so this IS the same run the
+        table row came from - not a recording of it.
+        """
         if row < 0 or row >= len(self.rows):
             return
-        cell = self.rows[row].get("cell")
-        exp = self.exp_combo.currentData()
-        if not cell or not exp:
+        row_d = self.rows[row]
+        key = row_d.get("cell")
+        cfg = getattr(self, "_cfg", None)
+        names = getattr(self, "_names", None)
+        if not key or cfg is None:
+            self.bar.setFormat("open a results set first (press Run)")
             return
-        self.bar.setFormat(f"replaying {cell} ...")
-        import subprocess
+        self.bar.setFormat(f"re-running {key} ...")
+        QApplication.processEvents()
         try:
-            subprocess.run(
-                [sys.executable, str(REPO_ROOT / "tools" / "sweep.py"), exp,
-                 "--replay", cell],
-                cwd=str(REPO_ROOT), check=True, capture_output=True, text=True)
-        except (OSError, subprocess.CalledProcessError) as exc:
+            sweep = _sweep_module()
+            cells, _ = sweep.cells_of(cfg)
+            match = [c for c in cells if c.get("cell") == key]
+            if not match:
+                self.bar.setFormat(f"no such cell: {key}")
+                return
+            result = sweep.run_one((cfg, match[0], True))
+            frames = result[1] if isinstance(result, tuple) else []
+        except Exception as exc:                       # noqa: BLE001
+            import traceback
             self.bar.setFormat(f"replay failed: {exc}")
+            if self.console is not None:
+                self.console.say("REPLAY FAILED\n" + traceback.format_exc())
             return
-        stem = cell.replace(",", "_").replace("=", "")
-        jl = REPO_ROOT / "runs" / (
-            f"replay_{Path(exp).stem}_{stem}.jsonl")
-        if not jl.exists():
+        if not frames:
             self.bar.setFormat("replay produced no frames")
             return
-        frames = []
-        with open(jl, encoding="utf-8") as fh:
-            for ln in fh:
-                ln = ln.strip()
-                if ln:
-                    frames.append(json.loads(ln))
-        row_d = self.rows[row]
         self.plot.highlight = (row_d.get("authority"), row_d.get("routing"))
         self.plot.render_chart()
-        if self.console is not None and frames:
-            self.console.play_frames(frames, title=cell)
-        self.bar.setFormat(f"opened {cell}  ({len(frames)} frames) - "
+        if self.console is not None:
+            self.console.play_frames(frames, title=key)
+        self.bar.setFormat(f"opened {key}  ({len(frames)} frames) - "
                            f"playing in the Console")
+
 
 
 # ---------------------------------------------------------------------------

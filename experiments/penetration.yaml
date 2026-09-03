@@ -70,7 +70,17 @@ axes:
   # +20 dB = a hundred times the power.
   jam_rel_db: [0, 10, 20]
 
-seeds: [1, 2, 3]
+# ONE SEED, MEASURED NOT ASSUMED. Across 27 cells x 3 seeds, not a single
+# cell's penetration differed between seeds - because nothing in THIS
+# configuration is stochastic. The only randomness in the model is lidar scan
+# noise and the wander of a dead-reckoning heading, and this fleet has no
+# lidar and keeps its GNSS fix (red_comms attacks the command band only). So
+# extra seeds tripled the run time and produced identical numbers.
+#
+# Put seeds back the moment either of those enters: a GNSS-band jammer, or a
+# fleet with lidar. Then the spread across seeds is a real quantity and
+# reporting a mean without it would be dishonest.
+seeds: [1]
 
 squads:
   alpha: {leader: car1, members: [car2, car3]}
