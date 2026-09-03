@@ -244,9 +244,38 @@ def load(path: str | Path) -> Report:
         report.errors.append("the top level of a scenario must be a mapping")
         return report
 
+    # RESOLVE THE LAYERS FIRST. A composed run (scene + fleets + overrides) is
+    # a PARTIAL document: its `agents:` list carries only what the Setup tab is
+    # overriding - a pose, a doctrine - and gets the network, sensors and body
+    # from the fleet layer underneath. Validating the partial on its own
+    # reported every agent as having no network, which was alarming, wrong, and
+    # had nothing to do with the run that then executed perfectly.
+    #
+    # Anything with a scene/fleet reference is resolved before checking. A
+    # single self-contained file resolves to itself, so nothing else changes.
+    checked = doc
+    if any(k in doc for k in ("scene", "fleet", "fleets", "map")):
+        try:
+            from tools import stub_telemetry as _st  # type: ignore
+        except ImportError:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parent.parent
+                                    / "tools"))
+            try:
+                import stub_telemetry as _st  # type: ignore
+            except ImportError:
+                _st = None
+        if _st is not None:
+            try:
+                checked = _st.resolve_doc(dict(doc))
+            except Exception as exc:
+                report.errors.append(
+                    f"cannot resolve this run's scene/fleet layers: {exc}")
+                return report
+
     report.doc = doc  # type: ignore[attr-defined]
-    _check_structure(doc, report)
-    _walk(doc, "", report)
+    _check_structure(checked, report)
+    _walk(checked, "", report)
     return report
 
 

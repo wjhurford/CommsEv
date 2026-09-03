@@ -127,11 +127,19 @@ reason, not silently turned into something else.
 thing attacking it.
 
 ```
-JAM jam1 power 25           set transmit power, dBm
-JAM jam1 band 2400          retune to a frequency, MHz
+JAM jam1 band 2400 power 25     set the whole emission in one line
+JAM jam1 power 25 band 2400     order does not matter
+JAM jam1 power 25               one property on its own still works
 ```
 
-Both take effect **live**, mid-run. Arming and silencing is `red launch` /
+**Set band and power together.** Two separate commands leave a window where
+the jammer is on the new band at the *old* power — a third emission, which is
+not the one you meant and not the one you had. One line, one emission.
+
+A malformed line applies **nothing**: a half-applied emission is worse than a
+rejected one, because the run carries on using settings nobody chose.
+
+Takes effect **live**, mid-run. Arming and silencing is `red launch` /
 `red halt`, not a `JAM` argument — the vehicle is deployed or it isn't.
 
 ### Frequencies worth knowing
@@ -196,6 +204,6 @@ red launch / halt         y       -       y
 <agent> launch / halt     y    own side  own side
 SETMISSION <name>         y       y       -
 REOBJECTIVE <agent> ...   y    own side  own side
-JAM <id> power|band       y       -       y
+JAM <id> band .. power .. y       -       y
 shell commands            y       y       y
 ```

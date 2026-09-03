@@ -2311,8 +2311,10 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                                     objectives, gated by command authority
                                     (an unreachable agent is not retasked),
                                     and title the run with its name
-        JAM <id> power <dBm>        tune a running jammer's emission live
-        JAM <id> band <MHz>         (on/off is LAUNCH/HALT, e.g. red launch)
+        JAM <id> [band <MHz>] [power <dBm>]
+                                    tune a running jammer's emission live, in
+                                    ONE line so band and power never disagree
+                                    (on/off is LAUNCH/HALT, e.g. red launch)
     """
     changed = []
     if not retask_dir.exists():
@@ -2402,28 +2404,49 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
             # On/off is the ordinary LAUNCH/HALT state machine (red launch),
             # so this only tunes an existing jammer's emission. Editing the
             # jammer from the Console, not baked into a file.
+            # ONE LINE SETS AN EMISSION. `JAM jam1 band 2400 power 25` is
+            # unambiguous; two separate commands left a window where the
+            # jammer was tuned to the new band at the OLD power, which is a
+            # different emission from either of the ones you meant. Any number
+            # of key/value pairs, in any order; a single pair still works.
             parts = head[1].split()
-            if len(parts) == 3 and parts[1].lower() in ("power", "band"):
-                jid, what, valtxt = parts
-                tgt = agents_by_id.get(jid)
-                if not tgt or not tgt.get("jammer"):
-                    print(f"JAM: '{jid}' is not a jammer", file=sys.stderr)
-                    continue
+            if len(parts) < 3 or (len(parts) - 1) % 2:
+                print("JAM: usage JAM <id> [band <MHz>] [power <dBm>]   "
+                      "e.g. JAM jam1 band 2400 power 25", file=sys.stderr)
+                continue
+            jid, rest = parts[0], parts[1:]
+            tgt = agents_by_id.get(jid)
+            if not tgt or not tgt.get("jammer"):
+                print(f"JAM: '{jid}' is not a jammer", file=sys.stderr)
+                continue
+            pairs, bad = [], False
+            for what, valtxt in zip(rest[0::2], rest[1::2]):
+                if what.lower() not in ("power", "band"):
+                    print(f"JAM: '{what}' is not power or band",
+                          file=sys.stderr)
+                    bad = True
+                    break
                 try:
-                    v = float(valtxt)
+                    pairs.append((what.lower(), float(valtxt)))
                 except ValueError:
                     print(f"JAM: '{valtxt}' is not a number", file=sys.stderr)
-                    continue
-                key = "tx_power" if what.lower() == "power" else "band"
+                    bad = True
+                    break
+            if bad:
+                # NOTHING is applied on a bad line. A half-applied emission is
+                # worse than a rejected one: the run continues on settings
+                # nobody chose.
+                continue
+            for what, v in pairs:
+                key = "tx_power" if what == "power" else "band"
                 cur = tgt["jammer"].get(key)
                 if isinstance(cur, dict):
                     cur["value"] = v
                 else:
                     tgt["jammer"][key] = {"value": v}
-                print(f"JAM: {jid} {what} -> {v}", file=sys.stderr)
-            else:
-                print("JAM: usage JAM <id> power <dBm> | JAM <id> band <MHz>",
-                      file=sys.stderr)
+            print("JAM: " + jid + " " +
+                  ", ".join(f"{w} -> {v:g}" for w, v in pairs),
+                  file=sys.stderr)
             continue
 
         if verb0 == "SETMISSION" and len(head) == 2:

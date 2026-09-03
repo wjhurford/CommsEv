@@ -859,12 +859,33 @@ class Viewport(QWidget):
             pen = QPen(col, 1.2, Qt.DotLine)
             p.setPen(pen)
             p.drawLine(tp, bp)
+            # THE GHOST IS THE SAME VEHICLE, HOLLOW. It was a small circle,
+            # which said "a point over there" - but what it means is "this
+            # vehicle, as it believes itself to be", including its heading.
+            # Drawing the actual footprint at the believed pose makes the
+            # error read as a displaced CAR rather than an abstract marker,
+            # and it matches the hollow swatch in the key.
+            dims = a.get("dimensions") or {}
+            L = _num(dims.get("length"), 0.4)
+            W = _num(dims.get("width"), 0.4)
+            byaw = _num((bel.get("yaw") if "yaw" in bel
+                         else pose.get("yaw")))
+            cy_, sy_ = math.cos(byaw), math.sin(byaw)
+            bx, by = _num(bel.get("x")), _num(bel.get("y"))
+
+            def gcorner(dx, dy):
+                return self.to_screen(bx + dx * cy_ - dy * sy_,
+                                      by + dx * sy_ + dy * cy_, 0)
+
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(col, 1.4))
-            p.drawEllipse(bp, 6, 6)
+            p.drawPolygon(QPolygonF([gcorner(L / 2, W / 2),
+                                     gcorner(L / 2, -W / 2),
+                                     gcorner(-L / 2, -W / 2),
+                                     gcorner(-L / 2, W / 2)]))
             p.setFont(QFont("Consolas", 7))
             p.setPen(QPen(col))
-            p.drawText(bp + QPointF(8, 3),
+            p.drawText(bp + QPointF(10, -6),
                        (f"{a.get('id')}: believes it is {err:.2f} m from here"
                         if gnss_view else f"thinks: {err:.1f} m off"))
 
@@ -1037,15 +1058,11 @@ class Viewport(QWidget):
                      ("down", Qt.DashDotLine, QColor("#E08A3C"), 1.6))
         spare = QColor(C_DIM)
         spare.setAlpha(90)
+        # No panel and no border: the key sits directly on the arena. A box
+        # around it read as another object in the world, which is exactly what
+        # a key must not look like.
         LH, x_sw, x_tx = 15, 12, 46
         y = 52
-        top = y - 14
-        height = 14 + LH * 11 + 10
-        panel = QColor(20, 24, 27)
-        panel.setAlpha(215)
-        p.setBrush(QBrush(panel))
-        p.setPen(QPen(QColor(C_DIM).darker(140), 1))
-        p.drawRect(QRectF(6, top, 250, height))
         p.setBrush(Qt.NoBrush)
 
         def section(title):
@@ -2217,6 +2234,7 @@ class Console(QMainWindow):
         self._setup_fleet = None       # blue fleet name
         self._setup_red = None         # red fleet name
         self._doctrines = {}           # {agent_id: hold|intent} from Setup
+        self._fleet_docs = {}          # {side: fleet dict} built, NOT saved
         self._spawns = {}              # {agent_id: {x,y,z,yaw}} across sides
         self._blue_ids = set()
         self._red_ids = set()
@@ -2455,6 +2473,19 @@ class Console(QMainWindow):
             "        One link out of the squad - one link to lose.")
         self.route_combo.activated.connect(lambda _i: self._on_arch_chosen())
         slay.addWidget(self.route_combo)
+        # SAVE FLEET AS. The only thing that writes into fleets/. Explicit,
+        # because a fleet you are still experimenting with is not one you have
+        # decided to keep.
+        savrow = QHBoxLayout()
+        for _side, _lab in (("blue", "Save blue fleet as..."),
+                            ("red", "Save red fleet as...")):
+            b = QPushButton(_lab)
+            b.setToolTip("Write the fleet built this session to "
+                         "fleets/<name>.yaml. Nothing is saved until you "
+                         "press this.")
+            b.clicked.connect(lambda _c=False, sd=_side: self.save_fleet_as(sd))
+            savrow.addWidget(b)
+        slay.addLayout(savrow)
         self.lbl_arch = QLabel("")
         self.lbl_arch.setObjectName("hint")
         self.lbl_arch.setWordWrap(True)
@@ -2742,21 +2773,26 @@ class Console(QMainWindow):
             self._compose_setup()
             return
         fleet = combo.currentText()
+        built = None
         if fleet == CUSTOM_FLEET_ENTRY:
             fleet = self._build_custom_fleet(side)
             if not fleet:
                 combo.setCurrentIndex(0)
                 return
-            self._refresh_setup_lists()
-            i = combo.findText(fleet)
-            if i > 0:
-                combo.setCurrentIndex(i)
+            # It exists only in memory, so it is not in the dropdown list. Show
+            # it as the current text without pretending it is a saved file.
+            built = self._fleet_docs.get(side)
+            combo.setEditable(True)
+            combo.setEditText(f"{fleet}  (unsaved)")
+            combo.setEditable(False)
         if side == "red" and fleet == self._setup_fleet:
             self.say("Red and blue fleets must be different files.")
             combo.setCurrentIndex(0)
             return
         defaults = []
-        if _resolve_mission is not None:
+        if built is not None:
+            defaults = built.get("agents") or []
+        elif _resolve_mission is not None:
             try:
                 fdoc = _resolve_mission(
                     str(REPO_ROOT / "fleets" / f"{fleet}.yaml"))
@@ -2770,6 +2806,10 @@ class Console(QMainWindow):
             return
         # Replace this side's spawns; keep the other side's.
         self._clear_side(side)
+        if built is None:
+            # A saved fleet was picked - drop whatever was built in memory for
+            # this side, so the run never silently uses the wrong one.
+            self._fleet_docs.pop(side, None)
         new_spawns = dlg.spawns()
         self._doctrines.update(dlg.doctrines())
         if side == "red":
@@ -2786,31 +2826,67 @@ class Console(QMainWindow):
             f"SETMISSION <name> and blue launch")
 
     def _build_custom_fleet(self, side):
-        """Open the custom fleet builder, write the fleet file, return its
-        name (or None if cancelled). The file is a normal fleet from then on -
-        pickable, editable, diffable."""
+        """Open the fleet builder and hold the result IN MEMORY.
+
+        NOTHING IS WRITTEN TO DISK. A fleet you are still experimenting with is
+        not a fleet you have decided to keep, and a builder that saves on every
+        press fills fleets/ with abandoned attempts - which is the exact
+        problem emptying that folder was meant to solve. The composition is
+        inlined into the run instead, and only "Save fleet as..." writes a
+        file.
+
+        Returns the display name, or None if cancelled.
+        """
         dlg = CustomFleetDialog(side=side, parent=self)
         if dlg.exec() != QDialog.Accepted:
             return None
         name, doc = dlg.fleet_doc()
         if not doc.get("agents"):
-            self.say("Custom fleet needs at least one agent.")
+            self.say("A fleet needs at least one agent.")
             return None
+        self._fleet_docs[side] = doc
+        self.say(f"Built {name} in memory ({len(doc['agents'])} agents, "
+                 f"{side}) - NOT saved. Use 'Save fleet as...' to keep it.")
+        return name
+
+    def save_fleet_as(self, side="blue"):
+        """Write the in-memory fleet for this side to fleets/<name>.yaml.
+
+        The ONLY thing that creates a file in fleets/. Explicit, on purpose:
+        that folder should contain exactly the fleets you decided were worth
+        keeping and nothing else.
+        """
+        doc = (self._fleet_docs or {}).get(side)
+        if not doc:
+            self.say(f"No {side} fleet built in this session to save. "
+                     f"Build one first (Setup -> {side} fleet -> "
+                     f"{CUSTOM_FLEET_ENTRY}).")
+            return
         import yaml as _yaml
-        path = REPO_ROOT / "fleets" / f"{name}.yaml"
+        suggested = str(REPO_ROOT / "fleets" / f"{doc.get('name', side)}.yaml")
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save {side} fleet", suggested, "Fleet (*.yaml)")
+        if not path:
+            return
+        out = dict(doc)
+        out["name"] = Path(path).stem
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                "# Built in the Console's custom fleet builder.\n"
-                "# Values are NOMINAL, not measured - the provenance report "
-                "will say so.\n"
-                + _yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(
+                "# Saved from the Console's fleet builder.\n"
+                "# A COMPOSITION of agents/ hardware: which vehicles, their\n"
+                "# ids and where they start. It declares no authority, no\n"
+                "# routing and no doctrine - those are picked in Setup, every\n"
+                "# run, and are never baked in here.\n"
+                "# Dimensions and performance come from agents/; anything\n"
+                "# marked nominal is still nominal.\n"
+                + _yaml.safe_dump(out, sort_keys=False), encoding="utf-8")
         except OSError as exc:
             self.say(f"cannot write fleet: {exc}")
-            return None
-        self.say(f"Created fleets/{name}.yaml "
-                 f"({len(doc['agents'])} agents, {side})")
-        return name
+            return
+        self._refresh_setup_lists()
+        self.say(f"Saved {Path(path).name} ({len(out['agents'])} agents)")
+
 
     def _clear_side(self, side):
         ids = getattr(self, "_red_ids" if side == "red" else "_blue_ids", set())
@@ -2898,29 +2974,53 @@ class Console(QMainWindow):
         reload) takes a path, and a composed run should be as diffable and
         re-runnable as any other."""
         import yaml as _yaml
-        fleets = [f for f in (self._setup_fleet, self._setup_red) if f]
-        parts = [self._setup_scene] + fleets
+        # A fleet is either a SAVED FILE (referenced by name) or one BUILT IN
+        # MEMORY and never written (inlined here in full). Inlining keeps the
+        # composed run completely self-describing either way: current_setup
+        # always says what actually ran, whether or not you chose to keep the
+        # fleet afterwards.
+        named, inline_agents, inline_nets = [], [], {}
+        for side, fname in (("blue", self._setup_fleet),
+                            ("red", self._setup_red)):
+            if not fname:
+                continue
+            built = (self._fleet_docs or {}).get(side)
+            if built is not None:
+                inline_agents += copy.deepcopy(built.get("agents") or [])
+                inline_nets.update(copy.deepcopy(built.get("networks") or {}))
+            else:
+                named.append(fname)
+        parts = [self._setup_scene] + [f for f in (self._setup_fleet,
+                                                   self._setup_red) if f]
         doc = {"spec_version": 0.1, "name": " + ".join(p for p in parts if p),
                "scene": self._setup_scene}
-        if fleets:
-            doc["fleets"] = fleets
+        if named:
+            doc["fleets"] = named
         # ARCHITECTURE OVERRIDE from the Setup pickers. Written into the
         # composed run, so it is diffable, re-runnable and lands in the CSV's
         # meta sidecar. _overlay merges one level into each network, so blue
         # keeps its coordinator, band and radios.
         arch = self._arch_override()
-        if arch:
-            doc["networks"] = arch
+        nets = dict(inline_nets)
+        for k, v in (arch or {}).items():
+            nets[k] = {**(nets.get(k) or {}), **v}
+        if nets:
+            doc["networks"] = nets
         if self._spawns:
             # DOCTRINE rides with the spawn, because both are per-agent
             # decisions taken in the same dialog. _overlay merges agent
             # entries by id, so this adds on_link_loss without disturbing the
             # hardware the fleet declared.
+            bodies = {a.get("id"): a for a in inline_agents}
             doc["agents"] = [
-                dict({"id": aid, "pose": pose},
-                     **({"on_link_loss": self._doctrines[aid]}
-                        if aid in getattr(self, "_doctrines", {}) else {}))
+                dict(copy.deepcopy(bodies.get(aid, {})),
+                     **dict({"id": aid, "pose": pose},
+                            **({"on_link_loss": self._doctrines[aid]}
+                               if aid in getattr(self, "_doctrines", {})
+                               else {})))
                 for aid, pose in self._spawns.items()]
+        elif inline_agents:
+            doc["agents"] = inline_agents
         path = REPO_ROOT / "runs" / "current_setup.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         header = ("# Composed by the Console's Setup tab - scene + fleets + "
