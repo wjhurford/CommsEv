@@ -711,13 +711,25 @@ class Viewport(QWidget):
         p.setPen(QPen(QColor(C_TEXT if selected else C_DIM)))
         p.setFont(QFont("Consolas", 8))
         p.drawText(self.to_screen(x, y, z) + QPointF(9, -7), str(agent.get("id", "")))
-        # An agent holding because it lost its commander under jamming: say so
-        # on the map, so a frozen car reads as "cut off", not "arrived".
-        if agent.get("link_loss_hold"):
-            p.setPen(QPen(QColor(NETWORK_COLOURS["red"])))
+        # WHAT IT IS DOING ABOUT IT. The fill says nobody is commanding this
+        # vehicle; this says which doctrine it is following in response, which
+        # is the variable the whole experiment turns on:
+        #
+        #   held    on_link_loss: hold - frozen until the link returns. Without
+        #           this label a stopped car reads as "arrived", not "cut off".
+        #   intent  on_link_loss: intent - still executing the objective it was
+        #           already given, on the picture it already has (AJP-3 3.8,
+        #           3.11). This was INVISIBLE: a car acting on delegated intent
+        #           looked exactly like a normally commanded one, which is the
+        #           single most important state the doctrine experiment is
+        #           about.
+        note = ("⊘ held (no commander)" if agent.get("link_loss_hold")
+                else "→ intent (no commander)" if agent.get("on_intent")
+                else None)
+        if note:
+            p.setPen(QPen(QColor("#E08A3C")))
             p.setFont(QFont("Consolas", 7))
-            p.drawText(self.to_screen(x, y, z) + QPointF(9, 6),
-                       "⊘ held (link loss)")
+            p.drawText(self.to_screen(x, y, z) + QPointF(9, 6), note)
 
     def _jammer_range(self, agent):
         """Nominal influence radius (m) of a jammer agent, from whichever
@@ -818,7 +830,19 @@ class Viewport(QWidget):
             pose = a.get("pose", {})
             tp = self.to_screen(_num(pose.get("x")), _num(pose.get("y")), 0)
             bp = self.to_screen(_num(bel.get("x")), _num(bel.get("y")), 0)
-            col = QColor("#E08A3C")
+            # THREE RULES, NO EXCEPTIONS - so a glance decodes without a key:
+            #   SOLID  = truth (the vehicle)      HOLLOW = belief (the ghost)
+            #   COLOUR = command state, on both. Network colour when the agent's
+            #            decider is reachable, orange when it is not.
+            # The ghost used to be orange ALWAYS. Once orange started meaning
+            # "cut off" on the fill, a blue commanded car with an orange ghost
+            # read as a contradiction. It is the same fact drawn twice, so it
+            # must be the same colour twice: a commanded-but-lost car is a solid
+            # blue car with a hollow BLUE ghost - which is the GNSS-only
+            # condition, and the one with no alarm anywhere.
+            col = (QColor("#E08A3C")
+                   if not (a.get("authority") or {}).get("reachable", True)
+                   else QColor(a.get("colour") or "#2E6FB0").lighter(130))
             pen = QPen(col, 1.2, Qt.DotLine)
             p.setPen(pen)
             p.drawLine(tp, bp)
@@ -1003,16 +1027,26 @@ class Viewport(QWidget):
         y0 += 17
         # AGENT FILL. The second channel: links say what the network is doing,
         # fill says whether any of it is reaching this particular vehicle.
-        for label, fill in (("commanded", QColor(base)),
-                            ("cut off - no reachable commander",
-                             QColor("#E08A3C"))):
-            p.setBrush(QBrush(fill))
-            p.setPen(QPen(QColor(base).lighter(150), 1))
+        for label, fill, solid in (
+                ("commanded", QColor(base), True),
+                ("cut off - no reachable commander", QColor("#E08A3C"), True),
+                ("hollow = where it BELIEVES it is", QColor(base), False)):
+            p.setBrush(QBrush(fill) if solid else Qt.NoBrush)
+            p.setPen(QPen(QColor(base).lighter(150) if solid
+                          else QColor(base).lighter(130), 1))
             p.drawRect(QRectF(10, y0 - 9, 22, 9))
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(C_DIM)))
             p.drawText(40, y0, label)
             y0 += 13
+        # The two labels a cut-off vehicle can carry. Which one appears is the
+        # doctrine it is following, and it is the experiment's whole variable.
+        p.setPen(QPen(QColor("#E08A3C")))
+        p.setFont(QFont("Consolas", 8))
+        p.drawText(10, y0, "\u2298 held   \u2192 intent")
+        p.setPen(QPen(QColor(C_DIM)))
+        p.drawText(88, y0, "= doctrine, once cut off")
+        y0 += 13
         s = self.scale()
         if s > 2:
             p.drawLine(10, self.height() - 16, 10 + int(s), self.height() - 16)
