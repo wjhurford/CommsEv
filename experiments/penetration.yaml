@@ -1,0 +1,80 @@
+# =============================================================================
+# Deadband EXPERIMENT — penetration
+# =============================================================================
+# HOW FAR CAN A FLEET ADVANCE INTO CONTESTED SPECTRUM BEFORE IT LOSES COMMAND,
+# AND DOES ITS ARCHITECTURE CHANGE THE ANSWER?
+#
+# A wedge of three vehicles advances down a 200 m corridor away from its
+# ground station and toward a jammer. Every vehicle is on the `hold` doctrine:
+# lose your commander and you stop. The run ends when every vehicle has either
+# arrived or been cut off - there is nothing left to measure once nobody can
+# move.
+#
+# THE MECHANISM UNDER TEST, and it is emergent rather than scripted: the apex
+# vehicle is furthest from home AND closest to the jammer, so it fails first
+# and stops. The two behind it keep advancing, pass it, and it becomes a
+# STATIONARY RELAY sitting between them and home. On a mesh they can route
+# through it and push further; on a star they cannot, and they die at their own
+# limit. The formation stretches itself into a relay chain because of the
+# doctrine, not because anybody laid it out that way.
+#
+# THE AXIS IS DIMENSIONLESS. `jam_rel_db` is the jammer's power relative to the
+# fleet's own radios (P_j / P_t, in dB). The absolute powers cancel out of the
+# physics - only the power ratio and the distance ratio matter - so a result
+# stated in these units holds for any radio at any scale, rather than being a
+# fact about one 2.4 GHz module in one lab.
+#
+#     python3 tools/sweep.py experiments/penetration.yaml
+# =============================================================================
+
+spec_version: 0.1
+name: penetration
+kind: experiment
+
+description: >
+  A three-vehicle wedge advances 190 m down a corridor under narrowband
+  jamming, across all nine authority x routing combinations and three jammer
+  power ratios. Measures how far it got.
+
+scene: corridor_200m
+blue_fleet: 3_roboracer_no_lidar
+red_fleet: red_comms
+mission: advance
+
+duration_s: 400.0        # a hard ceiling; the run normally ends before this
+warmup_s: 5.0            # clean spectrum while they get moving
+rate_hz: 10.0
+
+# Ends the run the moment every vehicle has arrived or been cut off. Without
+# this the grid spends most of its time simulating stationary cars.
+stop_when_stalled: true
+stall_grace_s: 5.0
+
+# --- the wedge ---------------------------------------------------------------
+# Apex forward: car1 leads, car2 and car3 abreast behind it. car1 is therefore
+# the first to lose command, and the first to become a relay.
+spawns:
+  gcs:  {x: -95.0, y:  0.0}
+  car1: {x: -89.0, y:  0.0}
+  car2: {x: -93.0, y:  3.0}
+  car3: {x: -93.0, y: -3.0}
+  jam1: {x:  95.0, y:  0.0}     # far end of the corridor
+
+doctrine: hold                  # every vehicle. Lose command -> stop.
+
+# --- what is varied ----------------------------------------------------------
+axes:
+  authority: [centralized, decentralized, hierarchical]
+  routing:   [star, mesh, tiered]
+  # P_j / P_t in dB. 0 = the jammer is exactly as loud as a fleet radio;
+  # +20 dB = a hundred times the power.
+  jam_rel_db: [0, 10, 20]
+
+seeds: [1, 2, 3]
+
+squads:
+  alpha: {leader: car1, members: [car2, car3]}
+coordinator: gcs
+leader_loss: fallback
+
+goal: FAR                       # complete success = every vehicle reaches it

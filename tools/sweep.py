@@ -82,6 +82,12 @@ import yaml  # noqa: E402
 import stub_telemetry as st  # noqa: E402
 
 JAM_OFF = -999.0        # sentinel power meaning "the emitter is silent"
+# The fleet's own transmit power. rf_link()'s default, and the reference every
+# relative jammer power is measured against: jam_rel_db = P_j - P_t.
+FLEET_TX_DBM = 20.0
+# How close counts as arrived. One vehicle length - a car whose nose is at the
+# goal has got there.
+ARRIVE_TOL_M = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +135,29 @@ def build(cfg, cell):
     # configuration of a single vehicle carrying two transmitters, and it is
     # the honest way to attack two bands at full power rather than pretending
     # one emitter's power covers both for free.
+    # SPAWNS and DOCTRINE from the experiment file. Both are decisions, so
+    # they live with the experiment rather than in a fleet.
+    for aid, xy in (cfg.get("spawns") or {}).items():
+        a = by.get(aid)
+        if a is not None:
+            a["start"].update({k: float(v) for k, v in xy.items()})
+    doct = cfg.get("doctrine")
+    if doct:
+        for a in agents:
+            if not a.get("jammer") and a.get("platform") != "ground_station":
+                a["on_link_loss"] = doct
+
+    # P_j / P_t. The sweep parameter is the jammer's power RELATIVE to the
+    # fleet's own radios, which is the dimensionless quantity the physics
+    # actually depends on. Absolute dBm is derived from it here and nowhere
+    # else, so no result is ever expressed in units that only mean something
+    # for this particular radio.
     jam_cfg = cfg.get("jammer") or {}
     base_id = jam_cfg.get("id", "jam1")
-    bands = list(jam_cfg.get("bands_mhz") or [2400])
+    bands = list(jam_cfg.get("bands_mhz") or [])
+    if not bands:
+        _b = ((by.get(base_id) or {}).get("jammer") or {}).get("band")
+        bands = [st._qty(_b, 2400.0)]
     base = by.get(base_id)
     if base is not None:
         armed = cell["jam_dbm"] > JAM_OFF / 2
@@ -185,6 +211,11 @@ def run_one(args):
     """
     cfg, cell, want_frames = args
     t_start = time.time()
+    # P_j / P_t -> absolute dBm, once, here. The sweep parameter stays the
+    # dimensionless ratio everywhere else.
+    if "jam_rel_db" in cell and "jam_dbm" not in cell:
+        cell = dict(cell)
+        cell["jam_dbm"] = FLEET_TX_DBM + float(cell["jam_rel_db"])
     try:
         arena, agents, links, blue_ids = build(cfg, cell)
     except Exception as exc:                       # a broken cell is reported
@@ -213,6 +244,20 @@ def run_one(args):
     acc = {"cmd": [], "held": [], "dist": 0.0, "track": [], "belief": [],
            "sinr": [], "pdr": []}
     frames = []
+
+    # PENETRATION. The outcome metric: how far each vehicle actually got,
+    # measured from where it started, as the furthest it ever reached rather
+    # than where it ended - a vehicle that advanced and was then pushed back
+    # by a collision still got there.
+    x0 = {i: poses[i]["x"] for i in blue_ids}
+    deepest = dict(x0)
+    goal_x = None
+    gname = cfg.get("goal")
+    if gname:
+        gpt = (arena.get("points") or {}).get(gname) or {}
+        goal_x = gpt.get("x")
+    stalled_since = None
+    ended_at = None
 
     for k in range(n):
         t = k * dt
@@ -248,12 +293,58 @@ def run_one(args):
             acc["sinr"].append(w["sinr_db"])
             acc["pdr"].append(w["pdr"])
 
+        for i in blue_ids:
+            if poses[i]["x"] > deepest[i]:
+                deepest[i] = poses[i]["x"]
+
+        # END THE RUN WHEN THERE IS NOTHING LEFT TO MEASURE. Every vehicle has
+        # either arrived or lost its commander, so nobody can advance further.
+        # A grace period avoids stopping on a single frame's flicker as a
+        # marginal link drops in and out.
+        if cfg.get("stop_when_stalled", True):
+            done = True
+            for a in blue_out:
+                arrived = (goal_x is not None
+                           and poses[a["id"]]["x"] >= goal_x - ARRIVE_TOL_M)
+                cut = not (a["authority"] or {}).get("reachable", True)
+                if not (arrived or cut):
+                    done = False
+                    break
+            if done and blue_out:
+                if stalled_since is None:
+                    stalled_since = t
+                elif t - stalled_since >= float(cfg.get("stall_grace_s", 5.0)):
+                    ended_at = t
+                    break
+            else:
+                stalled_since = None
+
     def mean(xs):
         return round(sum(xs) / len(xs), 4) if xs else None
+
+    pen = {i: deepest[i] - x0[i] for i in blue_ids}
+    reach = ([i for i in blue_ids
+              if goal_x is not None and deepest[i] >= goal_x - ARRIVE_TOL_M]
+             if goal_x is not None else [])
+    full = 0.0
+    if goal_x is not None and blue_ids:
+        full = max((goal_x - x0[i]) for i in blue_ids) or 1.0
 
     row = {
         **cell,
         "runs_agents": len(blue_ids),
+        # THE HEADLINE. How far the fleet advanced, in metres and as a
+        # fraction of the corridor it was asked to cross. A complete success
+        # is every vehicle at the goal: penetration_frac 1.0, arrived 3.
+        "penetration_m": round(sum(pen.values()) / max(len(pen), 1), 2),
+        "penetration_max_m": round(max(pen.values()) if pen else 0.0, 2),
+        "penetration_min_m": round(min(pen.values()) if pen else 0.0, 2),
+        "penetration_frac": round(
+            (sum(pen.values()) / max(len(pen), 1)) / full, 4) if full else None,
+        "arrived": len(reach),
+        "complete_success": int(bool(blue_ids)
+                                and len(reach) == len(blue_ids)),
+        "ended_s": round(ended_at, 1) if ended_at is not None else None,
         "commanded_fraction": mean(acc["cmd"]),
         "held_fraction": mean(acc["held"]),
         "distance_m": round(acc["dist"] / max(len(blue_ids), 1), 3),
@@ -346,7 +437,11 @@ def main(argv=None):
         rows = [run_one(p) for p in payload]
     rows.sort(key=lambda r: r.get("cell", ""))
 
-    fields = (names + ["seed", "cell", "runs_agents", "commanded_fraction",
+    fields = (names + ["seed", "cell", "runs_agents",
+                       "penetration_m", "penetration_frac",
+                       "penetration_max_m", "penetration_min_m",
+                       "arrived", "complete_success", "ended_s",
+                       "commanded_fraction",
                        "held_fraction", "distance_m", "track_err_m",
                        "belief_err_m", "worst_sinr_db", "worst_pdr",
                        "wall_s", "error"])

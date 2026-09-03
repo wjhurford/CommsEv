@@ -1,0 +1,32 @@
+# =============================================================================
+# Deadband MISSION — advance
+# =============================================================================
+# The penetration experiment's command: every vehicle drives from its spawn
+# toward FAR and stops there. Nothing turns around, nothing loops.
+#
+# This is the framework's first TERMINATING objective. Everything before it
+# was cyclic (shuttle, patrol, orbit) or reactive (pursuit, wall_follow), and
+# a cyclic objective has no penetration depth to measure - a shuttling car
+# comes back.
+#
+# Each vehicle holds its own lane while advancing, so a wedge keeps its shape
+# until the link-loss doctrine breaks it. That break is the effect under test:
+# a car that loses command STOPS, becomes a stationary relay, and - on a mesh
+# - lets the cars still moving push further than they could alone.
+#
+#     SETMISSION advance
+#     blue launch
+# =============================================================================
+
+spec_version: 0.1
+name: advance
+kind: mission
+
+description: >
+  Every vehicle advances to FAR and stops. The penetration command: how far
+  can this fleet get into contested spectrum before it loses command?
+
+objectives:
+  car1: {do: advance, to: FAR}
+  car2: {do: advance, to: FAR}
+  car3: {do: advance, to: FAR}

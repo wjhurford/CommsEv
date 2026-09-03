@@ -1,0 +1,56 @@
+# =============================================================================
+# Deadband SCENE — corridor_200m
+# =============================================================================
+# The penetration experiment. A 200 m corridor with the ground station at one
+# end and the adversary at the other. A fleet advances from HOME toward FAR
+# and gets progressively further from its commander AND closer to the jammer -
+# a double gradient, which is exactly what a single centrally-placed emitter
+# fails to produce.
+#
+# WHY THE GEOMETRY MATTERS. In a 20 m box a jammer sits roughly equidistant
+# from everything, so every link degrades together and the topology has
+# nothing to route around. Stretched over 200 m the links differ by tens of
+# dB at the same instant, and whether a fleet can relay around the weak ones
+# becomes the whole question.
+#
+# GNSS is available, so a GNSS-band jammer is a separate, deliberate attack
+# rather than a property of the room. Open ground: no walls for a lidar to
+# localise against.
+# =============================================================================
+
+spec_version: 0.1
+name: corridor_200m
+kind: scene
+
+description: >
+  200 x 40 m open corridor. Ground station at one end, adversary at the other.
+  The rig for measuring how far a fleet can advance into contested spectrum
+  before it loses command.
+
+arena:
+  type: box
+  extent: {x: 200.0, y: 40.0, z: 20.0}
+  surface_reflectivity: low
+  boundaries: {x_min: open, x_max: open, y_min: open, y_max: open}
+
+background:
+  propagation:
+    path_loss_exponent: {value: 2.2, unit: "", source: ""}   # near free space
+    noise_floor: {value: -95, unit: dBm, source: ""}
+  spectrum:
+    band: {value: 2400, unit: MHz, source: ""}
+  gnss:
+    availability: available
+  wind:
+    speed: {value: 0.0, unit: "m/s", source: ""}
+
+points:
+  # The corridor runs -100 -> +100 in scene coordinates; HOME and FAR are the
+  # two ends. Penetration depth is measured from HOME, so "reached FAR" is a
+  # complete success at 195 m advanced.
+  HOME: {x: -95.0, y: 0.0}
+  FAR:  {x:  95.0, y: 0.0}
+  # Formation slots for the wedge: apex forward, two abreast behind.
+  APEX:  {x: -89.0, y:  0.0}
+  WINGL: {x: -93.0, y:  3.0}
+  WINGR: {x: -93.0, y: -3.0}

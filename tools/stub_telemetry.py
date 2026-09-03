@@ -775,6 +775,17 @@ def validate_objective(mission_dict, points, arena):
     """
     if not isinstance(mission_dict, dict):
         return False, "not an objective"
+    if mission_dict.get("type") == "advance":
+        # An advance is rejected at ASSIGNMENT time if its goal does not
+        # resolve or lands outside the arena - the same gate shuttle gets, and
+        # for the same reason: a bad objective must be refused with a reason,
+        # never silently turned into something else mid-run.
+        ok, x, y, _z, err = resolve_waypoint(mission_dict.get("to"), points)
+        if not ok:
+            return False, err
+        if not _in_bounds(x, y, arena):
+            return False, f"advance goal ({x:.1f}, {y:.1f}) is outside the arena"
+        return True, None
     if mission_dict.get("type") != "shuttle":
         return True, None
 
@@ -888,6 +899,32 @@ def mission_target(agent, t, poses, arena):
                 return (p0[0] + (p1[0] - p0[0]) * u, p0[1] + (p1[1] - p0[1]) * u)
             d -= L
         return (start["x"], start["y"])
+
+    if kind == "advance":
+        # ADVANCE TO A POINT AND STOP. Every other objective is cyclic or
+        # reactive - shuttle turns around, patrol loops, orbit circles - so
+        # none of them can express "get as far as you can and hold there",
+        # which is the only shape that has a PENETRATION DEPTH to measure.
+        #
+        # It is also the framework's first TERMINATING objective, which is
+        # what makes `intent` and `continue` finally distinguishable: mission
+        # command says a subordinate acts within the commander's intent, and
+        # once the assigned effect is achieved it seeks new direction rather
+        # than inventing a next task. An advance that has arrived is done.
+        pts = arena.get("points") or {}
+        ok, gx, gy, _gz, err = resolve_waypoint(m.get("to"), pts)
+        if not ok:
+            if not agent.get("_warned_bad_advance"):
+                agent["_warned_bad_advance"] = True
+                print(f"objective for {agent['id']}: {err} - holding position",
+                      file=sys.stderr)
+            here = poses.get(agent["id"]) or start
+            return (here["x"], here["y"])
+        # The agent keeps its own lane: it advances along x to the goal's x,
+        # holding the y it started on, so a formation ADVANCES rather than
+        # collapsing onto one point and colliding. The wedge keeps its shape
+        # until the doctrine breaks it, which is the effect under test.
+        return (gx, start["y"] if m.get("keep_lane", True) else gy)
 
     if kind == "pursuit":
         tgt = poses.get(m.get("target"))
@@ -2144,6 +2181,10 @@ def _parse_objective_verb(verb, args):
     verb = verb.lower()
     if verb in ("stop", "static", "hold"):
         return {"type": "static"}
+    if verb in ("advance", "goto", "push"):
+        # 'advance FAR' - drive to that named point and stop there.
+        return {"type": "advance", "to": (_parse_position_token(args[0])
+                                          if args else "FAR")}
     if verb in ("pursuit", "pursue"):
         return {"type": "pursuit", "target": args[0] if args else "car1"}
     if verb == "shuttle":
@@ -2171,6 +2212,7 @@ def parse_retask(text, agents_by_id):
     The grammar is deliberately the same words a person would say out loud:
 
         car3: pursue car1
+        car3: advance FAR
         car3: shuttle between E F
         car3: shuttle (-3,3,0) (3,3,0)
         car3: wall_follow right
