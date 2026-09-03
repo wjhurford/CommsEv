@@ -4,6 +4,6 @@ exe     C:\Users\will-\AppData\Local\Programs\Python\Python313\pythonw.exe
 repo    C:\Users\will-\Documents\repos\deadband
 ------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\will-\Documents\repos\deadband\console\app.py", line 2297, in paintEvent
+  File "C:\Users\will-\Documents\repos\deadband\console\app.py", line 2304, in paintEvent
     p = QPainter(self)
 TypeError: Error calling Python override of QWidget::metric(): 'str' object is not callable

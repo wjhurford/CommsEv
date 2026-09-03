@@ -2318,14 +2318,31 @@ class ResultPlot(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(24, 28, 31))
         series = self._series()
-        L, R, T, B = 66, 20, 18, 44
+        # PROOF OF LIFE, drawn before anything else can fail. A blank black
+        # rectangle is ambiguous between "no data", "crashed while drawing"
+        # and "this widget is never painted at all", and you cannot tell
+        # which by looking - which cost an afternoon. The border and this one
+        # line make all three distinguishable at a glance.
+        p.setPen(QPen(QColor(60, 68, 74), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(0, 0, self.width() - 1, self.height() - 1)
+        p.setPen(QPen(QColor(C_DIM).darker(120)))
+        p.setFont(QFont("Consolas", 7))
+        p.drawText(6, 11, f"{self.width()}x{self.height()}  "
+                          f"{len(self.rows)} rows  {len(series)} series")
+        L, R, T, B = 66, 20, 26, 44
         w, h = self.width() - L - R, self.height() - T - B
         if w < 60 or h < 40:
+            p.setPen(QPen(QColor("#D2694F")))
+            p.setFont(QFont("Consolas", 9))
+            p.drawText(10, 30, f"too small to draw ({w} x {h})")
             return
         if not series:
             p.setPen(QPen(QColor(C_DIM)))
             p.setFont(QFont("Consolas", 9))
-            p.drawText(L, T + 24, "Run an experiment to see results.")
+            p.drawText(L, T + 24,
+                       "No rows selected. Run an experiment, or tick a "
+                       "P_j/P_t value below.")
             return
 
         xs = [x for pts in series.values() for x, _ in pts]
@@ -2572,7 +2589,7 @@ class ExperimentWindow(QDialog):
         if self.console is not None and frames:
             self.console.play_frames(frames, title=cell)
         self.bar.setFormat(f"opened {cell}  ({len(frames)} frames) - "
-                           f"the Console is showing the END of this run")
+                           f"playing in the Console")
 
 
 # ---------------------------------------------------------------------------
@@ -3326,17 +3343,22 @@ class Console(QMainWindow):
         # unlabelled - which looks exactly like a replay that did not load.
         # The last frame is where the run ENDED: who was cut off, who was
         # held, how far each got. Scrub backwards to watch it happen.
-        last = len(self.frames) - 1
-        self.timeline.setValue(last)
-        self.on_scrub(last)
+        # START AT THE BEGINNING AND PLAY. The point of opening a run is to
+        # WATCH it - the vehicles advancing, one dropping out, the rest
+        # pushing past it. Landing on the last frame showed the outcome and
+        # hid the mechanism, which is the interesting half.
+        self.timeline.setValue(0)
+        self.on_scrub(0)
+        if hasattr(self, "play_button"):
+            self.play_button.setChecked(True)
+            self.toggle_playback(True)
         # The result lives in the main window, so bring it to the front - the
         # experiment window is usually covering it.
         self.raise_()
         self.activateWindow()
         if title:
             self.say(f"Opened {title} - {len(self.frames)} frames, showing the "
-                     f"END of the run. Drag the timeline back, or press play, "
-                     f"to watch it happen.")
+                     f"playing from the start. Drag the timeline to scrub.")
 
     def open_experiment(self):
         """The experiment window: run a sweep, read the table, watch a run."""
@@ -4199,14 +4221,36 @@ class Console(QMainWindow):
         f = self.frames[index]
         self.plots.cursor = index
         self.plots.refresh()
-        self.latest = {a.get("id"): a for a in f.get("agents", [])}
-        self.viewport.agents = f.get("agents", [])
+        agents = f.get("agents", [])
+        self.latest = {a.get("id"): a for a in agents}
+        self.viewport.agents = agents
         self.viewport.links = f.get("links", [])
         self.viewport.arena = f.get("arena") or self.viewport.arena
         self.viewport.update()
         self.refresh_sensor_view()
+        # EVERY PANEL, NOT JUST THE MAP. Scrubbing used to move the vehicles
+        # and leave the Comms, Network, Contested and Publications trees
+        # showing whatever the last LIVE frame had put there - so a replayed
+        # run looked half-dead, and clicking an agent told you nothing. A
+        # frame is a frame: a scrubbed one deserves the same treatment as a
+        # streamed one, which is the whole point of the run being replayable.
+        try:
+            self.fill_publications_from_telemetry(agents)
+            self.fill_comms(f.get("links", []))
+            self._refresh_contested(f)
+            self._refresh_network(f)
+            self._refresh_band_strip(f)
+            self._refresh_live_objectives()
+        except Exception as exc:                       # noqa: BLE001
+            self.say(f"scrub: panel refresh failed: {exc}")
         self.time_label.setText(
             f"t = {f.get('sim_time_s', 0):.1f} s   frame {index + 1}/{len(self.frames)}")
+        down = sum(1 for l in self.viewport.links if l.get("state") != "up")
+        self.statusBar().showMessage(
+            f"REPLAY   t={f.get('sim_time_s', 0):.1f}s   "
+            f"frame {index + 1}/{len(self.frames)}   "
+            f"agents {len(agents)}   "
+            f"links {len(self.viewport.links)} ({down} degraded)")
 
     _CELL_COLOUR = {"blue": "#2E6FB0", "red": "#C4685A", "white": "#B8C0C6"}
 
