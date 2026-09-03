@@ -2028,10 +2028,12 @@ class SpawnDialog(QDialog):
                      "own. x/y in metres, yaw in radians.")
         lab.setWordWrap(True)
         lay.addWidget(lab)
-        self.table = QTableWidget(len(agents), 5)
-        self.table.setHorizontalHeaderLabels(["Agent", "x", "y", "z", "yaw"])
+        self.table = QTableWidget(len(agents), 6)
+        self.table.setHorizontalHeaderLabels(
+            ["Agent", "x", "y", "z", "yaw", "on link loss"])
         self.table.verticalHeader().setVisible(False)
         self._ids = []
+        self._doctrine = {}
         for r, a in enumerate(agents):
             pose = a.get("pose") or {}
             aid = str(a.get("id", f"agent{r}"))
@@ -2045,6 +2047,33 @@ class SpawnDialog(QDialog):
             for c, key in ((1, "x"), (2, "y"), (3, "z"), (4, "yaw")):
                 self.table.setItem(
                     r, c, QTableWidgetItem(str(_num(pose.get(key)))))
+            # DOCTRINE, PER AGENT. What this vehicle does when it cannot reach
+            # whoever commands it. Per agent, not per fleet, because the
+            # interesting configuration is a MIXED one - a leader that holds
+            # while its members act on the commander's intent - and that
+            # cannot be said with a fleet-wide setting at all.
+            #
+            # It is here rather than in the fleet file because it is a
+            # DECISION, not hardware. A fleet file that hardcodes it forces a
+            # near-duplicate file per doctrine; this is one dropdown.
+            box = QComboBox()
+            box.addItems(["hold", "intent"])
+            box.setToolTip(
+                "hold    freeze until the link returns - the conservative\n"
+                "        default, and what most autopilot failsafes do.\n"
+                "intent  keep executing the objective already assigned, from\n"
+                "        the picture already held. NATO mission command:\n"
+                "        centralized intent, decentralized execution\n"
+                "        (AJP-3 Ed D V1, paras 3.8 and 3.11).")
+            cur = str(a.get("on_link_loss") or "hold").lower()
+            box.setCurrentText("intent" if cur in ("intent", "continue")
+                               else "hold")
+            # A jammer or a ground station has no commander to lose.
+            if a.get("jammer") or a.get("platform") == "ground_station":
+                box.setEnabled(False)
+                box.setToolTip("Not applicable - this agent has no commander.")
+            self._doctrine[aid] = box
+            self.table.setCellWidget(r, 5, box)
         self.table.resizeColumnsToContents()
         lay.addWidget(self.table)
         row = QHBoxLayout()
@@ -2069,6 +2098,11 @@ class SpawnDialog(QDialog):
                     return fallback
             out[aid] = {"x": val(1), "y": val(2), "z": val(3), "yaw": val(4)}
         return out
+
+    def doctrines(self):
+        """{agent_id: 'hold'|'intent'} for agents that have a commander."""
+        return {aid: box.currentText()
+                for aid, box in self._doctrine.items() if box.isEnabled()}
 
 
 # ---------------------------------------------------------------------------
@@ -2110,6 +2144,7 @@ class Console(QMainWindow):
         self._setup_scene = None
         self._setup_fleet = None       # blue fleet name
         self._setup_red = None         # red fleet name
+        self._doctrines = {}           # {agent_id: hold|intent} from Setup
         self._spawns = {}              # {agent_id: {x,y,z,yaw}} across sides
         self._blue_ids = set()
         self._red_ids = set()
@@ -2279,6 +2314,19 @@ class Console(QMainWindow):
         slay = QVBoxLayout(setup)
         slay.setContentsMargins(6, 6, 6, 6)
         slay.setSpacing(4)
+        # RUN MODE, first, because it decides what the rest of this tab means.
+        slay.addWidget(QLabel("Run"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Sandbox - one run, watched live",
+                                  "Experiment - swept, headless (not built)"])
+        self.mode_combo.setToolTip(
+            "Sandbox    one run you watch and can interfere with: retask mid-\n"
+            "           run, tune the jammer live, pick the architecture below.\n"
+            "Experiment many runs, parallel, nothing interactive - every\n"
+            "           choice is made before it starts. Not built yet.")
+        self.mode_combo.model().item(1).setEnabled(False)
+        self.mode_combo.activated.connect(self._on_mode_chosen)
+        slay.addWidget(self.mode_combo)
         slay.addWidget(QLabel("Scene"))
         self.scene_combo = QComboBox()
         self.scene_combo.setToolTip("The world: arena, radio background, "
@@ -2301,6 +2349,44 @@ class Console(QMainWindow):
         self.red_combo.setEnabled(False)
         self.red_combo.activated.connect(lambda i: self.on_fleet_chosen(i, "red"))
         slay.addWidget(self.red_combo)
+        # ARCHITECTURE. The two axes the whole project is about, and until now
+        # the one thing you could not change without editing a YAML by hand.
+        # They are INDEPENDENT and set independently - authority is who
+        # decides, routing is how packets travel - which is the separation the
+        # framework exists to demonstrate.
+        #
+        # "(from fleet)" means: leave whatever the fleet file declared. Pick
+        # anything else and it is an OVERRIDE, recorded in the composed run and
+        # therefore in the CSV's meta sidecar. A setting you cannot trace back
+        # from the results is worse than no setting.
+        slay.addWidget(QLabel("Command authority (who decides)"))
+        self.auth_combo = QComboBox()
+        self.auth_combo.addItems(["(from fleet)", "centralized",
+                                  "decentralized", "hierarchical"])
+        self.auth_combo.setToolTip(
+            "centralized    one coordinator decides for everyone. Lose the\n"
+            "               link to it and you have no orders.\n"
+            "decentralized  every agent decides for itself. Losing a link\n"
+            "               costs information, never authority.\n"
+            "hierarchical   agents answer to a squad leader, leaders answer\n"
+            "               up. Degraded rather than decapitated - but only\n"
+            "               if the ROUTING carries the squad links.")
+        self.auth_combo.activated.connect(lambda _i: self._on_arch_chosen())
+        slay.addWidget(self.auth_combo)
+        slay.addWidget(QLabel("Routing (how packets travel)"))
+        self.route_combo = QComboBox()
+        self.route_combo.addItems(["(from fleet)", "star", "mesh", "tiered"])
+        self.route_combo.setToolTip(
+            "star    every agent to the hub, no peer links.\n"
+            "mesh    everything to everything. Authority can relay.\n"
+            "tiered  the squad meshes internally; only the leader talks up.\n"
+            "        One link out of the squad - one link to lose.")
+        self.route_combo.activated.connect(lambda _i: self._on_arch_chosen())
+        slay.addWidget(self.route_combo)
+        self.lbl_arch = QLabel("")
+        self.lbl_arch.setObjectName("hint")
+        self.lbl_arch.setWordWrap(True)
+        slay.addWidget(self.lbl_arch)
         self.lbl_mission = QLabel("Mission: UNASSIGNED")
         self.lbl_mission.setToolTip(
             "Set from the terminal once the run is started:\n"
@@ -2613,6 +2699,7 @@ class Console(QMainWindow):
         # Replace this side's spawns; keep the other side's.
         self._clear_side(side)
         new_spawns = dlg.spawns()
+        self._doctrines.update(dlg.doctrines())
         if side == "red":
             self._setup_red = fleet
             self._red_ids = set(new_spawns)
@@ -2663,6 +2750,73 @@ class Console(QMainWindow):
         else:
             self._setup_fleet = None
             self._blue_ids = set()
+        # Doctrine is a per-agent Setup decision, so it is cleared with the
+        # spawns it was taken alongside - a stale doctrine for an agent that
+        # is no longer in the run is exactly the kind of ghost setting that
+        # makes a result impossible to explain.
+        for aid in list(getattr(self, "_doctrines", {})):
+            if aid in ids:
+                self._doctrines.pop(aid, None)
+
+
+    def _on_mode_chosen(self, _index):
+        """Sandbox enables the live controls; Experiment will disable them and
+        move every choice into the sweep picker. Only Sandbox exists today."""
+        sandbox = self.mode_combo.currentIndex() == 0
+        for w in (self.auth_combo, self.route_combo):
+            w.setEnabled(sandbox)
+
+    def _on_arch_chosen(self):
+        """An architecture override, applied and reported.
+
+        Recomposes the run immediately so the map redraws with the new
+        topology - a routing change you cannot see is a routing change you
+        cannot trust - and warns about the one combination that silently
+        degenerates."""
+        auth = self.auth_combo.currentText()
+        route = self.route_combo.currentText()
+        note = []
+        if auth != "(from fleet)" or route != "(from fleet)":
+            note.append("OVERRIDE - recorded in the run and its CSV sidecar.")
+        # A hierarchy over a star is not a hierarchy. Star carries no peer
+        # links, so every squad member reaches its leader VIA the coordinator,
+        # and its fallback goes to the same coordinator - which is identical
+        # to centralized. It is a legitimate thing to configure and a real
+        # finding that it collapses, so it is allowed and explained rather
+        # than forbidden.
+        if auth == "hierarchical" and route == "star":
+            note.append("hierarchical over star: no squad links exist, so "
+                        "every member reaches its leader via the coordinator. "
+                        "This will behave as centralized.")
+        self.lbl_arch.setText("  ".join(note))
+        if self._setup_scene:
+            self._compose_setup()
+
+    def _arch_override(self):
+        """{"blue": {...}} of whatever the operator has overridden, or {}."""
+        over = {}
+        auth = getattr(self, "auth_combo", None)
+        route = getattr(self, "route_combo", None)
+        if auth is not None and auth.currentText() != "(from fleet)":
+            # `topology` is the legacy alias command_authority() falls back on.
+            # Leaving a stale value there would silently override the axis
+            # under test, so it is kept in step rather than left to rot.
+            over["authority"] = over["topology"] = auth.currentText()
+        if route is not None and route.currentText() != "(from fleet)":
+            over["routing"] = route.currentText()
+        if over.get("authority") == "hierarchical" or \
+                over.get("routing") == "tiered":
+            # A hierarchy needs squads to find a leader in, and tiered routing
+            # needs squads to partition on. Until the fleet table can express
+            # squad membership, the first blue vehicle leads the rest - stated
+            # here rather than assumed silently.
+            ids = [a for a in sorted(self._blue_ids or [])
+                   if a not in ("gcs",)]
+            if len(ids) >= 2:
+                over["squads"] = {"alpha": {"leader": ids[0],
+                                            "members": ids[1:]}}
+                over.setdefault("leader_loss", "fallback")
+        return {"blue": over} if over else {}
 
     def _compose_setup(self):
         """Write the composed run (scene + blue fleet + red fleet + spawn
@@ -2677,9 +2831,23 @@ class Console(QMainWindow):
                "scene": self._setup_scene}
         if fleets:
             doc["fleets"] = fleets
+        # ARCHITECTURE OVERRIDE from the Setup pickers. Written into the
+        # composed run, so it is diffable, re-runnable and lands in the CSV's
+        # meta sidecar. _overlay merges one level into each network, so blue
+        # keeps its coordinator, band and radios.
+        arch = self._arch_override()
+        if arch:
+            doc["networks"] = arch
         if self._spawns:
-            doc["agents"] = [{"id": aid, "pose": pose}
-                             for aid, pose in self._spawns.items()]
+            # DOCTRINE rides with the spawn, because both are per-agent
+            # decisions taken in the same dialog. _overlay merges agent
+            # entries by id, so this adds on_link_loss without disturbing the
+            # hardware the fleet declared.
+            doc["agents"] = [
+                dict({"id": aid, "pose": pose},
+                     **({"on_link_loss": self._doctrines[aid]}
+                        if aid in getattr(self, "_doctrines", {}) else {}))
+                for aid, pose in self._spawns.items()]
         path = REPO_ROOT / "runs" / "current_setup.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         header = ("# Composed by the Console's Setup tab - scene + fleets + "

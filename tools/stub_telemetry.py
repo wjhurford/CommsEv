@@ -257,7 +257,19 @@ def _overlay(base, doc):
         # the other). Union by key, upper layer wins a genuine clash.
         if key in ("networks", "radios", "points") and isinstance(val, dict) \
                 and isinstance(merged.get(key), dict):
-            merged[key] = {**merged[key], **val}
+            # Union by key - AND one level deeper for each entry, so a layer
+            # can override ONE property of a network without restating it.
+            # This is what makes a Console override layer possible at all:
+            # the Setup tab writes {"networks": {"blue": {"routing": "mesh"}}}
+            # and blue keeps its coordinator, band and squads. A shallow merge
+            # replaced the whole network dict and silently dropped them.
+            out = dict(merged[key])
+            for k, v in val.items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k] = {**out[k], **v}
+                else:
+                    out[k] = v
+            merged[key] = out
         else:
             merged[key] = val
 
