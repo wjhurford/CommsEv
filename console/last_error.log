@@ -1,0 +1,9 @@
+Deadband Console crash
+python  3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]
+exe     C:\Users\will-\AppData\Local\Programs\Python\Python313\pythonw.exe
+repo    C:\Users\will-\Documents\repos\deadband
+------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\will-\Documents\repos\deadband\console\app.py", line 2297, in paintEvent
+    p = QPainter(self)
+TypeError: Error calling Python override of QWidget::metric(): 'str' object is not callable

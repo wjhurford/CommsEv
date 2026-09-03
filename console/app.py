@@ -2273,7 +2273,10 @@ class ResultPlot(QWidget):
         super().__init__(parent)
         self.rows = []
         self.metric = "penetration_m"
+        self.highlight = None       # (authority, routing) of the opened run
         self.setMinimumHeight(300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setAutoFillBackground(True)
 
     def set_rows(self, rows):
         self.rows = rows
@@ -2294,7 +2297,24 @@ class ResultPlot(QWidget):
                 for k, d in acc.items()}
 
     def paintEvent(self, _):
+        # A CHART THAT FAILS MUST SAY SO. A blank rectangle is the worst
+        # possible outcome: it looks like "no data" when it may be a crash in
+        # the drawing code, and there is no way to tell them apart by looking.
+        # Any exception is caught and printed ON the widget.
         p = QPainter(self)
+        try:
+            self._paint(p)
+        except Exception as exc:                      # noqa: BLE001
+            p.fillRect(self.rect(), QColor(24, 28, 31))
+            p.setPen(QPen(QColor("#D2694F")))
+            p.setFont(QFont("Consolas", 9))
+            p.drawText(14, 24, "plot failed to draw:")
+            p.drawText(14, 42, f"{type(exc).__name__}: {exc}")
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(14, 66, f"{len(self.rows)} rows held")
+        p.end()
+
+    def _paint(self, p):
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(24, 28, 31))
         series = self._series()
@@ -2343,8 +2363,13 @@ class ResultPlot(QWidget):
         p.restore()
 
         for (auth, route), pts in sorted(series.items()):
-            col = QColor(self.AUTH_COLOUR.get(auth, "#AAAAAA"))
-            pen = QPen(col, 2.0)
+            # THE RUN YOU OPENED IS ORANGE. Double-click a row and its line
+            # lights up, so "the one I am watching" is answerable by looking
+            # rather than by reading the legend back to yourself.
+            lit = self.highlight == (auth, route)
+            col = (QColor("#E08A3C") if lit
+                   else QColor(self.AUTH_COLOUR.get(auth, "#AAAAAA")))
+            pen = QPen(col, 3.2 if lit else 2.0)
             pen.setStyle(self.ROUTE_DASH.get(route, Qt.SolidLine))
             p.setPen(pen)
             for i in range(len(pts) - 1):
@@ -2353,8 +2378,7 @@ class ResultPlot(QWidget):
             p.setPen(QPen(col, 1))
             p.setBrush(QBrush(col))
             for x, y in pts:
-                p.drawEllipse(QPointF(sx(x), sy(y)), 3, 3)
-        p.end()
+                p.drawEllipse(QPointF(sx(x), sy(y)), 3.0, 3.0)
 
 
 class ExperimentWindow(QDialog):
@@ -2481,7 +2505,7 @@ class ExperimentWindow(QDialog):
             self.filt.insertWidget(self.filt.count() - 1, b)
             self._boxes.append(b)
 
-    def _apply_filter(self):
+    def _apply_filter(self, *_):
         keep = {b.text().replace(" dB", "").strip()
                 for b in self._boxes if b.isChecked()}
 
@@ -2542,9 +2566,13 @@ class ExperimentWindow(QDialog):
                 ln = ln.strip()
                 if ln:
                     frames.append(json.loads(ln))
+        row_d = self.rows[row]
+        self.plot.highlight = (row_d.get("authority"), row_d.get("routing"))
+        self.plot.update()
         if self.console is not None and frames:
             self.console.play_frames(frames, title=cell)
-        self.bar.setFormat(f"replaying {cell}  ({len(frames)} frames)")
+        self.bar.setFormat(f"opened {cell}  ({len(frames)} frames) - "
+                           f"the Console is showing the END of this run")
 
 
 # ---------------------------------------------------------------------------
@@ -3292,12 +3320,23 @@ class Console(QMainWindow):
         self.timeline.blockSignals(True)
         self.timeline.setEnabled(True)
         self.timeline.setMaximum(len(self.frames) - 1)
-        self.timeline.setValue(0)
         self.timeline.blockSignals(False)
-        self.on_scrub(0)
+        # LAND ON THE OUTCOME, NOT ON FRAME ZERO. Frame zero is before the
+        # jammer is even armed, so every vehicle is blue, commanded and
+        # unlabelled - which looks exactly like a replay that did not load.
+        # The last frame is where the run ENDED: who was cut off, who was
+        # held, how far each got. Scrub backwards to watch it happen.
+        last = len(self.frames) - 1
+        self.timeline.setValue(last)
+        self.on_scrub(last)
+        # The result lives in the main window, so bring it to the front - the
+        # experiment window is usually covering it.
+        self.raise_()
+        self.activateWindow()
         if title:
-            self.say(f"Replaying {title} - {len(self.frames)} frames. "
-                     f"Scrub the timeline.")
+            self.say(f"Opened {title} - {len(self.frames)} frames, showing the "
+                     f"END of the run. Drag the timeline back, or press play, "
+                     f"to watch it happen.")
 
     def open_experiment(self):
         """The experiment window: run a sweep, read the table, watch a run."""
