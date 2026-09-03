@@ -2279,8 +2279,15 @@ class ResultPlot(QLabel):
         self.rows = []
         self.metric = "penetration_m"
         self.highlight = None       # (authority, routing) of the opened run
+        self._last_size = None
+        self._rendering = False
         self.setMinimumHeight(320)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # IGNORED, NOT EXPANDING - and this is load-bearing, not a detail. A
+        # QLabel takes its size hint FROM its pixmap, so a bigger pixmap asks
+        # for a bigger label, which resizes, which renders a bigger pixmap.
+        # That feedback loop is what crashed the Console. `Ignored` makes the
+        # layout decide the size and the pixmap follow it, never the reverse.
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("background:#181C1F;")
         self.setText("No results yet - press Run.")
@@ -2291,7 +2298,12 @@ class ResultPlot(QLabel):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        self.render_chart()
+        # Only on a REAL size change, and never re-entrantly. Belt and braces
+        # against the same feedback loop the size policy already breaks.
+        size = (self.width(), self.height())
+        if size != self._last_size:
+            self._last_size = size
+            self.render_chart()
 
     def series(self):
         """{(authority, routing): [(x, mean y), ...]} - seeds averaged."""
@@ -2310,8 +2322,20 @@ class ResultPlot(QLabel):
     def render_chart(self, size=None):
         """Draw the chart into a pixmap and show it. Returns the pixmap, so a
         test can render one with no window on screen and check its pixels."""
-        w = int(size[0] if size else max(self.width(), 320))
-        h = int(size[1] if size else max(self.height(), 240))
+        if self._rendering:
+            return None
+        self._rendering = True
+        try:
+            return self._render(size)
+        finally:
+            self._rendering = False
+
+    def _render(self, size=None):
+        # Two pixels inside the widget, so the pixmap can never be the thing
+        # that decides how big the widget wants to be.
+        w = int(size[0] if size else max(self.width() - 2, 320))
+        h = int(size[1] if size else max(self.height() - 2, 240))
+        w, h = min(w, 4000), min(h, 3000)
         pm = QPixmap(w, h)
         pm.fill(QColor("#181C1F"))
         p = QPainter(pm)
