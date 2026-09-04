@@ -2288,7 +2288,52 @@ def apply_mission_file(path, agents_by_id, points, arena,
     mission_name = doc.get("name") or Path(path).stem
     networks = (arena or {}).get("networks") or {}
     changed, messages = [], []
-    for aid, obj in (doc.get("objectives") or {}).items():
+
+    # A MISSION MUST NOT BE WELDED TO ONE FLEET'S NAMING. Objectives keyed by
+    # agent id only work if that fleet happens to call its vehicles car1,
+    # car2, car3 - so a mission written for one fleet silently tasked NOBODY
+    # in a fleet built in the Console, whose rows default to agent1, agent2.
+    # The failure looked like "SETMISSION did nothing", which is the worst
+    # kind of failure: quiet and easy to blame on something else.
+    #
+    # A key may now be:
+    #   all           every taskable vehicle
+    #   <network>     every taskable vehicle on that network, e.g. blue
+    #   <agent id>    exactly that one, as before
+    # An id always wins over a group, so a mission can say "everyone advances,
+    # except car3 which scouts".
+    def _mobile(body):
+        """A group objective is for things that can carry one out. A ground
+        station is furniture with a radio: telling the bench to advance is
+        never what `all` meant."""
+        return (not body.get("ghost")
+                and body.get("platform") != "ground_station"
+                and _is_taskable(body, networks))
+
+    def _members(key):
+        k = str(key).lower()
+        if k == "all":
+            return [a for a, body in agents_by_id.items() if _mobile(body)]
+        if k in {str(n).lower() for n in networks}:
+            return [a for a, body in agents_by_id.items()
+                    if str(body.get("network", "")).lower() == k
+                    and _mobile(body)]
+        return None
+
+    raw = dict(doc.get("objectives") or {})
+    expanded, group_keys = {}, []
+    for key, obj in raw.items():
+        who = _members(key)
+        if who is None:
+            continue
+        group_keys.append(key)
+        for aid in who:
+            expanded[aid] = obj
+    for key, obj in raw.items():          # explicit ids override a group
+        if key not in group_keys:
+            expanded[key] = obj
+
+    for aid, obj in expanded.items():
         if not isinstance(obj, dict):
             continue
         block = {("type" if k == "do" else k): v for k, v in obj.items()}
@@ -2317,6 +2362,18 @@ def apply_mission_file(path, agents_by_id, points, arena,
         agents_by_id[aid]["mission"] = block
         agents_by_id[aid]["last_rejection"] = None
         changed.append((aid, block))
+    if not changed:
+        # TASKING NOBODY IS A FAILURE, NOT A QUIET SUCCESS. It used to print
+        # per-agent notes that scrolled past and then carry on as if the
+        # mission were set, so the fleet just sat there and the cause was
+        # invisible. Say it once, plainly, with the two things you need to fix
+        # it: what the mission asked for, and what is actually running.
+        want = sorted((doc.get("objectives") or {}))
+        have = sorted(a for a, body in agents_by_id.items() if _mobile(body))
+        messages.append(
+            f"SETMISSION: '{mission_name}' tasked NO agents. It names "
+            f"{want}; this run has {have}. Use 'all:' or a network name as "
+            f"the objective key to write a mission that fits any fleet.")
     return changed, messages, mission_name
 
 

@@ -31,6 +31,12 @@ description: >
 
 
 objectives:
+  # Named ids, because this mission deliberately gives each car ITS OWN lane -
+  # that is the whole point of the benchmark. It therefore needs a fleet whose
+  # vehicles are called car1, car2, car3; any other fleet gets a loud refusal
+  # naming what it asked for and what is running. For a mission that fits any
+  # fleet, key the objective on `all` or on a network name instead - see
+  # missions/advance.yaml.
   car1: {do: shuttle, between: [A, B]}
   car2: {do: shuttle, between: [C, D]}
   car3: {do: shuttle, between: [E, F]}

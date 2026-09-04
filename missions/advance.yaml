@@ -27,6 +27,9 @@ description: >
   can this fleet get into contested spectrum before it loses command?
 
 objectives:
-  car1: {do: advance, to: FAR}
-  car2: {do: advance, to: FAR}
-  car3: {do: advance, to: FAR}
+  # `all` = every taskable vehicle, whatever the fleet calls them. A mission
+  # keyed on agent ids only works for a fleet that happens to use those names,
+  # which made SETMISSION silently task nobody on a fleet built in the
+  # Console. An explicit id still overrides the group, so you can write
+  # "everyone advances, except car3 which scouts".
+  all: {do: advance, to: FAR}
