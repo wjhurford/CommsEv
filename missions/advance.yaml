@@ -1,18 +1,20 @@
 # =============================================================================
 # Deadband MISSION — advance
 # =============================================================================
-# The penetration experiment's command: every vehicle drives from its spawn
-# toward FAR and stops there. Nothing turns around, nothing loops.
+# ONE LINE. NO AGENT NAMES. NO FLEET SIZE.
 #
-# This is the framework's first TERMINATING objective. Everything before it
-# was cyclic (shuttle, patrol, orbit) or reactive (pursuit, wall_follow), and
-# a cyclic objective has no penetration depth to measure - a shuttling car
-# comes back.
+# `all` is every mobile vehicle, whatever the fleet calls them and however
+# many there are. `advance` moves THE FLEET so its centre lands on FAR, with
+# each vehicle holding its offset from the formation's centre - so a wedge
+# stays a wedge, a column stays a column, and the shape you spawned is the
+# shape that advances.
 #
-# Each vehicle holds its own lane while advancing, so a wedge keeps its shape
-# until the link-loss doctrine breaks it. That break is the effect under test:
-# a car that loses command STOPS, becomes a stationary relay, and - on a mesh
-# - lets the cars still moving push further than they could alone.
+# This replaces a mission that wrote a lane per vehicle. That version only
+# ever fitted a fleet of exactly three, in exactly that arrangement; change
+# the fleet and it tasked nobody. Nothing here is hardcoded to a fleet.
+#
+# Drop the `to:` and it becomes "go forward until something stops you" - a
+# wall, or losing your commander. Both forms are in COMMANDS.md.
 #
 #     SETMISSION advance
 #     blue launch
@@ -23,13 +25,9 @@ name: advance
 kind: mission
 
 description: >
-  Every vehicle advances to FAR and stops. The penetration command: how far
-  can this fleet get into contested spectrum before it loses command?
+  The fleet advances to FAR in whatever formation it is in. The penetration
+  command: how far can this fleet get into contested spectrum before it loses
+  command? Fits any fleet, any size, any shape.
 
 objectives:
-  # `all` = every taskable vehicle, whatever the fleet calls them. A mission
-  # keyed on agent ids only works for a fleet that happens to use those names,
-  # which made SETMISSION silently task nobody on a fleet built in the
-  # Console. An explicit id still overrides the group, so you can write
-  # "everyone advances, except car3 which scouts".
   all: {do: advance, to: FAR}

@@ -780,7 +780,10 @@ def validate_objective(mission_dict, points, arena):
         # resolve or lands outside the arena - the same gate shuttle gets, and
         # for the same reason: a bad objective must be refused with a reason,
         # never silently turned into something else mid-run.
-        ok, x, y, _z, err = resolve_waypoint(mission_dict.get("to"), points)
+        spec = mission_dict.get("to")
+        if spec in (None, "", "forward"):
+            return True, None      # "forward" has no goal to validate
+        ok, x, y, _z, err = resolve_waypoint(spec, points)
         if not ok:
             return False, err
         if not _in_bounds(x, y, arena):
@@ -901,18 +904,44 @@ def mission_target(agent, t, poses, arena):
         return (start["x"], start["y"])
 
     if kind == "advance":
-        # ADVANCE TO A POINT AND STOP. Every other objective is cyclic or
-        # reactive - shuttle turns around, patrol loops, orbit circles - so
-        # none of them can express "get as far as you can and hold there",
-        # which is the only shape that has a PENETRATION DEPTH to measure.
+        # ADVANCE. The framework's first TERMINATING objective - every other
+        # one is cyclic (shuttle, patrol, orbit) or reactive (pursuit,
+        # wall_follow), so none of them has a PENETRATION DEPTH to measure: a
+        # shuttling vehicle comes back. It is also what finally distinguishes
+        # `intent` from `continue`, because mission command says a subordinate
+        # seeks new direction once the assigned effect is achieved rather than
+        # inventing a next task. An advance that has arrived is done.
         #
-        # It is also the framework's first TERMINATING objective, which is
-        # what makes `intent` and `continue` finally distinguishable: mission
-        # command says a subordinate acts within the commander's intent, and
-        # once the assigned effect is achieved it seeks new direction rather
-        # than inventing a next task. An advance that has arrived is done.
+        # TWO FORMS, AND NEITHER NAMES AN AGENT:
+        #
+        #   advance                 go forward until a wall, a jammer, or
+        #                           something else stops you.
+        #   advance <point|x,y,z>   move THE FLEET so that its centre lands on
+        #                           that point, holding the shape it is in.
+        #
+        # The second is the one that removes the hardcoding. Writing a lane
+        # per vehicle meant a mission only fitted a fleet of exactly that size
+        # in exactly that arrangement - three cars, three lanes, forever. Here
+        # the fleet's own geometry supplies the lanes: each vehicle keeps its
+        # OFFSET from the formation's centre, so a wedge stays a wedge, a
+        # column stays a column, and the same one-line mission runs a fleet of
+        # three or thirty in whatever shape you spawned it.
         pts = arena.get("points") or {}
-        ok, gx, gy, _gz, err = resolve_waypoint(m.get("to"), pts)
+        spec = m.get("to")
+
+        if spec in (None, "", "forward"):
+            # NO TARGET: hold this heading and keep going. The world stops
+            # you - a wall via blocked(), or losing your commander via the
+            # link-loss doctrine - rather than an arrival test. Projected far
+            # enough ahead that the arena boundary is always what bites.
+            here = poses.get(agent["id"]) or start
+            yaw = _num(here.get("yaw"), _num(start.get("yaw")))
+            reach = 4.0 * max(_num((arena.get("extent") or {}).get("x"), 100.0),
+                              _num((arena.get("extent") or {}).get("y"), 100.0))
+            return (here["x"] + reach * math.cos(yaw),
+                    here["y"] + reach * math.sin(yaw))
+
+        ok, gx, gy, _gz, err = resolve_waypoint(spec, pts)
         if not ok:
             if not agent.get("_warned_bad_advance"):
                 agent["_warned_bad_advance"] = True
@@ -920,11 +949,39 @@ def mission_target(agent, t, poses, arena):
                       file=sys.stderr)
             here = poses.get(agent["id"]) or start
             return (here["x"], here["y"])
-        # The agent keeps its own lane: it advances along x to the goal's x,
-        # holding the y it started on, so a formation ADVANCES rather than
-        # collapsing onto one point and colliding. The wedge keeps its shape
-        # until the doctrine breaks it, which is the effect under test.
-        return (gx, start["y"] if m.get("keep_lane", True) else gy)
+
+        # THE FORMATION OFFSET, captured ONCE, from what this agent KNEW when
+        # the order took effect. Computed lazily rather than at assignment
+        # because that is the first moment the agent has a view of its peers.
+        #
+        # Note what it is computed from: `poses` here is the agent's own
+        # knowledge - its peers as THEY last reported themselves - not ground
+        # truth. So under jamming two vehicles can hold slightly different
+        # ideas of where the formation's centre was, and the shape they try to
+        # keep is the shape they each believe in. That is not a flaw to fix:
+        # it is the same disagreement a real formation suffers when its
+        # position reports go stale.
+        if "_offset" not in m:
+            peers = [a for a in (_ALL_AGENTS or [agent])
+                     if (a.get("mission") or {}).get("type") == "advance"
+                     and (a.get("mission") or {}).get("to") == spec
+                     and a.get("network") == agent.get("network")]
+            known = []
+            for a in peers:
+                q = poses.get(a["id"])
+                if q is not None:
+                    known.append((_num(q.get("x")), _num(q.get("y"))))
+            if known:
+                cx = sum(q[0] for q in known) / len(known)
+                cy = sum(q[1] for q in known) / len(known)
+            else:
+                cx, cy = start["x"], start["y"]
+            mine = poses.get(agent["id"]) or start
+            m["_offset"] = (_num(mine.get("x", start["x"])) - cx,
+                            _num(mine.get("y", start["y"])) - cy)
+
+        ox, oy = m["_offset"]
+        return (gx + ox, gy + oy)
 
     if kind == "pursuit":
         tgt = poses.get(m.get("target"))
@@ -2182,9 +2239,12 @@ def _parse_objective_verb(verb, args):
     if verb in ("stop", "static", "hold"):
         return {"type": "static"}
     if verb in ("advance", "goto", "push"):
-        # 'advance FAR' - drive to that named point and stop there.
-        return {"type": "advance", "to": (_parse_position_token(args[0])
-                                          if args else "FAR")}
+        # 'advance'              -> forward until something stops you
+        # 'advance FAR'          -> the fleet's centre lands on point FAR
+        # 'advance (90,0,0)'     -> ...or on that coordinate
+        # Neither form names an agent, and neither cares how many there are.
+        return {"type": "advance",
+                "to": (_parse_position_token(args[0]) if args else None)}
     if verb in ("pursuit", "pursue"):
         return {"type": "pursuit", "target": args[0] if args else "car1"}
     if verb == "shuttle":
@@ -2213,6 +2273,8 @@ def parse_retask(text, agents_by_id):
 
         car3: pursue car1
         car3: advance FAR
+        car3: advance                (forward until something stops it)
+        car3: advance (90,0,0)
         car3: shuttle between E F
         car3: shuttle (-3,3,0) (3,3,0)
         car3: wall_follow right
