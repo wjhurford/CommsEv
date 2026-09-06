@@ -99,11 +99,19 @@ def build(cfg, cell):
     Returns (arena, agents, links, blue_ids). Everything is loaded fresh from
     the YAML so no state leaks between runs in the same worker process.
     """
-    fleets = [cfg["blue_fleet"]]
-    if cfg.get("red_fleet"):
-        fleets.append(cfg["red_fleet"])
-    arena, agents, links = st.load_scenario(
-        {"scene": cfg["scene"], "fleets": fleets})
+    # THE COMPOSITION. Either named files (an experiment written as a YAML),
+    # or `compose`: a complete run dict handed straight in - which is what the
+    # Console does, so a sweep can use the fleet you built in Setup, spawns
+    # and per-agent doctrine included, without any of it having to exist as a
+    # file first. Nothing is typed into a YAML to run an experiment.
+    if cfg.get("compose"):
+        base = copy.deepcopy(cfg["compose"])
+    else:
+        fleets = [cfg["blue_fleet"]]
+        if cfg.get("red_fleet"):
+            fleets.append(cfg["red_fleet"])
+        base = {"scene": cfg["scene"], "fleets": fleets}
+    arena, agents, links = st.load_scenario(base)
     by = {a["id"]: a for a in agents}
 
     # --- AUTHORITY and ROUTING: the two axes, set independently ------------
@@ -153,7 +161,8 @@ def build(cfg, cell):
     # else, so no result is ever expressed in units that only mean something
     # for this particular radio.
     jam_cfg = cfg.get("jammer") or {}
-    base_id = jam_cfg.get("id", "jam1")
+    base_id = jam_cfg.get("id") or next(
+        (a["id"] for a in agents if a.get("jammer")), "jam1")
     bands = list(jam_cfg.get("bands_mhz") or [])
     if not bands:
         _b = ((by.get(base_id) or {}).get("jammer") or {}).get("band")
@@ -179,8 +188,11 @@ def build(cfg, cell):
     blue_ids = [a["id"] for a in agents
                 if a.get("network") == "blue" and not a.get("ghost")
                 and not a.get("jammer")]
-    st.apply_mission_file(str(REPO / "missions" / f"{cfg['mission']}.yaml"),
-                          by, arena.get("points") or {}, arena)
+    mref = str(cfg.get("mission") or "advance")
+    mpath = Path(mref)
+    if mpath.parent == Path(".") and not mpath.suffix:
+        mpath = REPO / "missions" / f"{mref}.yaml"
+    st.apply_mission_file(str(mpath), by, arena.get("points") or {}, arena)
     for a in agents:
         if a["id"] in blue_ids:
             a["armed"] = True

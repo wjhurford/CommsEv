@@ -2420,8 +2420,13 @@ class ExperimentWindow(QDialog):
         top = QHBoxLayout()
         top.addWidget(QLabel("Experiment"))
         self.exp_combo = QComboBox()
+        # THE SETUP TAB IS THE DEFAULT SOURCE, and the only one you need. A
+        # saved experiment YAML is still selectable, for re-running something
+        # from months ago exactly as it was - but nothing has to be written to
+        # a file to run an experiment now.
+        self.exp_combo.addItem("From the Setup tab", None)
         for f in sorted((REPO_ROOT / "experiments").glob("*.yaml")):
-            self.exp_combo.addItem(f.stem, str(f))
+            self.exp_combo.addItem(f"file: {f.stem}", str(f))
         top.addWidget(self.exp_combo, 1)
         self.run_btn = QPushButton("Run")
         self.run_btn.clicked.connect(self.start)
@@ -2477,15 +2482,20 @@ class ExperimentWindow(QDialog):
         Console down with it.
         """
         path = self.exp_combo.currentData()
-        if not path:
-            return
+        cfg = None
+        if path is None:
+            cfg, why = (self.console._experiment_cfg()
+                        if self.console is not None else (None, "no console"))
+            if cfg is None:
+                self.bar.setFormat(why)
+                return
         self.run_btn.setEnabled(False)
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat("loading...")
         QApplication.processEvents()
         try:
-            self._run_sweep(Path(path))
+            self._run_sweep(Path(path) if path else None, cfg=cfg)
         except Exception as exc:                       # noqa: BLE001
             import traceback
             self.bar.setFormat(f"failed: {exc}")
@@ -2494,12 +2504,13 @@ class ExperimentWindow(QDialog):
         finally:
             self.run_btn.setEnabled(True)
 
-    def _run_sweep(self, exp_path):
+    def _run_sweep(self, exp_path, cfg=None):
         import csv as _csv
         import yaml as _yaml
         from datetime import datetime
         sweep = _sweep_module()
-        cfg = _yaml.safe_load(exp_path.read_text(encoding="utf-8"))
+        if cfg is None:
+            cfg = _yaml.safe_load(exp_path.read_text(encoding="utf-8"))
         cells, names = sweep.cells_of(cfg)
         n = len(cells)
         self.bar.setRange(0, n)
@@ -2526,8 +2537,13 @@ class ExperimentWindow(QDialog):
             w.writerows(rows)
         # The experiment file goes with its results. A CSV without the
         # configuration that produced it is an orphan.
+        # THE CONFIGURATION GOES WITH ITS RESULTS, always. You never open
+        # this - Setup is where you configure - but a CSV without the run that
+        # produced it is an orphan, and this one is complete enough to re-run
+        # the whole grid months later, fleet and spawns included.
         (outdir / "experiment.yaml").write_text(
-            exp_path.read_text(encoding="utf-8"), encoding="utf-8")
+            exp_path.read_text(encoding="utf-8") if exp_path
+            else _yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         bad = [r for r in rows if r.get("error")]
         if self.console is not None:
             self.console.say(f"{len(rows)} runs -> {csv_path}"
@@ -2925,6 +2941,44 @@ class Console(QMainWindow):
         # SAVE FLEET AS. The only thing that writes into fleets/. Explicit,
         # because a fleet you are still experimenting with is not one you have
         # decided to keep.
+        # EXPERIMENT CONTROLS. Hidden in Sandbox, where the mission is issued
+        # from the terminal and there is nothing to sweep. In Experiment mode
+        # there is nobody to type at a running fleet, so the mission and the
+        # swept powers have to be decided here, before it starts.
+        self.exp_box = QWidget()
+        elay = QVBoxLayout(self.exp_box)
+        elay.setContentsMargins(0, 0, 0, 0)
+        elay.setSpacing(4)
+        elay.addWidget(QLabel("Mission (experiment)"))
+        self.exp_mission = QComboBox()
+        self.exp_mission.setToolTip(
+            "Issued to every vehicle when each run starts. In Sandbox you "
+            "type SETMISSION instead - there, whether the order can even get "
+            "through is part of what you are watching.")
+        elay.addWidget(self.exp_mission)
+        elay.addWidget(QLabel("Jammer advantage P_j/P_t to sweep (dB)"))
+        prow = QHBoxLayout()
+        self.exp_powers = []
+        for db, on in ((0, True), (10, True), (20, True), (30, False)):
+            b = QCheckBox(f"{db:+d}")
+            b.setChecked(on)
+            b.setToolTip(
+                "The jammer's power RELATIVE to the fleet's own radios. A "
+                "ratio, so the absolute powers cancel out of the physics and "
+                "the result holds for any radio at any scale.")
+            prow.addWidget(b)
+            self.exp_powers.append((db, b))
+        prow.addStretch(1)
+        elay.addLayout(prow)
+        self.lbl_runs = QLabel("")
+        self.lbl_runs.setObjectName("hint")
+        self.lbl_runs.setWordWrap(True)
+        elay.addWidget(self.lbl_runs)
+        for _db, _b in self.exp_powers:
+            _b.stateChanged.connect(lambda *_: self._refresh_run_count())
+        slay.addWidget(self.exp_box)
+        self.exp_box.setVisible(False)
+
         expb = QPushButton("Run an experiment...")
         expb.setToolTip("Sweep authority x routing x jammer power headless, "
                         "then double-click any result to watch that run.")
@@ -3439,11 +3493,95 @@ class Console(QMainWindow):
         self._expwin.raise_()
 
     def _on_mode_chosen(self, _index):
-        """Sandbox enables the live controls; Experiment will disable them and
-        move every choice into the sweep picker. Only Sandbox exists today."""
+        """Sandbox and Experiment want different things decided here.
+
+        SANDBOX     one run you watch. You pick ONE authority and ONE routing,
+                    and issue the mission from the terminal - where whether
+                    the order can even get through is part of what you are
+                    watching.
+        EXPERIMENT  many runs, nobody to type at them. Authority and routing
+                    are SWEPT rather than chosen (all nine, always - that
+                    3x3 is the framework's whole claim), so their dropdowns
+                    become read-only, and the mission and the jammer powers
+                    are decided here instead.
+        """
         sandbox = self.mode_combo.currentIndex() == 0
         for w in (self.auth_combo, self.route_combo):
             w.setEnabled(sandbox)
+        self.exp_box.setVisible(not sandbox)
+        if not sandbox:
+            self._refresh_missions()
+            self.lbl_arch.setText(
+                "Experiment: authority x routing are SWEPT - all nine "
+                "combinations, every run. The dropdowns above do not apply.")
+        else:
+            self._on_arch_chosen()
+        self._refresh_run_count()
+
+    def _refresh_missions(self):
+        cur = self.exp_mission.currentText()
+        self.exp_mission.blockSignals(True)
+        self.exp_mission.clear()
+        for f in sorted((REPO_ROOT / "missions").glob("*.yaml")):
+            self.exp_mission.addItem(f.stem)
+        i = self.exp_mission.findText(cur or "advance")
+        self.exp_mission.setCurrentIndex(max(i, 0))
+        self.exp_mission.blockSignals(False)
+
+    def _refresh_run_count(self):
+        """The grid size, live, as you tick. Not a time estimate - an estimate
+        is a guess you then have to defend."""
+        if not hasattr(self, "lbl_runs"):
+            return
+        powers = [db for db, b in self.exp_powers if b.isChecked()]
+        n = 3 * 3 * max(len(powers), 0)
+        self.lbl_runs.setText(
+            f"{n} runs  =  3 authorities x 3 routings x {len(powers)} powers"
+            if n else "Tick at least one power.")
+
+    def _experiment_cfg(self):
+        """The sweep configuration, built ENTIRELY from this Setup tab.
+
+        No experiment YAML is written or read. The composition handed to the
+        sweep is the same dict the sandbox would have run - scene, fleet,
+        spawns and per-agent doctrine included - so an experiment cannot
+        quietly differ from what you set up, which is the failure mode a
+        separate config file invites.
+        """
+        composed = getattr(self, "_composed", None)
+        if not composed:
+            return None, "Compose a run in Setup first (scene, then fleets)."
+        powers = [db for db, b in self.exp_powers if b.isChecked()]
+        if not powers:
+            return None, "Tick at least one jammer power to sweep."
+        # Squads for the hierarchical and tiered cells. The first blue vehicle
+        # leads - stated here rather than assumed silently, and replaced by a
+        # squad column in the fleet table when that lands.
+        ids = [a.get("id") for a in (composed.get("agents") or [])
+               if a.get("network") == "blue" and not a.get("ghost")
+               and not a.get("jammer")]
+        squads = ({"alpha": {"leader": ids[0], "members": ids[1:]}}
+                  if len(ids) >= 2 else {})
+        name = "_".join(x for x in (self._setup_scene,
+                                    self.exp_mission.currentText()) if x)
+        return {
+            "name": name or "experiment",
+            "compose": copy.deepcopy(composed),
+            "mission": self.exp_mission.currentText() or "advance",
+            "goal": "FAR",
+            "duration_s": 400.0, "warmup_s": 5.0, "rate_hz": 10.0,
+            "stop_when_stalled": True, "stall_grace_s": 5.0,
+            "squads": squads, "coordinator": "gcs",
+            "leader_loss": "fallback",
+            "axes": {"authority": ["centralized", "decentralized",
+                                   "hierarchical"],
+                     "routing": ["star", "mesh", "tiered"],
+                     "jam_rel_db": powers},
+            # One seed: measured, not assumed. Nothing is stochastic unless a
+            # GNSS-band jammer or a lidar fleet is in play, and then this
+            # should grow. See experiments/penetration.yaml.
+            "seeds": [1],
+        }, None
 
     def _on_arch_chosen(self):
         """An architecture override, applied and reported.
@@ -3552,6 +3690,11 @@ class Console(QMainWindow):
                 for aid, pose in self._spawns.items()]
         elif inline_agents:
             doc["agents"] = inline_agents
+        # Kept so the experiment builder can hand the EXACT composition the
+        # sandbox would have run to the sweep - same scene, same fleet, same
+        # spawns, same per-agent doctrine. One source of truth, so an
+        # experiment can never quietly differ from what you set up.
+        self._composed = copy.deepcopy(doc)
         path = REPO_ROOT / "runs" / "current_setup.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         header = ("# Composed by the Console's Setup tab - scene + fleets + "
