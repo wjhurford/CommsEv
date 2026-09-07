@@ -1625,11 +1625,16 @@ class PlotPane(QWidget):
                 p.setPen(QPen(colour))
                 p.drawText(left + 6, top + 14 + idx * 14, f"{path}   no data")
                 continue
+            # DRAW on the shared scale, but LABEL with this series' own
+            # range. Printing the shared range against every series made nine
+            # different curves all read "0 .. 192", which looks exactly like
+            # nine identical series - the opposite of what the label is for.
+            own_lo = min(v for _, v in pairs)
+            own_hi = max(v for _, v in pairs)
             if shared:
                 lo, hi = g_lo, g_hi
             else:
-                lo = min(v for _, v in pairs)
-                hi = max(v for _, v in pairs)
+                lo, hi = own_lo, own_hi
             span = (hi - lo) or 1.0
             poly = QPolygonF()
             for tt, v in pairs:
@@ -1638,9 +1643,19 @@ class PlotPane(QWidget):
             p.setPen(QPen(colour, 1.4))
             p.setBrush(Qt.NoBrush)
             p.drawPolyline(poly)
+            # A COMPACT LEGEND. The full dotted path is how the series is
+            # addressed, not what it is called: on a swept chart every entry
+            # began "agents." and ended with the same metric, so the nine
+            # names differed only in the middle and the legend was a wall.
+            label = path
+            if label.startswith("agents."):
+                label = label[7:]
+            if "." in label:
+                who, metric = label.rsplit(".", 1)
+                label = who.replace("_", " / ")
             p.setPen(QPen(colour))
-            p.drawText(left + 6, top + 14 + idx * 14,
-                       f"{path}   {lo:.3g} .. {hi:.3g}")
+            p.drawText(left + 6, top + 14 + idx * 13,
+                       f"{label}   {own_lo:.3g} .. {own_hi:.3g}")
 
         cursor = self.area.cursor
         if cursor is not None and 0 <= cursor < len(t):
@@ -2539,6 +2554,39 @@ class ExperimentWindow(QDialog):
         top.addWidget(self.run_btn)
         lay.addLayout(top)
 
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("Show"))
+        self.metric_combo = QComboBox()
+        # THE METRICS WORTH A HEADLINE, in the order the argument runs:
+        # how far did it get, was it commanded, did it stop, did it know where
+        # it was, and what was the radio doing. Everything else is in Results.
+        for key, lab in (
+                ("penetration_m", "penetration (m advanced)"),
+                ("penetration_frac", "penetration (fraction of the corridor)"),
+                ("commanded_fraction", "commanded fraction"),
+                ("held_fraction", "held fraction (frozen by doctrine)"),
+                ("belief_err_m", "position error (belief vs truth, m)"),
+                ("track_err_m", "tracking error (off the ordered path, m)"),
+                ("worst_sinr_db", "worst link SINR (dB)"),
+                ("worst_pdr", "worst link packet delivery"),
+                ("arrived", "vehicles that arrived"),
+                ("ended_s", "run length (s)")):
+            self.metric_combo.addItem(lab, key)
+        self.metric_combo.setToolTip(
+            "Which metric the headline chart draws against jammer advantage. "
+            "Every one of them, per architecture, is also in the Results tab "
+            "where panes can be split and series overlaid.")
+        self.metric_combo.activated.connect(
+            lambda _i: self._draw_summary(getattr(self, "_shown", self.rows)))
+        mrow.addWidget(self.metric_combo, 1)
+        svgb = QPushButton("SVG")
+        svgb.setFixedWidth(64)
+        svgb.setToolTip("Write this chart as an SVG beside the results and "
+                        "open it in a browser - the version for a slide.")
+        svgb.clicked.connect(self.open_svg)
+        mrow.addWidget(svgb)
+        lay.addLayout(mrow)
+
         # A LOAD BAR, NOT AN ESTIMATE. An estimate is a guess you then have to
         # defend; a bar is a fact, and it cannot be wrong.
         self.bar = QProgressBar()
@@ -2581,11 +2629,7 @@ class ExperimentWindow(QDialog):
         # and opens it. It is one click, it works in any browser, and it is
         # the file you would put in a slide anyway. If the embedded chart
         # above ever starts working it is a convenience; this is the chart.
-        svgb = QPushButton("Open the chart in a browser  (always works)")
-        svgb.setToolTip("Writes an SVG beside the results and opens it. Pure "
-                        "standard library - nothing here can stop it.")
-        svgb.clicked.connect(self.open_svg)
-        lay.addWidget(svgb)
+
 
         # The power tickboxes: which jammer advantages are drawn. Opens on ONE
         # of them, because nine lines is a chart and twenty-seven is a wall.
@@ -2840,9 +2884,11 @@ class ExperimentWindow(QDialog):
             # chart exists to make is destroyed.
             self.summary.xlabel = "dB   P_j / P_t"
             self.summary.shared_scale = True
-            paths = sorted({f"agents.{a['id']}.penetration_m"
+            metric = (self.metric_combo.currentData()
+                      if hasattr(self, "metric_combo") else "penetration_m")
+            paths = sorted({f"agents.{a['id']}.{metric}"
                             for f in frames for a in f["agents"]
-                            if "penetration_m" in a})
+                            if metric in a})
             for pane in self.summary.panes():
                 pane.series = list(paths)
             self.summary.refresh()
@@ -2863,14 +2909,14 @@ class ExperimentWindow(QDialog):
                 "deadband_plot", str(REPO_ROOT / "tools" / "plot_results.py"))
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            keep = {float(db) for db, b in
-                    getattr(self.console, "exp_powers", []) if b.isChecked()} \
-                if self.console is not None else None
-            rows = list(self.rows)
-            series = mod.series_of(rows, "penetration_m")
-            out = Path(csvp).with_suffix(".svg")
-            out.write_text(mod.svg(series, "penetration (m advanced)"),
-                           encoding="utf-8")
+            # The filter applies here too: the chart you export is the chart
+            # you are looking at.
+            rows = list(getattr(self, "_shown", None) or self.rows)
+            metric = (self.metric_combo.currentData()
+                      if hasattr(self, "metric_combo") else "penetration_m")
+            series = mod.series_of(rows, metric)
+            out = Path(csvp).with_suffix(f".{metric}.svg")
+            out.write_text(mod.svg(series, metric), encoding="utf-8")
         except Exception as exc:                       # noqa: BLE001
             import traceback
             self.bar.setFormat(f"could not write the chart: {exc}")
