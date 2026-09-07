@@ -1604,16 +1604,32 @@ class PlotPane(QWidget):
         p.setPen(QPen(QColor(C_GRID)))
         p.drawRect(QRectF(left, top, w, h))
 
-        for idx, path in enumerate(self.series):
+        shared = getattr(self.area, "shared_scale", False)
+        allpairs = {}
+        for path in self.series:
             vals = [series_value(frames, i, path) for i in range(len(frames))]
-            pairs = [(tt, v) for tt, v in zip(t, vals) if isinstance(v, (int, float))]
+            allpairs[path] = [(tt, v) for tt, v in zip(t, vals)
+                              if isinstance(v, (int, float))]
+        if shared:
+            every = [v for prs in allpairs.values() for _, v in prs]
+            g_lo, g_hi = (min(every), max(every)) if every else (0.0, 1.0)
+            # A shared scale starts at zero when the data does not go
+            # negative: a penetration of 12 m next to one of 87 m should LOOK
+            # like a seventh, and a floating baseline hides exactly that.
+            if g_lo > 0:
+                g_lo = 0.0
+        for idx, path in enumerate(self.series):
+            pairs = allpairs[path]
             colour = QColor(PALETTE[idx % len(PALETTE)])
             if not pairs:
                 p.setPen(QPen(colour))
                 p.drawText(left + 6, top + 14 + idx * 14, f"{path}   no data")
                 continue
-            lo = min(v for _, v in pairs)
-            hi = max(v for _, v in pairs)
+            if shared:
+                lo, hi = g_lo, g_hi
+            else:
+                lo = min(v for _, v in pairs)
+                hi = max(v for _, v in pairs)
             span = (hi - lo) or 1.0
             poly = QPolygonF()
             for tt, v in pairs:
@@ -1632,9 +1648,22 @@ class PlotPane(QWidget):
             p.setPen(QPen(QColor(C_WARN), 1))
             p.drawLine(QPointF(cx, top), QPointF(cx, top + h))
 
+        # X AXIS, labelled with whatever it actually is. Every distinct x
+        # value gets a tick, so a sweep of three powers reads as three
+        # readings rather than as a continuum.
+        unit = getattr(self.area, "xlabel", "s")
         p.setPen(QPen(QColor(C_DIM)))
-        p.drawText(left, self.height() - 6, f"{t0:.1f} s")
-        p.drawText(self.width() - right - 52, self.height() - 6, f"{t1:.1f} s")
+        p.setFont(QFont("Consolas", 7))
+        for tt in sorted(set(t)):
+            cx = left + w * (tt - t0) / (t1 - t0)
+            p.drawLine(QPointF(cx, top + h), QPointF(cx, top + h + 3))
+            p.drawText(QPointF(cx - 12, self.height() - 6), f"{tt:g}")
+        p.drawText(QPointF(self.width() - right - 52, self.height() - 6), unit)
+        if shared:
+            # The shared scale is a number you can read off, not an implied
+            # one - otherwise "they share a scale" is a claim, not a fact.
+            p.drawText(QPointF(4, top + 10), f"{g_hi:.3g}")
+            p.drawText(QPointF(4, top + h), f"{g_lo:.3g}")
 
 
 class PlotArea(QWidget):
@@ -1651,6 +1680,17 @@ class PlotArea(QWidget):
         self.frames = []
         self.cursor = None
         self.live = False
+        # THE X AXIS IS NOT ALWAYS TIME. A swept result is a value per
+        # PARAMETER, not per second, and an axis that says "s" under jammer
+        # power is simply wrong. Set by whoever loads the frames.
+        self.xlabel = "s"
+        # SHARED SCALE. For time series, each series keeps its own scale on
+        # purpose - different units on one axis either flatten one or imply a
+        # comparison that is not real. For a SWEEP every series is the SAME
+        # metric across architectures, and auto-scaling each one to its own
+        # range would make them all fill the pane and look identical, which
+        # destroys the only comparison the chart exists to make.
+        self.shared_scale = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         self.root = PlotPane(self)
@@ -2794,6 +2834,12 @@ class ExperimentWindow(QDialog):
             self.summary.frames = frames
             self.summary.live = False
             self.summary.cursor = None
+            # NOT SECONDS. The axis is the jammer's advantage over the
+            # fleet's own radios, and every series is the same metric across
+            # architectures, so they share one scale or the comparison the
+            # chart exists to make is destroyed.
+            self.summary.xlabel = "dB   P_j / P_t"
+            self.summary.shared_scale = True
             paths = sorted({f"agents.{a['id']}.penetration_m"
                             for f in frames for a in f["agents"]
                             if "penetration_m" in a})
@@ -3708,6 +3754,8 @@ class Console(QMainWindow):
             return
         self.frames = list(frames)
         self.plots.frames = self.frames
+        self.plots.xlabel = "s"
+        self.plots.shared_scale = False
         self.refresh_series_tree(self.frames[0])
         if hasattr(self, "live_button"):
             self.live_button.setChecked(False)
@@ -3833,6 +3881,11 @@ class Console(QMainWindow):
         self.plots.frames = frames
         self.plots.live = False
         self.plots.cursor = 0
+        self.plots.xlabel = xlabel
+        # Results holds many different metrics at once, so each keeps its own
+        # scale here - the shared scale belongs to the headline chart, which
+        # shows one metric across architectures.
+        self.plots.shared_scale = False
         self._known_series = []            # force the tree to rebuild
         self.refresh_series_tree(frames[0])
         if hasattr(self, "series_mode"):
@@ -5572,6 +5625,9 @@ class Console(QMainWindow):
             return
         self._buf = ""
         self.frames = []
+        # A live run is a time series again, whatever the last sweep left set.
+        self.plots.xlabel = "s"
+        self.plots.shared_scale = False
         self._lock_setup(True)
         self.proc = QProcess(self)
         self.proc.readyReadStandardOutput.connect(self.on_telemetry)
