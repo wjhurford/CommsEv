@@ -1948,6 +1948,146 @@ def observed_topology(links_out):
             "max_betweenness": round(maxb, 3), "hub": hub}
 
 
+# =============================================================================
+# FORMATIONS
+# =============================================================================
+# A formation is a FUNCTION of (how many vehicles, how far apart), not a list
+# of coordinates. That one decision buys everything that a table of x/y/z
+# cannot:
+#
+#   SIZE      one spacing number scales the whole shape. Doubling it doubles
+#             every gap, which doubles the path loss exponent's argument -
+#             spacing IS the link budget, so it has to be a dial.
+#   GROWTH    adding a vehicle has to be SENSIBLE per shape. A line gets one
+#             more on the end. A wedge alternates sides so it stays
+#             symmetrical instead of growing a limp. A circle re-spaces
+#             everyone, because a circle with one agent crammed in is not a
+#             circle. A table of coordinates cannot express any of that.
+#   PORTABLE  offsets are relative to the formation's own centre, so the same
+#             named shape drops onto any scene at any fleet size.
+#
+# The ground station is never part of a formation. It is furniture with a
+# radio, placed deliberately, and shuffling it because the fleet changed shape
+# would silently move the thing every link is measured against.
+FORMATIONS = ("line", "column", "abreast", "wedge", "echelon", "circle",
+              "diamond", "cube")
+
+
+def formation_offsets(shape, n, spacing=3.0):
+    """Offsets from the formation's centre, one per vehicle, in metres.
+
+    Returns [(dx, dy, dz)] * n, always centred: the mean offset is the origin,
+    so placing the formation is placing its middle. `line`/`column` run along
+    x (front to back); `abreast` runs along y.
+    """
+    shape = (shape or "line").lower()
+    n = max(int(n), 0)
+    d = float(spacing)
+    if n == 0:
+        return []
+    if n == 1:
+        return [(0.0, 0.0, 0.0)]
+    pts = []
+
+    if shape in ("line", "column"):
+        # Nose to tail. One more vehicle goes on the end.
+        pts = [(i * d, 0.0, 0.0) for i in range(n)]
+    elif shape == "abreast":
+        # Shoulder to shoulder. One more extends the rank.
+        pts = [(0.0, i * d, 0.0) for i in range(n)]
+    elif shape == "echelon":
+        # A diagonal rank - every vehicle offset back and to one side.
+        pts = [(-i * d, i * d, 0.0) for i in range(n)]
+    elif shape == "wedge":
+        # Apex forward, then ALTERNATING sides so the shape stays symmetric.
+        # Building one flank first and then the other would leave a fleet of
+        # four looking like a limp rather than an arrowhead.
+        pts = [(0.0, 0.0, 0.0)]
+        for i in range(1, n):
+            rank = (i + 1) // 2
+            side = -1.0 if i % 2 else 1.0
+            pts.append((-rank * d, side * rank * d, 0.0))
+    elif shape == "circle":
+        # Evenly spaced, ALWAYS. Adding a vehicle re-spaces every one of them,
+        # because a circle with an extra agent wedged in is not a circle. The
+        # radius is chosen so the CHORD between neighbours is the spacing, so
+        # the dial still means "how far apart are they".
+        r = d / (2.0 * math.sin(math.pi / n)) if n > 2 else d / 2.0
+        pts = [(r * math.cos(2.0 * math.pi * i / n),
+                r * math.sin(2.0 * math.pi * i / n), 0.0) for i in range(n)]
+    elif shape == "diamond":
+        # Front, both flanks, rear - then further rings outward.
+        ring = ((1, 0), (0, 1), (0, -1), (-1, 0))
+        for i in range(n):
+            lap, k = divmod(i, 4)
+            ux, uy = ring[k]
+            pts.append((ux * d * (lap + 1), uy * d * (lap + 1), 0.0))
+    elif shape == "cube":
+        # A 3-D lattice, as near cubic as the count allows. The only shape
+        # that uses z, and the one that matters the moment these are aircraft:
+        # a stacked formation has entirely different link geometry from a flat
+        # one, and altitude buys radio horizon.
+        side = max(1, math.ceil(n ** (1.0 / 3.0)))
+        for i in range(n):
+            z, rem = divmod(i, side * side)
+            y, x = divmod(rem, side)
+            pts.append((x * d, y * d, z * d))
+    else:
+        pts = [(i * d, 0.0, 0.0) for i in range(n)]
+
+    # CENTRE ON THE AXIS OF SYMMETRY, not on the centroid, for shapes that
+    # have one. A wedge of four has three followers, so one flank carries two
+    # and the other one; centring on the centroid then shifts the whole
+    # arrowhead sideways and it stops looking like a wedge at all. The
+    # symmetry axis is y = 0 for every shape built about it, so use that and
+    # let the imbalance show as what it is - an odd vehicle out - rather than
+    # as a crooked formation.
+    cx = sum(q[0] for q in pts) / len(pts)
+    if shape in ("wedge", "line", "column", "abreast", "circle", "diamond"):
+        cy = 0.0 if shape != "abreast" else sum(q[1] for q in pts) / len(pts)
+        if shape in ("circle", "diamond"):
+            cy = sum(q[1] for q in pts) / len(pts)
+    else:
+        cy = sum(q[1] for q in pts) / len(pts)
+    cz = sum(q[2] for q in pts) / len(pts)
+    return [(round(q[0] - cx, 4), round(q[1] - cy, 4), round(q[2] - cz, 4))
+            for q in pts]
+
+
+def apply_formation(agents, shape, spacing=3.0, centre=None, networks=None,
+                    yaw=None):
+    """Place a fleet's MOBILE vehicles into `shape` about `centre`.
+
+    Ground stations and anything marked ghost are left exactly where they are:
+    a formation is what the moving part of a fleet does, and quietly relocating
+    the bench would move the thing every link in the run is measured against.
+    Returns the ids it moved.
+    """
+    movable = [a for a in agents
+               if not a.get("ghost")
+               and a.get("platform") != "ground_station"
+               and not a.get("jammer")]
+    if not movable:
+        return []
+    if centre is None:
+        centre = (sum(_num(a["start"]["x"] if "start" in a
+                           else (a.get("pose") or {}).get("x"))
+                      for a in movable) / len(movable),
+                  sum(_num(a["start"]["y"] if "start" in a
+                           else (a.get("pose") or {}).get("y"))
+                      for a in movable) / len(movable),
+                  0.0)
+    offs = formation_offsets(shape, len(movable), spacing)
+    for a, (dx, dy, dz) in zip(movable, offs):
+        tgt = a["start"] if "start" in a else a.setdefault("pose", {})
+        tgt["x"] = centre[0] + dx
+        tgt["y"] = centre[1] + dy
+        tgt["z"] = (centre[2] if len(centre) > 2 else 0.0) + dz
+        if yaw is not None:
+            tgt["yaw"] = yaw
+    return [a["id"] for a in movable]
+
+
 def radio_tx_dbm(agent, default=DEFAULT_TX_DBM):
     """This agent's transmit power, in dBm.
 

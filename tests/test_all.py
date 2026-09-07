@@ -1424,6 +1424,83 @@ def test_routing_gates_authority_not_just_geometry():
           f"star {star:.3f} mesh {mesh:.3f} tiered {tiered:.3f}")
 
 
+def test_formations_are_functions_not_coordinate_lists():
+    """A formation is a FUNCTION of (count, spacing), which is what lets one
+    named shape serve any fleet at any size - and what a table of x/y/z can
+    never do. Four properties, each of which a coordinate list would break."""
+    print("\nFORMATIONS SCALE, GROW AND STAY CENTRED")
+    import math as _m
+
+    for shape in st.FORMATIONS:
+        for n in (1, 2, 3, 4, 5, 8, 12):
+            offs = st.formation_offsets(shape, n, 3.0)
+            check(f"{shape} n={n}: one offset per vehicle", len(offs) == n)
+            if n > 1:
+                sep = min(_m.dist(a, b) for i, a in enumerate(offs)
+                          for j, b in enumerate(offs) if i < j)
+                check(f"{shape} n={n}: nobody is stacked on anybody",
+                      sep > 0.1, f"min separation {sep:.2f} m")
+
+    # CENTRED: placing a formation is placing its middle.
+    for shape in st.FORMATIONS:
+        offs = st.formation_offsets(shape, 7, 3.0)
+        cx = sum(q[0] for q in offs) / len(offs)
+        check(f"{shape}: x is centred on the formation's middle",
+              abs(cx) < 1e-3, f"{cx}")
+
+    # SIZE: one dial scales the whole shape linearly.
+    for shape in st.FORMATIONS:
+        a = st.formation_offsets(shape, 6, 2.0)
+        b = st.formation_offsets(shape, 6, 4.0)
+        # Tolerance is 1e-3, not 1e-6: offsets are rounded to 4 decimals on
+        # the way out so a saved formation is clean YAML rather than
+        # sixteen-digit noise. Doubling a rounded number can differ from the
+        # rounded double by twice the rounding, and that is the rounding
+        # working as intended, not the shape failing to scale.
+        ok = all(abs(2 * p[k] - q[k]) < 1e-3
+                 for p, q in zip(a, b) for k in range(3))
+        check(f"{shape}: doubling the spacing doubles the shape", ok)
+
+    # GROWTH, per shape, as specified:
+    line5 = st.formation_offsets("line", 5, 3.0)
+    line6 = st.formation_offsets("line", 6, 3.0)
+    check("a line adds one on the END and keeps its spacing",
+          len(line6) == 6
+          and abs((max(q[0] for q in line6) - min(q[0] for q in line6))
+                  - (max(q[0] for q in line5) - min(q[0] for q in line5))
+                  - 3.0) < 1e-6)
+
+    for n in (3, 5, 7, 9):
+        w = st.formation_offsets("wedge", n, 3.0)
+        ys = sorted(round(q[1], 4) for q in w)
+        check(f"a wedge of {n} is symmetric about its axis",
+              all(abs(ys[i] + ys[-1 - i]) < 1e-3 for i in range(len(ys) // 2)),
+              str(ys))
+        check(f"a wedge of {n} has its apex in front",
+              max(w, key=lambda q: q[0])[1] == 0.0)
+
+    for n in (4, 5, 6, 9):
+        c = st.formation_offsets("circle", n, 3.0)
+        r = [_m.hypot(q[0], q[1]) for q in c]
+        check(f"a circle of {n} re-spaces EVERY vehicle evenly",
+              max(r) - min(r) < 1e-3, f"radii {min(r):.6f}..{max(r):.6f}")
+
+    check("only the cube uses altitude",
+          {round(q[2], 3) for q in st.formation_offsets("cube", 8, 3.0)} != {0.0}
+          and all({round(q[2], 3) for q in st.formation_offsets(sh, 8, 3.0)}
+                  == {0.0} for sh in st.FORMATIONS if sh != "cube"))
+
+    # THE GROUND STATION IS NEVER MOVED.
+    arena, agents, links = st.load_scenario(
+        {"scene": "corridor_200m", "fleets": ["3_roboracer_no_lidar"]})
+    before = dict(next(a["start"] for a in agents if a["id"] == "gcs"))
+    moved = st.apply_formation(agents, "wedge", 4.0)
+    after = next(a["start"] for a in agents if a["id"] == "gcs")
+    check("a formation moves the vehicles, not the ground station",
+          "gcs" not in moved and after["x"] == before["x"]
+          and after["y"] == before["y"], f"{moved}")
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -1448,7 +1525,8 @@ if __name__ == "__main__":
                test_retask_claim_failure_is_never_silent_and_not_lost,
                test_origin_passthrough,
                test_missions_read_belief_not_ground_truth,
-               test_routing_gates_authority_not_just_geometry):
+               test_routing_gates_authority_not_just_geometry,
+               test_formations_are_functions_not_coordinate_lists):
         try:
             fn()
         except Exception:

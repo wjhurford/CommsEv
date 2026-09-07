@@ -149,6 +149,16 @@ def build(cfg, cell):
         a = by.get(aid)
         if a is not None:
             a["start"].update({k: float(v) for k, v in xy.items()})
+    # FORMATION, as a swept axis. Applied to the MOBILE vehicles only - the
+    # ground station keeps the position it was deliberately given, because
+    # every link in the run is measured against it and shuffling it because
+    # the fleet changed shape would move the ruler.
+    shape = cell.get("formation") or cfg.get("formation")
+    if shape and shape != "(as spawned)":
+        st.apply_formation(
+            agents, shape,
+            spacing=float(cell.get("spacing", cfg.get("spacing", 3.0))))
+
     doct = cfg.get("doctrine")
     if doct:
         for a in agents:
