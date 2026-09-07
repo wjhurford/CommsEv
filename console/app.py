@@ -740,6 +740,19 @@ class Viewport(QWidget):
         #           looked exactly like a normally commanded one, which is the
         #           single most important state the doctrine experiment is
         #           about.
+        # A JAMMER SAYS WHAT IT IS DOING, always - not only when selected.
+        # Its power is the single most important number on the map during an
+        # experiment replay, and "is this actually jamming?" should never need
+        # a click to answer. It is the question that hid a wrong replay.
+        jam = agent.get("jammer")
+        if jam:
+            on = jam.get("on")
+            p.setPen(QPen(QColor(NETWORK_COLOURS["red"] if on else C_DIM)))
+            p.setFont(QFont("Consolas", 7))
+            p.drawText(self.to_screen(x, y, z) + QPointF(9, 6),
+                       f"{_num(jam.get('tx_dbm')):.0f} dBm @ "
+                       f"{_num(jam.get('band_mhz')):.0f} MHz"
+                       + ("" if on else "  (silent)"))
         note = ("⊘ held (no commander)" if agent.get("link_loss_hold")
                 else "→ intent (no commander)" if agent.get("on_intent")
                 else None)
@@ -2493,13 +2506,27 @@ class ExperimentWindow(QDialog):
         self.bar.setFormat("idle")
         lay.addWidget(self.bar)
 
-        # No chart in this window. It belongs in Results, where the plotting
-        # works and where splitting panes and picking series already exist.
-        self.plot = ResultPlot()          # kept for the highlight colour map
+        # THE HEADLINE CHART, HERE, drawn by PlotArea - the same widget the
+        # Results tab uses, which has worked all along. Four bespoke charts
+        # failed in this slot for one reason: PlotPane draws against
+        # sim_time_s, and a sweep handed over without a time gets an axis of
+        # zero width, which renders as nothing at all and says nothing about
+        # why. Give each swept power a frame whose sim_time_s IS that power
+        # and everything works.
+        #
+        # This one opens on penetration, the answer to the question the
+        # experiment asks. Every other metric is in the Results tab, where
+        # there is room to split panes and overlay them.
+        self.plot = ResultPlot()          # kept only for its colour map
         self.plot.hide()
-        note = QLabel("Charts open in the RESULTS tab - drag a series onto "
-                      "the plot, right-click a plot to split it. The x axis "
-                      "is the swept jammer advantage, not seconds.")
+        self.summary = PlotArea()
+        self.summary.setMinimumHeight(280)
+        lay.addWidget(self.summary, 2)
+        note = QLabel("Penetration against jammer advantage. The x axis is "
+                      "P_j/P_t in dB, not seconds. Every other metric - "
+                      "commanded fraction, belief error, worst SINR - is in "
+                      "the Results tab, where panes can be split and series "
+                      "overlaid.")
         note.setObjectName("hint")
         note.setWordWrap(True)
         lay.addWidget(note)
@@ -2658,41 +2685,94 @@ class ExperimentWindow(QDialog):
                 self.console.say("could not chart the sweep:\n"
                                  + traceback.format_exc())
 
+    FILTER_COLS = ("authority", "routing", "jam_rel_db")
+
     def _build_filter(self):
-        for b in self._boxes:
-            b.setParent(None)
-        self._boxes = []
-        powers = sorted({r.get("jam_rel_db") for r in self.rows
-                         if r.get("jam_rel_db") not in (None, "")},
-                        key=lambda v: float(v))
-        for i, pw in enumerate(powers):
-            b = QCheckBox(f"{float(pw):+.0f} dB")
-            b.setChecked(i == 0)     # open on ONE power, not all of them
-            b.stateChanged.connect(self._apply_filter)
-            self.filt.insertWidget(self.filt.count() - 1, b)
-            self._boxes.append(b)
+        """One tick-list per filtered column, behind a button.
+
+        Three columns are worth filtering and no more: the two architecture
+        axes and the jammer power. Everything else in the table is an OUTPUT,
+        and filtering on an output is how you fool yourself.
+        """
+        for w in self._boxes:
+            w.setParent(None)
+        self._boxes, self._filter = [], {}
+        for col in self.FILTER_COLS:
+            vals = sorted({r.get(col) for r in self.rows
+                           if r.get(col) not in (None, "")},
+                          key=lambda v: (self._numish(v), str(v)))
+            if not vals:
+                continue
+            self._filter[col] = set(vals)
+            btn = QPushButton(f"{col} \u25be")
+            menu = QMenu(btn)
+            for v in vals:
+                act = QAction(str(v), menu)
+                act.setCheckable(True)
+                act.setChecked(True)
+                act.toggled.connect(
+                    lambda on, c=col, val=v: self._toggle_filter(c, val, on))
+                menu.addAction(act)
+            menu.addSeparator()
+            allact = QAction("all / none", menu)
+            allact.triggered.connect(
+                lambda _c=False, mn=menu, cc=col: self._toggle_all(mn, cc))
+            menu.addAction(allact)
+            btn.setMenu(menu)
+            btn.setToolTip(f"Show only these {col} values.")
+            self.filt.insertWidget(self.filt.count() - 1, btn)
+            self._boxes.append(btn)
+
+    @staticmethod
+    def _numish(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float("inf")
+
+    def _toggle_filter(self, col, val, on):
+        keep = self._filter.setdefault(col, set())
+        keep.add(val) if on else keep.discard(val)
+        self._apply_filter()
+
+    def _toggle_all(self, menu, col):
+        acts = [a for a in menu.actions() if a.isCheckable()]
+        want = not all(a.isChecked() for a in acts)
+        for a in acts:
+            a.setChecked(want)
+
 
     def _apply_filter(self, *_):
-        keep = {b.text().replace(" dB", "").strip()
-                for b in self._boxes if b.isChecked()}
-
-        def shown(r):
+        """Redraw the table and the chart from the ticked values only."""
+        rows = [r for r in self.rows
+                if all(r.get(c) in keep
+                       for c, keep in (self._filter or {}).items())]
+        self._shown = rows
+        self._fill_table(rows)
+        if self.console is not None:
             try:
-                return f"{float(r.get('jam_rel_db')):+.0f}" in keep
-            except (TypeError, ValueError):
-                return False
-        self.plot.set_rows([r for r in self.rows if shown(r)])
+                self.console.show_sweep_results(rows)
+            except Exception:                          # noqa: BLE001
+                pass
+        self._draw_summary(rows)
+        self.bar.setFormat(f"{len(rows)} of {len(self.rows)} runs shown")
 
-    def _fill_table(self):
-        cols = [c for c in ("authority", "routing", "jam_rel_db", "seed",
+
+    def _fill_table(self, rows=None):
+        rows = self.rows if rows is None else rows
+        self._table_rows = rows
+        # THE COLUMNS THAT MATTER. The CSV keeps everything; this table shows
+        # the four that answer the question - what was configured, how far it
+        # got, and whether it finished - because twenty columns of scrolling
+        # is not a result you can read.
+        cols = [c for c in ("authority", "routing", "jam_rel_db",
                             "penetration_m", "penetration_frac", "arrived",
-                            "complete_success", "commanded_fraction",
-                            "ended_s", "cell")
-                if self.rows and c in self.rows[0]]
+                            "commanded_fraction", "ended_s")
+                if rows and c in rows[0]]
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
-        self.table.setRowCount(len(self.rows))
-        for r, row in enumerate(self.rows):
+        self.table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
             for c, key in enumerate(cols):
                 it = QTableWidgetItem(str(row.get(key, "")))
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
@@ -2701,6 +2781,28 @@ class ExperimentWindow(QDialog):
                         ResultPlot.AUTH_COLOUR.get(row.get(key), "#AAAAAA"))))
                 self.table.setItem(r, c, it)
         self.table.resizeColumnsToContents()
+
+
+    def _draw_summary(self, rows):
+        """Load penetration into this window's own plot, one series per
+        architecture, already selected - so the answer is on screen without
+        anyone having to build a chart first."""
+        if not rows or self.console is None:
+            return
+        try:
+            frames = self.console.sweep_frames(rows)
+            self.summary.frames = frames
+            self.summary.live = False
+            self.summary.cursor = None
+            paths = sorted({f"agents.{a['id']}.penetration_m"
+                            for f in frames for a in f["agents"]
+                            if "penetration_m" in a})
+            for pane in self.summary.panes():
+                pane.series = list(paths)
+            self.summary.refresh()
+        except Exception as exc:                       # noqa: BLE001
+            if self.console is not None:
+                self.console.say(f"summary chart: {exc}")
 
     def open_svg(self):
         """Render the current results to SVG and open it."""
@@ -2748,9 +2850,10 @@ class ExperimentWindow(QDialog):
         you set up by hand. There is one run path in this application, not
         two, and this is it.
         """
-        if row < 0 or row >= len(self.rows):
+        shown = getattr(self, "_table_rows", None) or self.rows
+        if row < 0 or row >= len(shown):
             return
-        r = self.rows[row]
+        r = shown[row]
         cfg = getattr(self, "_cfg", None)
         if cfg is None:
             self.bar.setFormat("run an experiment first")
@@ -2769,15 +2872,34 @@ class ExperimentWindow(QDialog):
             if cfg.get("squads"):
                 blue["squads"] = copy.deepcopy(cfg["squads"])
                 blue["leader_loss"] = cfg.get("leader_loss", "fallback")
-            # The jammer at the cell's own power, derived from the same
-            # dimensionless ratio the sweep used - never a second definition.
+            # THE JAMMER'S POWER. This looked right and was wrong: a composed
+            # run's `agents:` list holds only OVERRIDES - an id, a pose, a
+            # doctrine - and never a `jammer` block, which lives in the fleet
+            # layer underneath. So testing `if a.get("jammer")` matched
+            # nothing, the override was never written, and the replay ran at
+            # whatever the fleet file declared instead of the cell's power.
+            # The cars advanced almost unimpeded and the run looked unjammed,
+            # because it very nearly was.
+            #
+            # Resolve the composition first to find out which agents ARE
+            # jammers, then write the power as an overlay entry keyed by id -
+            # which _overlay merges into the fleet's own block.
             sweep = _sweep_module()
             dbm = sweep.FLEET_TX_DBM + float(r.get("jam_rel_db") or 0.0)
-            for a in compose.get("agents") or []:
-                if a.get("jammer"):
-                    a["jammer"] = dict(a.get("jammer") or {})
-                    a["jammer"]["tx_power"] = {"value": dbm, "unit": "dBm",
-                                               "source": "experiment cell"}
+            import stub_telemetry as _st
+            _a, _agents, _l = _st.load_scenario(copy.deepcopy(compose))
+            jam_ids = [x["id"] for x in _agents if x.get("jammer")]
+            by_id = {x.get("id"): x for x in compose.setdefault("agents", [])}
+            for jid in jam_ids:
+                entry = by_id.get(jid)
+                if entry is None:
+                    entry = {"id": jid}
+                    compose["agents"].append(entry)
+                entry["jammer"] = {
+                    "tx_power": {"value": dbm, "unit": "dBm",
+                                 "source": "experiment cell"}}
+            if not jam_ids:
+                self.bar.setFormat("this cell has no jammer to set")
         except Exception as exc:                       # noqa: BLE001
             self.bar.setFormat(f"could not compose that cell: {exc}")
             return
@@ -2787,7 +2909,9 @@ class ExperimentWindow(QDialog):
         if self.console is not None:
             self.console.run_composition(
                 compose, mission=cfg.get("mission") or "advance",
-                title=r.get("cell", ""), seed=int(r.get("seed") or 1))
+                title=r.get("cell", ""), seed=int(r.get("seed") or 1),
+                warmup_s=float(cfg.get("warmup_s") or 0.0),
+                jam_dbm=dbm)
         self.bar.setFormat(f"running {r.get('cell')} live in the Console")
 
 
@@ -3640,30 +3764,15 @@ class Console(QMainWindow):
                      "worst_sinr_db", "worst_pdr", "arrived", "distance_m",
                      "ended_s")
 
-    def show_sweep_results(self, rows, xkey="jam_rel_db",
-                           xlabel="P_j/P_t (dB)"):
-        """Put a SWEPT result into the Results tab, using the plotting the
-        Console already has.
+    def sweep_frames(self, rows, xkey="jam_rel_db"):
+        """Turn swept results into frames the existing plotting can draw.
 
-        THE X AXIS WAS THE WHOLE PROBLEM. PlotPane draws against sim_time_s,
-        so anything handed to it without a time is drawn on an axis of zero
-        width - which renders as nothing at all, with no error, which is
-        exactly what four attempts at a bespoke chart widget produced.
-
-        The fix is not another widget. A sweep has the same SHAPE as a run -
-        a value per step - so each swept parameter value becomes a frame whose
-        `sim_time_s` IS that value, and each architecture becomes an agent
-        whose fields are its metrics. Everything the Results tab can already
-        do then works unchanged: right-click to split a pane, drag series in,
-        overlay them, scrub the cursor.
-
-        Read the x axis as the swept parameter, not as seconds. That is the
-        one honest compromise, and it is worth it to reuse plotting that
-        demonstrably works rather than to maintain a fifth version that does
-        not.
+        A sweep has the same SHAPE as a run - a value per step - so each
+        swept parameter value becomes a frame whose sim_time_s IS that value,
+        and each architecture becomes an agent whose fields are its metrics.
+        That one substitution is what makes every plot in this application
+        work on a sweep without a line of new drawing code.
         """
-        if not rows:
-            return
         xs = sorted({float(r[xkey]) for r in rows
                      if r.get(xkey) not in (None, "")})
         frames = []
@@ -3691,6 +3800,35 @@ class Console(QMainWindow):
                            "run_state": "sweep", "mission": "sweep",
                            "agents": agents, "links": [],
                            "arena": self.viewport.arena or {}})
+        return frames
+
+    def show_sweep_results(self, rows, xkey="jam_rel_db",
+                           xlabel="P_j/P_t (dB)"):
+        """Put a SWEPT result into the Results tab, using the plotting the
+        Console already has.
+
+        THE X AXIS WAS THE WHOLE PROBLEM. PlotPane draws against sim_time_s,
+        so anything handed to it without a time is drawn on an axis of zero
+        width - which renders as nothing at all, with no error, which is
+        exactly what four attempts at a bespoke chart widget produced.
+
+        The fix is not another widget. A sweep has the same SHAPE as a run -
+        a value per step - so each swept parameter value becomes a frame whose
+        `sim_time_s` IS that value, and each architecture becomes an agent
+        whose fields are its metrics. Everything the Results tab can already
+        do then works unchanged: right-click to split a pane, drag series in,
+        overlay them, scrub the cursor.
+
+        Read the x axis as the swept parameter, not as seconds. That is the
+        one honest compromise, and it is worth it to reuse plotting that
+        demonstrably works rather than to maintain a fifth version that does
+        not.
+        """
+        if not rows:
+            return
+        frames = self.sweep_frames(rows, xkey)
+        if not frames:
+            return
         self.frames = frames
         self.plots.frames = frames
         self.plots.live = False
@@ -3716,7 +3854,8 @@ class Console(QMainWindow):
                  f"x axis is {xlabel}. Drag a series onto the plot; "
                  f"right-click a plot to split it.")
 
-    def run_composition(self, compose, mission="advance", title="", seed=1):
+    def run_composition(self, compose, mission="advance", title="", seed=1,
+                        warmup_s=0.0, jam_dbm=None):
         """Start a LIVE run of a composition handed in from elsewhere.
 
         This is how an experiment cell is opened: the sweep's own composition,
@@ -3746,14 +3885,24 @@ class Console(QMainWindow):
         red = any(a.get("jammer") for a in (compose.get("agents") or []))
 
         def _order():
-            self._send_setup_orders(mission, red)
+            self._send_setup_orders(mission, red=False)
         QTimer.singleShot(900, _order)
-        self.say(f"Running {title or 'composition'} live - mission "
-                 f"{mission}, seed {seed}.")
+        # THE JAMMER ARMS AFTER THE WARM-UP, exactly as it does in the sweep.
+        # Arming it at t=0 instead would have jammed the fleet before it had
+        # moved, which is a different experiment from the one the table
+        # scored - and the whole point of opening a cell is to watch THAT run.
+        if red:
+            QTimer.singleShot(int(900 + max(warmup_s, 0.0) * 1000),
+                              lambda: self._send_setup_orders(None, red=True))
+        self.say(f"Running {title or 'composition'} live - mission {mission}, "
+                 f"seed {seed}"
+                 + (f", jammer {jam_dbm:.0f} dBm arming at t={warmup_s:.0f}s"
+                    if jam_dbm is not None else "") + ".")
 
     def _send_setup_orders(self, mission, red):
         """SETMISSION, then launch, down the ordinary command channel."""
-        lines = [f"SETMISSION {mission}", "LAUNCH blue"]
+        lines = ([] if mission is None
+                 else [f"SETMISSION {mission}", "LAUNCH blue"])
         if red:
             lines.append("LAUNCH red")
         d = getattr(self, "_retask_dir", None) or (REPO_ROOT / "runs" / "retask")
@@ -4906,6 +5055,12 @@ class Console(QMainWindow):
 
     def on_tab_changed(self, index):
         """Results shows the plots; every other tab shows the world."""
+        # COLLAPSE THE TREES. A tab whose trees are all expanded is metres
+        # long and you scroll past the thing you came for. Opening a branch is
+        # one click; closing thirty is not.
+        w = self.tabs.widget(index)
+        for tree in (w.findChildren(QTreeWidget) if w is not None else []):
+            tree.collapseAll()
         if self.tabs.tabText(index) == "Setup":
             self._refresh_setup_lists()
         self.stack.setCurrentIndex(1 if self.tabs.tabText(index) == "Results" else 0)
