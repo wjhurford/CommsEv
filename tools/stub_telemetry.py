@@ -1973,14 +1973,114 @@ FORMATIONS = ("line", "column", "abreast", "wedge", "echelon", "circle",
               "diamond", "cube")
 
 
+# ---------------------------------------------------------------------------
+# CUSTOM FORMATIONS - a shape drawn by hand, saved, and then swept
+# ---------------------------------------------------------------------------
+# The built-in shapes are functions, which is what lets one name serve any
+# fleet size. A hand-drawn shape cannot be: it is a specific arrangement of a
+# specific number of vehicles, made by dragging them about on the map until it
+# looked right. Both are legitimate and they are stored differently for that
+# reason - a function has parameters, a drawing has coordinates.
+#
+# What IS kept parametric is the size. A saved formation records the spacing
+# it was drawn at (the closest gap between any two of its vehicles), so the
+# proportional dial still means the same thing: ask for it at 9 m and every
+# offset scales by 9 / whatever it was drawn at. The shape is preserved; only
+# its size is a decision made later.
+FORMATION_DIR = REPO_ROOT / "formations"
+
+
+def custom_formations():
+    """The names of the hand-drawn formations saved on disk."""
+    try:
+        return sorted(f.stem for f in FORMATION_DIR.glob("*.yaml"))
+    except OSError:
+        return []
+
+
+def load_formation(name):
+    """{'offsets': [[dx, dy, dz], ...], 'spacing': m} or None."""
+    path = FORMATION_DIR / f"{name}.yaml"
+    try:
+        doc = _load_yaml(path) or {}
+    except OSError:
+        return None
+    offs = [[float(v) for v in row] for row in (doc.get("offsets") or [])]
+    if not offs:
+        return None
+    return {"offsets": offs,
+            "spacing": float(doc.get("spacing") or 1.0) or 1.0,
+            "name": doc.get("name") or name}
+
+
+def _nearest_gap(offs):
+    """The closest gap between any two vehicles - the natural scale of a
+    drawn shape, and the number the spacing dial is scaling."""
+    best = None
+    for i, a in enumerate(offs):
+        for b in offs[i + 1:]:
+            d = math.dist(a, b)
+            if d > 1e-9 and (best is None or d < best):
+                best = d
+    return best or 1.0
+
+
+def save_formation(name, offsets, path=None):
+    """Write a hand-drawn arrangement as a reusable, scalable shape.
+
+    Offsets are CENTRED here, not by the caller, so a saved formation always
+    has its middle at the origin - which is what makes "place the formation at
+    X" mean the same thing for a drawn shape as for a generated one.
+    """
+    offs = [[float(q[0]), float(q[1]), float(q[2])] for q in offsets]
+    if not offs:
+        raise ValueError("a formation needs at least one vehicle")
+    cx = sum(q[0] for q in offs) / len(offs)
+    cy = sum(q[1] for q in offs) / len(offs)
+    cz = sum(q[2] for q in offs) / len(offs)
+    offs = [[round(q[0] - cx, 4), round(q[1] - cy, 4), round(q[2] - cz, 4)]
+            for q in offs]
+    doc = {"spec_version": 0.1, "name": name, "kind": "formation",
+           "vehicles": len(offs),
+           # The gap it was drawn at. Asking for this shape at another spacing
+           # scales every offset by the ratio, so the dial keeps its meaning.
+           "spacing": round(_nearest_gap(offs), 4),
+           "offsets": offs}
+    path = Path(path) if path else (FORMATION_DIR / f"{name}.yaml")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import yaml as _yaml
+    path.write_text(
+        "# A formation DRAWN BY HAND in the Console and saved here.\n"
+        "# Offsets are metres from the formation's centre, so placing it is\n"
+        "# placing its middle. `spacing` is the closest gap between any two\n"
+        "# vehicles as drawn - ask for this shape at another spacing and\n"
+        "# every offset scales by the ratio, so the size stays a dial.\n"
+        "# The vehicle COUNT is fixed: this is a drawing, not a function. A\n"
+        "# larger fleet keeps the spawn poses of whoever the shape runs out\n"
+        "# of room for, and says so.\n"
+        + _yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    return path
+
+
 def formation_offsets(shape, n, spacing=3.0):
     """Offsets from the formation's centre, one per vehicle, in metres.
 
     Returns [(dx, dy, dz)] * n, always centred: the mean offset is the origin,
     so placing the formation is placing its middle. `line`/`column` run along
     x (front to back); `abreast` runs along y.
+
+    A SAVED shape is a drawing rather than a function, so it returns as many
+    offsets as it was drawn with and no more - see save_formation.
     """
+    raw = shape
     shape = (shape or "line").lower()
+    if shape not in FORMATIONS:
+        saved = load_formation(raw)
+        if saved:
+            k = float(spacing) / saved["spacing"]
+            return [(round(q[0] * k, 4), round(q[1] * k, 4),
+                     round(q[2] * k, 4))
+                    for q in saved["offsets"][:max(int(n), 0)]]
     n = max(int(n), 0)
     d = float(spacing)
     if n == 0:
@@ -2078,6 +2178,7 @@ def apply_formation(agents, shape, spacing=3.0, centre=None, networks=None,
                       for a in movable) / len(movable),
                   0.0)
     offs = formation_offsets(shape, len(movable), spacing)
+    moved = []
     for a, (dx, dy, dz) in zip(movable, offs):
         tgt = a["start"] if "start" in a else a.setdefault("pose", {})
         tgt["x"] = centre[0] + dx
@@ -2085,7 +2186,11 @@ def apply_formation(agents, shape, spacing=3.0, centre=None, networks=None,
         tgt["z"] = (centre[2] if len(centre) > 2 else 0.0) + dz
         if yaw is not None:
             tgt["yaw"] = yaw
-    return [a["id"] for a in movable]
+        moved.append(a["id"])
+    # ONLY WHAT WAS ACTUALLY MOVED. A saved shape is drawn for a fixed number
+    # of vehicles, so a bigger fleet has some left over - and reporting them
+    # as placed would hide that they are still sitting wherever they spawned.
+    return moved
 
 
 def radio_tx_dbm(agent, default=DEFAULT_TX_DBM):

@@ -82,6 +82,7 @@ try:
     # The Console imports them rather than owning a second copy, so what the
     # spawn dialog previews is exactly what a swept run will place.
     from stub_telemetry import FORMATIONS, formation_offsets
+    from stub_telemetry import custom_formations, save_formation
 except Exception:
     _resolve_mission = None
     _jammer_range_m = None
@@ -89,6 +90,8 @@ except Exception:
     FORMATIONS = ("line", "column", "abreast", "wedge", "echelon", "circle",
                   "diamond", "cube")
     formation_offsets = None
+    custom_formations = lambda: []          # noqa: E731
+    save_formation = None
 
 # The entry that means "leave every vehicle exactly where it was put". Used in
 # the spawn dialog and as a value on the swept formation axis, so "no
@@ -2450,6 +2453,10 @@ class SpawnDialog(QDialog):
         self.form_combo = QComboBox()
         self.form_combo.addItem(AS_SPAWNED)
         self.form_combo.addItems(list(FORMATIONS))
+        # Shapes drawn by hand and saved. A generated shape is a function of
+        # the fleet size; a drawn one is a drawing, so it places as many
+        # vehicles as it was drawn with and leaves any extras where they are.
+        self.form_combo.addItems(list(custom_formations()))
         self.form_combo.setToolTip(
             "line/column  nose to tail; one more goes on the end.\n"
             "abreast      shoulder to shoulder along y.\n"
@@ -2609,6 +2616,13 @@ class SpawnDialog(QDialog):
             self.table.item(r, 1).setText(f"{cx + dx:.3f}")
             self.table.item(r, 2).setText(f"{cy + dy:.3f}")
             self.table.item(r, 3).setText(f"{cz + dz:.3f}")
+        # A SAVED SHAPE HAS A FIXED SIZE. Whoever it ran out of room for keeps
+        # the pose they had, and is TOLD SO - a fleet quietly half in
+        # formation is a run nobody can explain afterwards.
+        short = len(rows) - len(offs)
+        self.space_lbl.setText(
+            f"{self.spacing():.1f} m" if short <= 0
+            else f"{self.spacing():.1f} m  ({short} not placed)")
 
 
 # ---------------------------------------------------------------------------
@@ -3618,6 +3632,15 @@ class Console(QMainWindow):
             b.clicked.connect(lambda _c=False, sd=_side: self.save_fleet_as(sd))
             savrow.addWidget(b)
         clay.addLayout(savrow)
+        savef = QPushButton("Save formation as...")
+        savef.setToolTip(
+            "Keep the arrangement now on the map as a named, reusable shape.\n"
+            "Drag the vehicles into the shape you want, then save it - it "
+            "becomes a value on the experiment's formation axis, so two "
+            "hand-drawn shapes can be swept against each other.\n"
+            "The ground station is never part of it.")
+        savef.clicked.connect(self.save_formation_as)
+        clay.addWidget(savef)
         slay.addWidget(self.compose_box)
         self.compose_box.setVisible(False)
 
@@ -3731,7 +3754,8 @@ class Console(QMainWindow):
             "control the other shapes are compared against.")
         menu = QMenu(self.exp_form_btn)
         self.exp_forms = {}
-        for shape in (AS_SPAWNED,) + tuple(FORMATIONS):
+        for shape in (AS_SPAWNED,) + tuple(FORMATIONS) \
+                + tuple(custom_formations()):
             act = QAction(shape, menu)
             act.setCheckable(True)
             act.setChecked(shape == AS_SPAWNED)
@@ -4236,6 +4260,68 @@ class Console(QMainWindow):
         self.say(f"Saved {Path(path).name} ({len(out['agents'])} agents)")
 
 
+    def save_formation_as(self):
+        """Write the arrangement on the map as a named formation.
+
+        The offsets are taken from the MOBILE vehicles only and centred on
+        their own middle, so the saved shape is a shape and not a position -
+        it can be placed anywhere afterwards. The ground station is excluded
+        for the same reason it is excluded everywhere else: every link in the
+        run is measured against where the bench is.
+        """
+        if save_formation is None:
+            self.say("formations are unavailable - the model did not import.")
+            return
+        movable = []
+        view = getattr(self, "resolved", None) or self.doc or {}
+        bodies = {a.get("id"): a for a in (view.get("agents") or [])}
+        for aid, pose in (self._spawns or {}).items():
+            b = bodies.get(aid) or {}
+            if b.get("ghost") or b.get("jammer") \
+                    or b.get("platform") == "ground_station" \
+                    or aid in (self._red_ids or set()):
+                continue
+            movable.append((aid, pose))
+        if len(movable) < 2:
+            self.say("A formation needs at least two mobile vehicles on the "
+                     "map. Choose a scene and a blue fleet first.")
+            return
+        name, ok = QInputDialog.getText(
+            self, "Save formation", "Name this shape:")
+        name = (name or "").strip().replace(" ", "_")
+        if not ok or not name:
+            return
+        try:
+            path = save_formation(
+                name, [(p.get("x", 0.0), p.get("y", 0.0), p.get("z", 0.0))
+                       for _aid, p in movable])
+        except (OSError, ValueError) as exc:
+            self.say(f"cannot save that formation: {exc}")
+            return
+        self._refresh_formation_axis()
+        self.say(f"Saved formation '{name}' ({len(movable)} vehicles) -> "
+                 f"{path.name}. It is now a value on the experiment's "
+                 f"formation axis.")
+
+    def _refresh_formation_axis(self):
+        """(Re)list the saved shapes into the experiment's formation menu,
+        keeping whatever is already ticked."""
+        btn = getattr(self, "exp_form_btn", None)
+        if btn is None:
+            return
+        menu = btn.menu()
+        ticked = {k for k, a in self.exp_forms.items() if a.isChecked()}
+        for name in custom_formations():
+            if name in self.exp_forms:
+                continue
+            act = QAction(name, menu)
+            act.setCheckable(True)
+            act.setChecked(name in ticked)
+            act.toggled.connect(lambda *_: self._refresh_run_count())
+            menu.addAction(act)
+            self.exp_forms[name] = act
+        self._refresh_run_count()
+
     def _clear_side(self, side):
         ids = getattr(self, "_red_ids" if side == "red" else "_blue_ids", set())
         for aid in ids:
@@ -4543,6 +4629,7 @@ class Console(QMainWindow):
         experiment = mode == 2
         if experiment:
             self._refresh_missions()
+            self._refresh_formation_axis()
         # `all` only exists in an experiment: you cannot watch three
         # authorities at once, and in a sweep it is the default because that
         # 3x3 is the framework's whole claim.

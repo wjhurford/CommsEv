@@ -1731,6 +1731,80 @@ def test_a_swept_axis_is_min_max_steps_not_a_row_of_tickboxes():
           str(values(20, -10, 4)))
 
 
+def test_a_hand_drawn_formation_saves_scales_and_sweeps():
+    """A shape dragged out on the map, kept, and then used as a swept value.
+
+    A built-in formation is a FUNCTION of (count, spacing); a hand-drawn one
+    cannot be, because it is a specific arrangement of a specific number of
+    vehicles. What must survive is the SIZE being parametric - otherwise the
+    spacing dial silently stops working the moment you use your own shape,
+    which is precisely the sort of "it only works for the built-in case"
+    behaviour this project keeps finding and removing.
+    """
+    print("\nA DRAWN FORMATION IS SAVED, SCALED AND SWEPT")
+    tmp = Path(tempfile.mkdtemp())
+    with mock.patch.object(st, "FORMATION_DIR", tmp):
+        # An arrangement with its middle deliberately NOT at the origin.
+        drawn = [(10.0, 0.0, 0.0), (8.0, 2.0, 0.0), (8.0, -2.0, 0.0)]
+        path = st.save_formation("my_arrow", drawn)
+        check("a saved formation is a file you can read", path.exists())
+
+        doc = yaml.safe_load(path.read_text())
+        offs = [tuple(q) for q in doc["offsets"]]
+        cx = sum(q[0] for q in offs) / len(offs)
+        cy = sum(q[1] for q in offs) / len(offs)
+        # Tolerance 1e-3, not 1e-6: offsets are rounded to 4 decimals on the
+        # way out so a saved formation is clean YAML rather than sixteen
+        # digits of float noise, and a centroid of three rounded numbers
+        # carries that rounding. That is the rounding working, not the
+        # centring failing.
+        check("it is centred on save, so placing it places its middle",
+              abs(cx) < 1e-3 and abs(cy) < 1e-3, f"{cx}, {cy}")
+        check("it records the spacing it was drawn at",
+              abs(doc["spacing"] - min(
+                  math.dist(a, b) for i, a in enumerate(drawn)
+                  for b in drawn[i + 1:])) < 1e-3, str(doc["spacing"]))
+        check("it appears in the list of saved shapes",
+              st.custom_formations() == ["my_arrow"],
+              str(st.custom_formations()))
+
+        # THE SIZE IS STILL A DIAL. The shape at twice its drawn spacing is
+        # the same shape, twice as big.
+        at1 = st.formation_offsets("my_arrow", 3, doc["spacing"])
+        at2 = st.formation_offsets("my_arrow", 3, doc["spacing"] * 2)
+        check("asking for it at its own spacing returns it unchanged",
+              all(abs(a[k] - b[k]) < 1e-3
+                  for a, b in zip(at1, offs) for k in range(3)), str(at1))
+        check("doubling the spacing doubles the drawn shape",
+              all(abs(2 * a[k] - b[k]) < 1e-3
+                  for a, b in zip(at1, at2) for k in range(3)), str(at2))
+
+        # A DRAWING HAS A FIXED SIZE, and says so rather than inventing more.
+        four = st.formation_offsets("my_arrow", 4, doc["spacing"])
+        check("it never invents a vehicle it was not drawn with",
+              len(four) == 3, str(four))
+        agents = [{"id": f"c{i}", "start": {"x": 0.0, "y": float(i),
+                                            "z": 0.0, "yaw": 0.0}}
+                  for i in range(4)]
+        moved = st.apply_formation(agents, "my_arrow", spacing=doc["spacing"])
+        check("applying it reports only the vehicles it actually placed",
+              len(moved) == 3, str(moved))
+        check("...and the one it ran out of room for keeps its spawn pose",
+              agents[3]["start"]["y"] == 3.0, str(agents[3]["start"]))
+
+        # It is a value on the swept axis like any other.
+        sweep = _sweep_mod()
+        cells, names = sweep.cells_of({
+            "axes": {"formation": [sweep.AS_SPAWNED, "wedge", "my_arrow"],
+                     "spacing": [3.0, 9.0]},
+            "seeds": [1]})
+        got = sorted({(c["formation"], c["spacing"]) for c in cells})
+        check("a saved shape is swept at every spacing, like a built-in",
+              ("my_arrow", 3.0) in got and ("my_arrow", 9.0) in got, str(got))
+        check("...and (as spawned) is not, because it has nothing to scale",
+              sum(1 for g in got if g[0] == sweep.AS_SPAWNED) == 1, str(got))
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -1761,7 +1835,8 @@ if __name__ == "__main__":
                test_setmission_grammar_takes_a_goal,
                test_penetration_is_measured_along_the_axis_of_advance,
                test_formation_and_spacing_are_swept_axes_that_reach_the_model,
-               test_a_swept_axis_is_min_max_steps_not_a_row_of_tickboxes):
+               test_a_swept_axis_is_min_max_steps_not_a_row_of_tickboxes,
+               test_a_hand_drawn_formation_saves_scales_and_sweeps):
         try:
             fn()
         except Exception:
