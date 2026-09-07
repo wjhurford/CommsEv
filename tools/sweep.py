@@ -154,7 +154,7 @@ def build(cfg, cell):
     # every link in the run is measured against it and shuffling it because
     # the fleet changed shape would move the ruler.
     shape = cell.get("formation") or cfg.get("formation")
-    if shape and shape != "(as spawned)":
+    if shape and shape != AS_SPAWNED:
         st.apply_formation(
             agents, shape,
             spacing=float(cell.get("spacing", cfg.get("spacing", 3.0))))
@@ -202,7 +202,20 @@ def build(cfg, cell):
     mpath = Path(mref)
     if mpath.parent == Path(".") and not mpath.suffix:
         mpath = REPO / "missions" / f"{mref}.yaml"
-    st.apply_mission_file(str(mpath), by, arena.get("points") or {}, arena)
+    # THE GOAL, RE-POINTED AT THIS SCENE. A mission names a point ("advance
+    # to FAR"); a scene defines the points. missions/advance.yaml was written
+    # against the corridor, so it only ever ran on the one scene with a point
+    # by that name - which is why an experiment could not move to another
+    # scene at all. The rewrite lives in apply_mission_file, so the sweep, the
+    # sandbox and `SETMISSION <name> to <POINT>` all obey ONE rule rather than
+    # three that can drift.
+    changed, messages, _ = st.apply_mission_file(
+        str(mpath), by, arena.get("points") or {}, arena,
+        goal=cfg.get("goal") or None)
+    if not changed:
+        raise RuntimeError("mission tasked no agents: "
+                           + ("; ".join(messages) or str(mpath)))
+
     for a in agents:
         if a["id"] in blue_ids:
             a["armed"] = True
@@ -271,13 +284,40 @@ def run_one(args):
     # measured from where it started, as the furthest it ever reached rather
     # than where it ended - a vehicle that advanced and was then pushed back
     # by a collision still got there.
-    x0 = {i: poses[i]["x"] for i in blue_ids}
-    deepest = dict(x0)
-    goal_x = None
+    # ALONG THE AXIS OF ADVANCE, not along x. Penetration used to be "how far
+    # did it get in +x", which is only the same thing in a corridor that
+    # happens to run east-west - so an experiment on any other scene measured
+    # a quantity that meant nothing there. It is now the distance advanced
+    # along the line from where the fleet started to the goal it was given,
+    # which reduces EXACTLY to the old number on the corridor (the axis is
+    # +x there) and is the same idea on any scene.
+    #
+    # A run with no goal keeps +x, because "advance until something stops
+    # you" has no destination to point an axis at.
     gname = cfg.get("goal")
-    if gname:
-        gpt = (arena.get("points") or {}).get(gname) or {}
-        goal_x = gpt.get("x")
+    gpt = (arena.get("points") or {}).get(gname) or {} if gname else {}
+    ux, uy = 1.0, 0.0
+    if gpt and blue_ids:
+        sx = sum(poses[i]["x"] for i in blue_ids) / len(blue_ids)
+        sy = sum(poses[i]["y"] for i in blue_ids) / len(blue_ids)
+        dx, dy = float(gpt.get("x", 0.0)) - sx, float(gpt.get("y", 0.0)) - sy
+        norm = math.hypot(dx, dy)
+        if norm > 1e-6:
+            ux, uy = dx / norm, dy / norm
+
+    def along(i):
+        return poses[i]["x"] * ux + poses[i]["y"] * uy
+
+    x0 = {i: along(i) for i in blue_ids}
+    deepest = dict(x0)
+    # The goal as a DISTANCE ALONG THAT AXIS. Arrival is therefore "crossed
+    # the line through the goal, perpendicular to the advance" - which is what
+    # it has always been, and is the only test a formation can pass: a wedge's
+    # wingmen are metres to the side of the goal point and have plainly
+    # arrived.
+    goal_x = None
+    if gpt:
+        goal_x = float(gpt.get("x", 0.0)) * ux + float(gpt.get("y", 0.0)) * uy
     stalled_since = None
     ended_at = None
 
@@ -316,8 +356,8 @@ def run_one(args):
             acc["pdr"].append(w["pdr"])
 
         for i in blue_ids:
-            if poses[i]["x"] > deepest[i]:
-                deepest[i] = poses[i]["x"]
+            if along(i) > deepest[i]:
+                deepest[i] = along(i)
 
         # END THE RUN WHEN THERE IS NOTHING LEFT TO MEASURE. Every vehicle has
         # either arrived or lost its commander, so nobody can advance further.
@@ -327,7 +367,7 @@ def run_one(args):
             done = True
             for a in blue_out:
                 arrived = (goal_x is not None
-                           and poses[a["id"]]["x"] >= goal_x - ARRIVE_TOL_M)
+                           and along(a["id"]) >= goal_x - ARRIVE_TOL_M)
                 cut = not (a["authority"] or {}).get("reachable", True)
                 if not (arrived or cut):
                     done = False
@@ -383,14 +423,34 @@ def run_one(args):
 # ---------------------------------------------------------------------------
 # The grid
 # ---------------------------------------------------------------------------
+# The formation value that means "leave the vehicles where they were placed".
+# Shared with the Console, which offers it as the control every other shape is
+# compared against.
+AS_SPAWNED = "(as spawned)"
+
+
 def cells_of(cfg):
-    """Cartesian product of the declared axes x seeds, in a stable order."""
+    """Cartesian product of the declared axes x seeds, in a stable order.
+
+    MINUS THE CELLS THAT ARE DUPLICATES BY CONSTRUCTION. Spacing scales a
+    formation, so a cell with no formation - (as spawned) - has nothing for it
+    to scale: sweeping five spacings against it produces five byte-identical
+    runs, which is not a result, it is a wait, and five identical rows in the
+    table that look like a suspiciously flat finding. One of them is kept, at
+    the first spacing on the axis, so the control is still there to compare
+    against.
+    """
     axes = cfg.get("axes") or {}
     names = list(axes.keys())
+    spacings = list(axes.get("spacing") or [])
     out = []
     for combo in itertools.product(*(axes[n] for n in names)):
+        cell0 = dict(zip(names, combo))
+        if (spacings and cell0.get("formation") == AS_SPAWNED
+                and cell0.get("spacing") != spacings[0]):
+            continue
         for seed in cfg.get("seeds", [1]):
-            cell = dict(zip(names, combo))
+            cell = dict(cell0)
             cell["seed"] = seed
             cell["cell"] = key_of(cell, names)
             out.append(cell)
@@ -443,6 +503,7 @@ def main(argv=None):
     outdir.mkdir(parents=True, exist_ok=True)
 
     shape = " x ".join("%s:%d" % (n, len(cfg["axes"][n])) for n in names)
+    # `cells` may be fewer than that product: see cells_of.
     print("%s: %d runs (%s x seed:%d) on %d workers"
           % (cfg["name"], len(cells), shape, len(cfg.get("seeds", [1])),
              args.jobs))

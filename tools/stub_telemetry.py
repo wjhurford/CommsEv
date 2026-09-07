@@ -2510,7 +2510,7 @@ def _is_taskable(agent, networks):
 
 
 def apply_mission_file(path, agents_by_id, points, arena,
-                       links=None, poses=None):
+                       links=None, poses=None, goal=None):
     """SETMISSION: distribute a mission file's per-agent objectives onto the
     currently running agent set, gated by command authority.
 
@@ -2521,6 +2521,16 @@ def apply_mission_file(path, agents_by_id, points, arena,
     keeps the property REMISSION existed for - contested comms gate what you
     can command - inside the one remaining order verb. Pass links/poses as
     None to apply verbatim (pre-run, nothing is jammed yet).
+
+    `goal` RE-POINTS THE MISSION AT THIS SCENE. A mission names a point
+    ("advance to FAR"); a scene defines the points. missions/advance.yaml was
+    written against the corridor, so it only ever ran on the one scene that
+    has a point by that name - and an experiment on any other scene tasked the
+    fleet with a destination that did not exist. Passing a goal rewrites every
+    `advance` objective that names a destination, so one one-line mission file
+    runs anywhere. An `advance` with NO destination is left alone: that form
+    means "go forward until a wall or until you lose command", and it has no
+    goal to overwrite.
 
     Returns (changed, messages, mission_name).
     """
@@ -2564,6 +2574,11 @@ def apply_mission_file(path, agents_by_id, points, arena,
                     and _mobile(body)]
         return None
 
+    if goal and goal not in (points or {}):
+        return [], [f"SETMISSION: goal '{goal}' is not a point in this scene; "
+                    f"it defines {', '.join(sorted(points or {})) or 'none'}"], \
+               None
+
     raw = dict(doc.get("objectives") or {})
     expanded, group_keys = {}, []
     for key, obj in raw.items():
@@ -2582,6 +2597,12 @@ def apply_mission_file(path, agents_by_id, points, arena,
             continue
         block = {("type" if k == "do" else k): v for k, v in obj.items()}
         block.setdefault("type", "static")
+        # RE-POINT THE DESTINATION AT THIS SCENE. See the docstring: a mission
+        # names a point, a scene defines them, and welding the two together is
+        # what confined every experiment to the one corridor.
+        if goal and block.get("type") == "advance" \
+                and block.get("to") is not None:
+            block["to"] = goal
         if aid not in agents_by_id:
             messages.append(f"SETMISSION: '{aid}' is not in the running "
                             f"scene - it will not appear")
@@ -2793,14 +2814,31 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
             continue
 
         if verb0 == "SETMISSION" and len(head) == 2:
-            ref = head[1].strip()
+            # SETMISSION <name>             the mission as written
+            # SETMISSION <name> to <POINT>  the same mission, re-pointed at a
+            #                               point THIS scene defines
+            # The second form is what makes one mission file portable across
+            # scenes without anybody opening a YAML to change a destination.
+            #
+            # Split from the RIGHT, not the left: a mission may be given as a
+            # path, and a path may contain spaces. Only a trailing "to <word>"
+            # is a goal; everything before it is the reference, whatever is
+            # in it.
+            rest = head[1].strip()
+            goal_pt = None
+            parts = rest.split()
+            if len(parts) >= 3 and parts[-2].upper() == "TO":
+                goal_pt = parts[-1]
+                rest = " ".join(parts[:-2])
+            ref = rest
             mpath = Path(ref)
             if mpath.parent == Path(".") and not mpath.suffix:
                 mpath = REPO_ROOT / "missions" / f"{ref}.yaml"
             elif not mpath.is_absolute():
                 mpath = REPO_ROOT / mpath
             file_changed, messages, mission_name = apply_mission_file(
-                mpath, agents_by_id, points, arena, links=links, poses=poses)
+                mpath, agents_by_id, points, arena, links=links, poses=poses,
+                goal=goal_pt)
             for msg in messages:
                 print(msg, file=sys.stderr)
             if mission_name and file_changed:

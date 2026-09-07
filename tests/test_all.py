@@ -1501,6 +1501,236 @@ def test_formations_are_functions_not_coordinate_lists():
           and after["y"] == before["y"], f"{moved}")
 
 
+def _sweep_mod():
+    """tools/sweep.py as a module, without running its CLI."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "deadband_sweep_test", str(REPO / "tools" / "sweep.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_mission_is_portable_across_scenes():
+    """A mission names a point; a scene defines the points.
+
+    missions/advance.yaml says `to: FAR`, and FAR exists only in the corridor.
+    So the ONE mission the whole experiment programme is built on could only
+    ever run on ONE scene - and an experiment pointed at any other scene did
+    not fail loudly, it tasked nobody and produced a table of vehicles that
+    had not moved. The goal is now a decision made beside the scene and the
+    mission is re-pointed at it. This is that rewrite, and its refusal.
+    """
+    print("\nA MISSION RUNS ON ANY SCENE, RE-POINTED AT ITS OWN GOAL")
+    arena, agents, links = st.load_scenario({
+        "scene": "open_field",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    by = {a["id"]: a for a in agents}
+    points = arena.get("points") or {}
+    check("open_field has no point called FAR", "FAR" not in points)
+
+    # Without a goal: the corridor's mission is refused on this scene, loudly.
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "advance.yaml"), by, points, arena)
+    check("unre-pointed, the corridor mission tasks nobody here",
+          not changed and any("FAR" in m for m in msgs), f"{msgs[:1]}")
+
+    # With a goal this scene defines: the same file tasks the whole fleet.
+    changed, msgs, name = st.apply_mission_file(
+        str(REPO / "missions" / "advance.yaml"), by, points, arena, goal="B")
+    check("re-pointed at B, the same mission file tasks the fleet",
+          len(changed) >= 3, f"{len(changed)} tasked: {msgs[:1]}")
+    check("every advance objective now points at B",
+          all((by[a].get("mission") or {}).get("to") == "B"
+              for a, _ in changed),
+          str({a: by[a].get("mission") for a, _ in changed}))
+
+    # A goal the scene does not define is refused, and says what it does have.
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "advance.yaml"), by, points, arena,
+        goal="NOWHERE")
+    check("a goal this scene lacks is refused, not silently ignored",
+          not changed and any("NOWHERE" in m for m in msgs), f"{msgs}")
+
+    # `advance` with NO destination means "until a wall or until you lose
+    # command". A goal must not invent one for it.
+    changed, _msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "forward.yaml"), by, points, arena, goal="B")
+    check("an advance with no destination is left alone by a goal",
+          all((by[a].get("mission") or {}).get("to") is None
+              for a, _ in changed), str([by[a].get("mission")
+                                         for a, _ in changed][:1]))
+
+
+def test_setmission_grammar_takes_a_goal():
+    """SETMISSION <name> to <POINT>, so a destination is never a file edit.
+
+    The framework's rule is that hardware is a file and everything else is a
+    decision made in the Console. A destination baked into a mission YAML
+    broke that rule: the only way to advance somewhere else was to open the
+    YAML and retype it. This is the same one mission file, sent to two
+    different points from the command line.
+    """
+    print("\nSETMISSION TAKES A GOAL")
+    arena, agents, links = st.load_scenario({
+        "scene": "open_field",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    agents_by_id = {a["id"]: a for a in agents}
+    poses = _poses_for(agents)
+
+    qdir = Path(tempfile.mkdtemp())
+    _queue_with(qdir, "SETMISSION advance to B\n")
+    changed = st.drain_retasks(qdir, agents_by_id, arena, links, poses)
+    check("SETMISSION advance to B tasks the fleet on a scene with no FAR",
+          len(changed) >= 3, f"{len(changed)} tasked")
+    check("...and every vehicle is advancing on B",
+          all(m.get("to") == "B" for _aid, m in changed),
+          str([m for _a, m in changed][:1]))
+
+    # The same file, a different point, no edit anywhere.
+    qdir2 = Path(tempfile.mkdtemp())
+    _queue_with(qdir2, "SETMISSION advance to F\n")
+    changed2 = st.drain_retasks(qdir2, agents_by_id, arena, links, poses)
+    check("the same mission file re-points to F with no file edit",
+          changed2 and all(m.get("to") == "F" for _a, m in changed2),
+          str([m for _a, m in changed2][:1]))
+
+    # Without the goal, on this scene, it is refused rather than half-applied.
+    qdir3 = Path(tempfile.mkdtemp())
+    _queue_with(qdir3, "SETMISSION advance\n")
+    changed3 = st.drain_retasks(qdir3, agents_by_id, arena, links, poses)
+    check("without a goal the corridor's mission is refused here",
+          not changed3, str(changed3))
+    check("...and the fleet keeps the last order it actually received",
+          all((agents_by_id[i].get("mission") or {}).get("to") == "F"
+              for i in ("car1", "car2", "car3")))
+
+
+def test_penetration_is_measured_along_the_axis_of_advance():
+    """Penetration was "how far in +x", which is only right in a corridor
+    that happens to run east-west.
+
+    On any other scene that number measured a direction nobody was travelling
+    in, so an experiment there would have produced a table of near-zeros and
+    looked like a jamming result. It is now the distance advanced along the
+    line from the fleet's start to the goal it was given - which is the same
+    number on the corridor and a meaningful one everywhere else.
+    """
+    print("\nPENETRATION IS MEASURED TOWARD THE GOAL, NOT ALONG +X")
+    sweep = _sweep_mod()
+    base = {
+        "name": "axis-test", "scene": "open_field",
+        "blue_fleet": str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml"),
+        "mission": "advance",
+        "duration_s": 30.0, "warmup_s": 0.0, "rate_hz": 10.0,
+        "stop_when_stalled": False,
+        "coordinator": "gcs", "doctrine": "hold",
+        "spawns": {"gcs": {"x": 0.0, "y": -8.0},
+                   "car1": {"x": 0.0, "y": -6.0},
+                   "car2": {"x": -1.0, "y": -7.0},
+                   "car3": {"x": 1.0, "y": -7.0}},
+        "seeds": [1],
+    }
+    cell = {"authority": "centralized", "routing": "mesh",
+            "jam_dbm": sweep.JAM_OFF, "jam_rel_db": -999, "seed": 1,
+            "cell": "axis"}
+
+    # A goal due NORTH of the start. Nothing about this run happens in x.
+    north = dict(base, goal="A")          # A is at (-6, +2); start y is -7
+    row = sweep.run_one((north, dict(cell), False))
+    check("a fleet advancing north records real penetration",
+          not row.get("error") and row["penetration_m"] > 1.0,
+          f"{row.get('error') or row['penetration_m']}")
+
+    # The old measure - displacement in x alone - would have been near zero
+    # for that same run, which is exactly the failure being fixed.
+    check("...and it is not just the x displacement",
+          row["penetration_m"] > 1.0)
+
+
+def test_formation_and_spacing_are_swept_axes_that_reach_the_model():
+    """A formation axis that does not change the run is worse than no axis:
+    the table fills with rows that differ in a column and not in a result,
+    which reads as "formation does not matter" when what happened is that
+    nothing was applied. The routing axis failed exactly this way once
+    already.
+    """
+    print("\nFORMATION AND SPACING REACH THE RUN")
+    sweep = _sweep_mod()
+    cfg = {
+        "name": "form-test", "scene": "corridor_200m",
+        "blue_fleet": str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml"),
+        "mission": "advance", "goal": "FAR",
+        "duration_s": 5.0, "warmup_s": 0.0, "rate_hz": 10.0,
+        "stop_when_stalled": False, "coordinator": "gcs",
+        "spawns": {"gcs": {"x": -95.0, "y": 0.0},
+                   "car1": {"x": -89.0, "y": 0.0},
+                   "car2": {"x": -93.0, "y": 3.0},
+                   "car3": {"x": -93.0, "y": -3.0}},
+        "seeds": [1],
+    }
+    base_cell = {"authority": "centralized", "routing": "mesh",
+                 "jam_dbm": sweep.JAM_OFF, "seed": 1, "cell": "c"}
+
+    def starts(**over):
+        _a, agents, _l, _b = sweep.build(cfg, dict(base_cell, **over))
+        return {a["id"]: (round(a["start"]["x"], 3), round(a["start"]["y"], 3))
+                for a in agents if not a.get("jammer")}
+
+    spawned = starts(formation="(as spawned)")
+    wedge3 = starts(formation="wedge", spacing=3.0)
+    wedge9 = starts(formation="wedge", spacing=9.0)
+    line3 = starts(formation="line", spacing=3.0)
+
+    check("(as spawned) leaves the poses exactly as given",
+          spawned["car2"] == (-93.0, 3.0), str(spawned["car2"]))
+    check("a formation moves the vehicles", wedge3 != spawned)
+    check("a different shape is a different arrangement", wedge3 != line3)
+    check("spacing scales the shape", wedge9 != wedge3)
+
+    def spread(d):
+        ys = [v[1] for k, v in d.items() if k != "gcs"]
+        return max(ys) - min(ys)
+    check("tripling the spacing triples the wedge's width",
+          abs(spread(wedge9) - 3 * spread(wedge3)) < 1e-2,
+          f"{spread(wedge3):.2f} -> {spread(wedge9):.2f}")
+    # THE GROUND STATION IS NEVER IN THE FORMATION. Every link in the run is
+    # measured against where the bench is; moving it because the fleet changed
+    # shape would move the ruler along with the thing being measured.
+    check("no formation ever moves the ground station",
+          spawned["gcs"] == wedge3["gcs"] == wedge9["gcs"] == line3["gcs"],
+          f"{spawned['gcs']} {wedge3['gcs']}")
+
+
+def test_a_swept_axis_is_min_max_steps_not_a_row_of_tickboxes():
+    """The values a parametric axis produces, checked as arithmetic.
+
+    Tickboxes could only offer values somebody had thought to put there, and
+    four points do not find a cliff. The Console's AxisRange widget cannot be
+    imported without Qt, so the arithmetic it performs is checked here in the
+    same form - inclusive of BOTH ends, which is the part that is easy to get
+    wrong by one step and hard to notice on a chart.
+    """
+    print("\nA PARAMETRIC AXIS INCLUDES BOTH ENDS")
+
+    def values(lo, hi, n):
+        if n <= 1:
+            return [round(lo, 3)]
+        return [round(lo + (hi - lo) * i / (n - 1), 3) for i in range(n)]
+
+    check("steps=1 pins the axis to its minimum", values(0, 30, 1) == [0.0])
+    check("steps=2 is exactly the two ends", values(0, 30, 2) == [0.0, 30.0])
+    v = values(0, 30, 7)
+    check("steps=7 spans both ends inclusively",
+          v[0] == 0.0 and v[-1] == 30.0 and len(v) == 7, str(v))
+    check("the values are evenly spaced",
+          all(abs((v[i + 1] - v[i]) - 5.0) < 1e-9 for i in range(len(v) - 1)),
+          str(v))
+    check("a descending range still runs from min to max",
+          values(20, -10, 4) == [20.0, 10.0, 0.0, -10.0],
+          str(values(20, -10, 4)))
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -1526,7 +1756,12 @@ if __name__ == "__main__":
                test_origin_passthrough,
                test_missions_read_belief_not_ground_truth,
                test_routing_gates_authority_not_just_geometry,
-               test_formations_are_functions_not_coordinate_lists):
+               test_formations_are_functions_not_coordinate_lists,
+               test_a_mission_is_portable_across_scenes,
+               test_setmission_grammar_takes_a_goal,
+               test_penetration_is_measured_along_the_axis_of_advance,
+               test_formation_and_spacing_are_swept_axes_that_reach_the_model,
+               test_a_swept_axis_is_min_max_steps_not_a_row_of_tickboxes):
         try:
             fn()
         except Exception:

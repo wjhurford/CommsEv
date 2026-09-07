@@ -16,6 +16,14 @@
 # Drop the `to:` and it becomes "go forward until something stops you" - a
 # wall, or losing your commander. Both forms are in COMMANDS.md.
 #
+# `FAR` IS A DEFAULT, NOT A COMMITMENT. FAR is a point in the corridor scene;
+# another scene will not have one. Aim this same file anywhere:
+#
+#     SETMISSION advance to B          (a point open_field defines)
+#
+# and in an experiment the goal is a dropdown on the Setup tab, filled from
+# whichever scene you chose. Nothing here has to be edited to move scenes.
+#
 #     SETMISSION advance
 #     blue launch
 # =============================================================================

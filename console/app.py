@@ -60,7 +60,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
     QComboBox, QDialog, QInputDialog, QLineEdit, QMenu, QSizePolicy,
-    QSlider, QSplitter, QProgressBar, QCheckBox,
+    QSlider, QSplitter, QProgressBar, QCheckBox, QSpinBox, QDoubleSpinBox,
     QVBoxLayout, QWidget,
 )
 
@@ -78,10 +78,22 @@ try:
     # coordinate typed here and re-parsed there is the same one line, not
     # two tokenizers that can drift apart.
     from stub_telemetry import _tokenize_args
+    # Formations are FUNCTIONS of (count, spacing), defined once in the model.
+    # The Console imports them rather than owning a second copy, so what the
+    # spawn dialog previews is exactly what a swept run will place.
+    from stub_telemetry import FORMATIONS, formation_offsets
 except Exception:
     _resolve_mission = None
     _jammer_range_m = None
     _tokenize_args = None
+    FORMATIONS = ("line", "column", "abreast", "wedge", "echelon", "circle",
+                  "diamond", "cube")
+    formation_offsets = None
+
+# The entry that means "leave every vehicle exactly where it was put". Used in
+# the spawn dialog and as a value on the swept formation axis, so "no
+# formation" is a choice you can compare against rather than an absence.
+AS_SPAWNED = "(as spawned)"
 
 # Round-trip YAML keeps the comments in a scenario file alive across an edit.
 # Those comments are half the value of the file as a research artefact, so
@@ -342,6 +354,50 @@ class Viewport(QWidget):
         return QPointF(self.width() / 2 + u * s + self.pan.x(),
                        self.height() / 2 - v * s + self.pan.y())
 
+    def from_screen(self, pt, world):
+        """Screen point -> world metres, in the two axes THIS view shows.
+
+        The inverse of to_screen for the orthogonal views, which is what makes
+        dragging a vehicle possible: TOP gives x and y, FRONT gives x and z,
+        SIDE gives y and z. The third axis is whatever the vehicle already
+        had, taken from `world` - dragging in plan must not silently zero an
+        altitude you set in the side view.
+
+        ISO is deliberately excluded. One screen point maps to a LINE in an
+        isometric world, not a point, so a drag there would have to invent the
+        depth - and inventing a coordinate the operator did not give is how a
+        formation ends up subtly wrong with nothing on screen to show it.
+        """
+        s = self.scale()
+        if s <= 0 or self.mode == self.ISO:
+            return None
+        u = (pt.x() - self.width() / 2 - self.pan.x()) / s
+        v = -(pt.y() - self.height() / 2 - self.pan.y()) / s
+        x, y, z = world
+        if self.mode == self.TOP:
+            return (u, v, z)
+        if self.mode == self.FRONT:
+            return (u, y, v)
+        return (x, u, v)                      # SIDE
+
+    def agent_body_at(self, pt, radius_px=18.0):
+        """The agent DICT under this point, for dragging.
+
+        Deliberately not agent_at, which returns an id and is what selection
+        has always used. A drag needs the body itself, because it writes the
+        new pose straight into it - and having one function try to be both is
+        how you end up calling .get("id") on a string.
+        """
+        best, bestd = None, radius_px
+        for a in self.agents:
+            pose = a.get("pose", {})
+            c = self.to_screen(_num(pose.get("x")), _num(pose.get("y")),
+                               _num(pose.get("z")))
+            d = math.hypot(c.x() - pt.x(), c.y() - pt.y())
+            if d <= bestd:
+                best, bestd = a, d
+        return best
+
     # -- interaction --------------------------------------------------------
 
     def wheelEvent(self, ev):
@@ -350,6 +406,19 @@ class Viewport(QWidget):
 
     # Set by the Console so a click on the map selects the agent everywhere.
     on_pick = None
+    # Set by the Console to be told when a vehicle has been DRAGGED, so the
+    # spawn table and the composed run follow the map rather than drifting
+    # away from it.
+    on_moved = None
+    # Fired ONCE, when the vehicle is let go. Dragging fires on_moved every
+    # mouse move, which is the right granularity for a readout and completely
+    # the wrong one for recomposing the run - that writes a YAML and reloads
+    # the world, and doing it sixty times a second while the mouse is down
+    # would make the drag unusable.
+    on_drop = None
+    # True while Setup is placing a fleet: a press grabs a vehicle instead of
+    # panning the view.
+    placing = False
 
     def mousePressEvent(self, ev):
         # The key header is a control, not scenery: a click there toggles it
@@ -360,16 +429,45 @@ class Viewport(QWidget):
             self._press_at = None
             self.update()
             return
+        # PLACING MODE: a press on a vehicle grabs it instead of panning, so
+        # a formation can be built by dragging rather than typed as numbers.
+        # Only before a run - moving an agent mid-run would be teleporting it,
+        # which is not something the physics should have to explain.
+        if getattr(self, "placing", False) and self.mode != self.ISO:
+            hit = self.agent_body_at(ev.position())
+            if hit is not None and not hit.get("ghost"):
+                self._grab = hit
+                self._drag = None
+                self._press_at = None
+                return
         self._drag = ev.position()
         self._press_at = ev.position()
 
     def mouseMoveEvent(self, ev):
+        grab = getattr(self, "_grab", None)
+        if grab is not None and ev.buttons():
+            pose = grab.get("pose", {})
+            world = (_num(pose.get("x")), _num(pose.get("y")),
+                     _num(pose.get("z")))
+            new = self.from_screen(ev.position(), world)
+            if new is not None:
+                pose["x"], pose["y"], pose["z"] = new
+                if self.on_moved:
+                    self.on_moved(grab.get("id"), pose)
+                self.update()
+            return
         if self._drag is not None and ev.buttons():
             self.pan += ev.position() - self._drag
             self._drag = ev.position()
             self.update()
 
     def mouseReleaseEvent(self, ev):
+        grab = getattr(self, "_grab", None)
+        if grab is not None:
+            self._grab = None
+            if self.on_drop:
+                self.on_drop(grab.get("id"), grab.get("pose", {}))
+            return
         # A click that did not drag is a selection, not a pan.
         start = getattr(self, "_press_at", None)
         if start is not None and self.on_pick:
@@ -2254,6 +2352,67 @@ class CustomFleetDialog(QDialog):
 # Spawn dialog - where does this fleet start, in THIS scene?
 # ---------------------------------------------------------------------------
 
+class AxisRange(QWidget):
+    """A swept axis as min / max / steps, rather than a row of tickboxes.
+
+    Tickboxes could only ever offer the values somebody had thought to put
+    there, which is fine for a demo and useless for a curve: four points do
+    not show you where a cliff is. Min, max and a step count say what the
+    axis IS, so the resolution of the answer is a dial rather than a
+    code change.
+
+    `steps = 1` means "one value, the minimum" - which is how an axis is
+    pinned without needing a separate control for pinning it.
+    """
+
+    def __init__(self, lo, hi, steps, unit="", decimals=1, lo_min=-200.0,
+                 hi_max=200.0, tip=""):
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self.lo = QDoubleSpinBox()
+        self.hi = QDoubleSpinBox()
+        for b, v in ((self.lo, lo), (self.hi, hi)):
+            b.setDecimals(decimals)
+            b.setRange(lo_min, hi_max)
+            b.setValue(v)
+            b.setSuffix(f" {unit}" if unit else "")
+            b.setFixedWidth(84)
+        self.steps = QSpinBox()
+        self.steps.setRange(1, 200)
+        self.steps.setValue(steps)
+        self.steps.setFixedWidth(56)
+        self.steps.setToolTip("How many values between min and max, "
+                              "inclusive. 1 pins the axis to the minimum.")
+        row.addWidget(QLabel("min"))
+        row.addWidget(self.lo)
+        row.addWidget(QLabel("max"))
+        row.addWidget(self.hi)
+        row.addWidget(QLabel("steps"))
+        row.addWidget(self.steps)
+        row.addStretch(1)
+        if tip:
+            self.setToolTip(tip)
+
+    def changed(self, fn):
+        for b in (self.lo, self.hi, self.steps):
+            b.valueChanged.connect(lambda *_: fn())
+
+    def values(self):
+        """The swept values, inclusive of both ends.
+
+        Rounded to three decimals on purpose: these become part of the cell
+        key that identifies a run, and a key carrying 12.700000000000001 is a
+        key you cannot type back in to replay it.
+        """
+        n = int(self.steps.value())
+        lo, hi = float(self.lo.value()), float(self.hi.value())
+        if n <= 1:
+            return [round(lo, 3)]
+        return [round(lo + (hi - lo) * i / (n - 1), 3) for i in range(n)]
+
+
 class SpawnDialog(QDialog):
     """Asked the moment a fleet is chosen, with the scene already in view.
 
@@ -2268,19 +2427,81 @@ class SpawnDialog(QDialog):
         self.setWindowTitle(title)
         lay = QVBoxLayout(self)
         lab = QLabel("Where does each agent start? Defaults are the fleet's "
-                     "own. x/y in metres, yaw in radians.")
+                     "own. x/y in metres, yaw in radians. Pick a formation to "
+                     "place the MOBILE vehicles as a shape; the ground "
+                     "station and any jammer keep the position you gave them.")
         lab.setWordWrap(True)
         lay.addWidget(lab)
+
+        # ---- FORMATION ------------------------------------------------------
+        # A formation is a FUNCTION of (count, spacing), not a list of
+        # coordinates, so it works for any fleet size: a line adds one more on
+        # the end, a wedge alternates flanks so it stays symmetric, a circle
+        # re-spaces every vehicle. The spacing dial is proportional - doubling
+        # it doubles every gap in the shape, whatever the shape is - which is
+        # why "how big is the formation" can be one number.
+        #
+        # The GCS IS NEVER IN THE FORMATION. Every link in the run is measured
+        # against where the bench is, so shuffling it because the fleet
+        # changed shape would move the ruler along with the thing being
+        # measured.
+        frow = QHBoxLayout()
+        frow.addWidget(QLabel("Formation"))
+        self.form_combo = QComboBox()
+        self.form_combo.addItem(AS_SPAWNED)
+        self.form_combo.addItems(list(FORMATIONS))
+        self.form_combo.setToolTip(
+            "line/column  nose to tail; one more goes on the end.\n"
+            "abreast      shoulder to shoulder along y.\n"
+            "echelon      a diagonal rank.\n"
+            "wedge        apex forward, flanks filled ALTERNATELY so four\n"
+            "             vehicles make an arrowhead and not a limp.\n"
+            "circle       evenly spaced, re-spaced whenever the count\n"
+            "             changes - the spacing is the chord between\n"
+            "             neighbours.\n"
+            "diamond      front, both flanks, rear, then outward rings.\n"
+            "cube         a 3-D lattice. The only shape that uses z, and the\n"
+            "             one that matters the moment these are aircraft.")
+        self.form_combo.activated.connect(lambda _i: self._reform())
+        frow.addWidget(self.form_combo, 1)
+        frow.addWidget(QLabel("Spacing"))
+        self.space_slider = QSlider(Qt.Horizontal)
+        # Tenths of a metre, 0.5 m to 20 m. Proportional: the shape is
+        # generated at this spacing, so the dial scales the whole formation
+        # rather than nudging one gap.
+        self.space_slider.setRange(5, 200)
+        self.space_slider.setValue(30)
+        self.space_slider.setFixedWidth(180)
+        self.space_slider.setToolTip(
+            "Distance between neighbouring vehicles, in metres. The whole "
+            "formation scales with it - double this and every gap doubles.")
+        self.space_slider.valueChanged.connect(lambda _v: self._reform())
+        frow.addWidget(self.space_slider)
+        self.space_lbl = QLabel("3.0 m")
+        self.space_lbl.setFixedWidth(64)
+        frow.addWidget(self.space_lbl)
+        lay.addLayout(frow)
         self.table = QTableWidget(len(agents), 6)
         self.table.setHorizontalHeaderLabels(
             ["Agent", "x", "y", "z", "yaw", "on link loss"])
         self.table.verticalHeader().setVisible(False)
         self._ids = []
         self._doctrine = {}
+        # The poses the dialog opened with, kept so (as spawned) can put them
+        # back: a formation preview must be reversible or it silently destroys
+        # coordinates the operator typed.
+        self._original = {}
+        # Who a formation may move. Not the ground station, not a jammer, not
+        # a ghost - see the comment on the formation row above.
+        self._movable = set()
         for r, a in enumerate(agents):
             pose = a.get("pose") or {}
             aid = str(a.get("id", f"agent{r}"))
             self._ids.append(aid)
+            self._original[aid] = {k: _num(pose.get(k)) for k in "xyz"}
+            if not (a.get("ghost") or a.get("jammer")
+                    or a.get("platform") == "ground_station"):
+                self._movable.add(aid)
             item = QTableWidgetItem(aid)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(r, 0, item)
@@ -2347,6 +2568,48 @@ class SpawnDialog(QDialog):
         return {aid: box.currentText()
                 for aid, box in self._doctrine.items() if box.isEnabled()}
 
+    # -- formation ---------------------------------------------------------
+
+    def formation(self):
+        """The chosen shape, or AS_SPAWNED."""
+        return self.form_combo.currentText()
+
+    def spacing(self):
+        """Metres between neighbouring vehicles."""
+        return self.space_slider.value() / 10.0
+
+    def _reform(self):
+        """Rewrite the table's x/y/z from the shape and the spacing.
+
+        The formation is applied to the table the operator is looking at, not
+        somewhere downstream, so what you press Spawn on is what you saw. It
+        is also non-destructive in the only way that matters: choosing
+        (as spawned) restores the coordinates the dialog opened with, so a
+        formation experiment cannot lose the poses you typed by hand.
+        """
+        self.space_lbl.setText(f"{self.spacing():.1f} m")
+        shape = self.formation()
+        if shape == AS_SPAWNED or formation_offsets is None:
+            for r, aid in enumerate(self._ids):
+                for c, key in ((1, "x"), (2, "y"), (3, "z")):
+                    self.table.item(r, c).setText(
+                        str(self._original[aid][key]))
+            return
+        rows = [r for r, aid in enumerate(self._ids) if aid in self._movable]
+        if not rows:
+            return
+        # CENTRED ON WHERE THE FLEET ALREADY IS. Changing the shape must not
+        # also teleport the fleet across the arena; the operator placed it,
+        # and only its arrangement is being asked about.
+        cx = sum(self._original[self._ids[r]]["x"] for r in rows) / len(rows)
+        cy = sum(self._original[self._ids[r]]["y"] for r in rows) / len(rows)
+        cz = sum(self._original[self._ids[r]]["z"] for r in rows) / len(rows)
+        offs = formation_offsets(shape, len(rows), self.spacing())
+        for r, (dx, dy, dz) in zip(rows, offs):
+            self.table.item(r, 1).setText(f"{cx + dx:.3f}")
+            self.table.item(r, 2).setText(f"{cy + dy:.3f}")
+            self.table.item(r, 3).setText(f"{cz + dz:.3f}")
+
 
 # ---------------------------------------------------------------------------
 # Experiment runner and results viewer
@@ -2367,6 +2630,9 @@ class SpawnDialog(QDialog):
 # for hundreds of runs would cost gigabytes to save you nothing.
 
 
+_SWEEP_MOD = None
+
+
 def _sweep_module():
     """tools/sweep.py, imported as a module.
 
@@ -2377,11 +2643,15 @@ def _sweep_module():
     it crashed the Console on Windows. A loop with processEvents() is simpler,
     cannot crash that way, and gives finer progress.
     """
+    global _SWEEP_MOD
+    if _SWEEP_MOD is not None:
+        return _SWEEP_MOD
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "deadband_sweep", str(REPO_ROOT / "tools" / "sweep.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    _SWEEP_MOD = mod
     return mod
 
 
@@ -2798,7 +3068,8 @@ class ExperimentWindow(QDialog):
                 self.console.say("could not chart the sweep:\n"
                                  + traceback.format_exc())
 
-    FILTER_COLS = ("authority", "routing", "jam_rel_db")
+    FILTER_COLS = ("authority", "routing", "jam_rel_db", "formation",
+                   "spacing")
 
     def _build_filter(self):
         """One tick-list per filtered column, behind a button.
@@ -2814,7 +3085,9 @@ class ExperimentWindow(QDialog):
             vals = sorted({r.get(col) for r in self.rows
                            if r.get(col) not in (None, "")},
                           key=lambda v: (self._numish(v), str(v)))
-            if not vals:
+            # A filter with one option filters nothing. It is a button that
+            # cannot do anything, sitting next to the ones that can.
+            if len(vals) < 2:
                 continue
             self._filter[col] = set(vals)
             btn = QPushButton(f"{col} \u25be")
@@ -2879,6 +3152,7 @@ class ExperimentWindow(QDialog):
         # got, and whether it finished - because twenty columns of scrolling
         # is not a result you can read.
         cols = [c for c in ("authority", "routing", "jam_rel_db",
+                            "formation", "spacing",
                             "penetration_m", "penetration_frac", "arrived",
                             "commanded_fraction", "ended_s")
                 if rows and c in rows[0]]
@@ -3010,6 +3284,30 @@ class ExperimentWindow(QDialog):
             import stub_telemetry as _st
             _a, _agents, _l = _st.load_scenario(copy.deepcopy(compose))
             jam_ids = [x["id"] for x in _agents if x.get("jammer")]
+
+            # THE FORMATION, TOO. Every aspect of a cell has to survive into
+            # the replay or the run you watch is not the run you clicked -
+            # which has already happened once here, with the jammer's power,
+            # and produced a replay that looked almost unjammed. The shape is
+            # applied to the RESOLVED agents (which know which of them is the
+            # ground station) and written back as pose overrides.
+            shape = r.get("formation")
+            if shape and shape != AS_SPAWNED:
+                spacing = float(r.get("spacing") or 3.0)
+                moved = _st.apply_formation(_agents, shape, spacing=spacing)
+                placed = {x["id"]: (x.get("start") or x.get("pose") or {})
+                          for x in _agents if x["id"] in set(moved)}
+                by_pose = {x.get("id"): x
+                           for x in compose.setdefault("agents", [])}
+                for aid, pose in placed.items():
+                    entry = by_pose.get(aid)
+                    if entry is None:
+                        entry = {"id": aid}
+                        compose["agents"].append(entry)
+                        by_pose[aid] = entry
+                    entry["pose"] = {k: float(pose.get(k, 0.0))
+                                     for k in ("x", "y", "z")}
+                    entry["pose"]["yaw"] = float(pose.get("yaw", 0.0))
             by_id = {x.get("id"): x for x in compose.setdefault("agents", [])}
             for jid in jam_ids:
                 entry = by_id.get(jid)
@@ -3032,7 +3330,7 @@ class ExperimentWindow(QDialog):
                 compose, mission=cfg.get("mission") or "advance",
                 title=r.get("cell", ""), seed=int(r.get("seed") or 1),
                 warmup_s=float(cfg.get("warmup_s") or 0.0),
-                jam_dbm=dbm)
+                jam_dbm=dbm, goal=cfg.get("goal"))
         self.bar.setFormat(f"running {r.get('cell')} live in the Console")
 
 
@@ -3064,6 +3362,15 @@ class Console(QMainWindow):
 
         self.viewport = Viewport()
         self.viewport.on_pick = self.select_agent_by_id
+        # DRAG TO PLACE. Typing x, y, z for six vehicles to make a shape is
+        # data entry, not design - you cannot see whether it is a wedge until
+        # you press Spawn. Dragging in the top-down view sets x and y, in the
+        # side view x and z, and the numbers follow the picture instead of the
+        # other way round. Only in Setup and only before a run: moving a
+        # vehicle mid-run is teleporting it, which is not something the
+        # physics should have to explain.
+        self.viewport.on_moved = self._agent_dragged
+        self.viewport.on_drop = self._agent_dropped
         self._build_centre()
         self._build_docks()
         self._build_menu()
@@ -3079,6 +3386,8 @@ class Console(QMainWindow):
         self._doctrines = {}           # {agent_id: hold|intent} from Setup
         self._fleet_docs = {}          # {side: fleet dict} built, NOT saved
         self._spawns = {}              # {agent_id: {x,y,z,yaw}} across sides
+        self._formation = {}           # {side: shape} chosen in the spawn dialog
+        self._spacing = {}             # {side: metres}
         self._blue_ids = set()
         self._red_ids = set()
         self.statusBar().showMessage(
@@ -3357,7 +3666,11 @@ class Console(QMainWindow):
             "then `blue launch`. Results are titled by this name.")
         sblay.addWidget(self.lbl_mission)
         hint = QLabel("Press Play, then in the terminal:\n"
-                      "  SETMISSION <name>\n  blue launch")
+                      "  SETMISSION <name>\n"
+                      "  SETMISSION <name> to <POINT>   (aim it at any point\n"
+                      "                                  this scene defines)\n"
+                      "  blue launch\n"
+                      "Drag a vehicle on the map to move it before you Play.")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         sblay.addWidget(hint)
@@ -3375,21 +3688,72 @@ class Console(QMainWindow):
             "Issued to every vehicle when each run starts. There is nobody "
             "to type at a headless run, so it is chosen here.")
         elay.addWidget(self.exp_mission)
-        elay.addWidget(QLabel("Jammer advantage P_j/P_t to sweep (dB)"))
-        prow = QHBoxLayout()
-        self.exp_powers = []
-        for db, on in ((0, True), (10, True), (20, True), (30, False)):
-            b = QCheckBox(f"{db:+d}")
-            b.setChecked(on)
-            b.setToolTip(
-                "The jammer's power RELATIVE to the fleet's own radios. A "
+
+        # GOAL. A mission names a point; a scene defines the points. Pinning
+        # the goal to FAR in the mission file welded every experiment to the
+        # corridor - the only scene that has a point by that name - so the
+        # goal is chosen here, from the points the CHOSEN SCENE actually
+        # declares, and the sweep re-points the mission at it.
+        elay.addWidget(QLabel("Goal (from this scene's points)"))
+        self.exp_goal = QComboBox()
+        self.exp_goal.activated.connect(
+            lambda _i: setattr(self, "_goal_touched", True))
+        self.exp_goal.setToolTip(
+            "Where 'advance' is advancing TO. Penetration is measured along "
+            "the line from where the fleet starts to this point, so it means "
+            "the same thing on any scene, not just an east-west corridor.\n"
+            "(none) leaves the mission's own destination alone - use it for "
+            "'advance until a wall or until you lose command'.")
+        elay.addWidget(self.exp_goal)
+
+        elay.addWidget(QLabel("Jammer advantage P_j/P_t (dB)"))
+        self.exp_power_axis = AxisRange(
+            0.0, 30.0, 7, unit="dB", decimals=1, lo_min=-60.0, hi_max=120.0,
+            tip="The jammer's power RELATIVE to the fleet's own radios. A "
                 "ratio, so the absolute powers cancel out of the physics and "
-                "the result holds for any radio at any scale.")
-            b.stateChanged.connect(lambda *_: self._refresh_run_count())
-            prow.addWidget(b)
-            self.exp_powers.append((db, b))
-        prow.addStretch(1)
-        elay.addLayout(prow)
+                "the result holds for any radio at any scale. Sweep it "
+                "finely: the interesting part of this curve is the cliff, "
+                "and four points will not find it.")
+        self.exp_power_axis.changed(self._refresh_run_count)
+        elay.addWidget(self.exp_power_axis)
+
+        # FORMATION as a swept axis. The shape is a decision like any other,
+        # so it belongs on the grid rather than in a fleet file - and it only
+        # interacts with routing that has peer links, which is itself a result
+        # worth measuring rather than assuming.
+        elay.addWidget(QLabel("Formations to sweep"))
+        frow2 = QHBoxLayout()
+        self.exp_form_btn = QPushButton("formations \u25be")
+        self.exp_form_btn.setToolTip(
+            "Every ticked shape is run against every architecture and every "
+            "jammer power. Two shapes doubles the grid.\n"
+            "(as spawned) uses the poses on the map, formation or not - the "
+            "control the other shapes are compared against.")
+        menu = QMenu(self.exp_form_btn)
+        self.exp_forms = {}
+        for shape in (AS_SPAWNED,) + tuple(FORMATIONS):
+            act = QAction(shape, menu)
+            act.setCheckable(True)
+            act.setChecked(shape == AS_SPAWNED)
+            act.toggled.connect(lambda *_: self._refresh_run_count())
+            menu.addAction(act)
+            self.exp_forms[shape] = act
+        self.exp_form_btn.setMenu(menu)
+        frow2.addWidget(self.exp_form_btn)
+        frow2.addStretch(1)
+        elay.addLayout(frow2)
+
+        elay.addWidget(QLabel("Formation spacing (m)"))
+        self.exp_space_axis = AxisRange(
+            3.0, 12.0, 1, unit="m", decimals=1, lo_min=0.5, hi_max=200.0,
+            tip="How far apart neighbouring vehicles sit. Sweeping it asks "
+                "the question a formation exists to answer: a tighter shape "
+                "holds shorter peer links and relays better, a looser one "
+                "spreads the fleet so a single emitter cannot cover it. "
+                "Ignored while the only ticked formation is (as spawned), "
+                "because there is no shape to scale.")
+        self.exp_space_axis.changed(self._refresh_run_count)
+        elay.addWidget(self.exp_space_axis)
         self.lbl_runs = QLabel("")
         self.lbl_runs.setObjectName("hint")
         self.lbl_runs.setWordWrap(True)
@@ -3623,11 +3987,72 @@ class Console(QMainWindow):
         stem = "_".join(parts) or "run"
         return "".join(c if c.isalnum() or c in "-_" else "_" for c in stem)
 
+    # -- drag to place ------------------------------------------------------
+
+    def _agent_dragged(self, aid, pose):
+        """Live, while the mouse is down: update the spawn and say where it is.
+
+        The readout is the point. A formation built by eye needs a number to
+        argue with afterwards, so the gap to the nearest other vehicle is
+        printed as it changes - which is also how you discover that the shape
+        you drew is 2.6 m across when you thought it was 3.
+        """
+        if not aid or aid not in self._spawns:
+            return
+        keep = self._spawns[aid]
+        keep.update({"x": round(float(pose.get("x", 0.0)), 3),
+                     "y": round(float(pose.get("y", 0.0)), 3),
+                     "z": round(float(pose.get("z", 0.0)), 3)})
+        near = None
+        for oid, o in self._spawns.items():
+            if oid == aid:
+                continue
+            d = math.dist((keep["x"], keep["y"], keep["z"]),
+                          (o.get("x", 0.0), o.get("y", 0.0), o.get("z", 0.0)))
+            near = d if near is None else min(near, d)
+        self.statusBar().showMessage(
+            f"{aid}  ({keep['x']:.2f}, {keep['y']:.2f}, {keep['z']:.2f}) m"
+            + (f"   nearest vehicle {near:.2f} m" if near is not None else ""))
+
+    def _agent_dropped(self, aid, _pose):
+        """Let go: recompose once, so the run, the trees and the map agree.
+
+        Recomposing writes the composed YAML and reloads the world, which is
+        far too expensive to do on every mouse move - hence a separate drop
+        hook rather than doing it in _agent_dragged.
+        """
+        if not aid or aid not in self._spawns:
+            return
+        # The fleet no longer stands in a named shape once you have moved one
+        # of its vehicles by hand, and saying otherwise on the experiment tab
+        # would be a lie about what is on the map.
+        for side, ids in (("blue", self._blue_ids), ("red", self._red_ids)):
+            if aid in (ids or set()):
+                self._formation[side] = AS_SPAWNED
+        if self._setup_scene:
+            self._compose_setup()
+
+    def _update_placing(self):
+        """Dragging is allowed only where it means something: on the Setup
+        tab, before a run, in a view that has an inverse projection.
+
+        Not ISO - one screen point maps to a LINE in an isometric world, so a
+        drag there would have to invent the third coordinate, and an invented
+        coordinate is exactly the kind of quiet wrongness that makes a
+        formation subtly off with nothing on screen to show it.
+        """
+        on_setup = (self.tabs.tabText(self.tabs.currentIndex()) == "Setup"
+                    if hasattr(self, "tabs") else False)
+        self.viewport.placing = bool(
+            on_setup and self._spawns
+            and not getattr(self, "_setup_locked", False))
+
     def _lock_setup(self, locked):
         """The Setup tab is how a run is COMPOSED; while one is actually
         running, recomposing under it is a crash waiting to happen (the sim
         holds the old world, the Console loads a new one). Lock the tab for
         the duration; everything else stays live."""
+        self._setup_locked = bool(locked)
         for i in range(self.tabs.count()):
             if self.tabs.tabText(i) == "Setup":
                 if locked and self.tabs.currentIndex() == i:
@@ -3637,6 +4062,7 @@ class Console(QMainWindow):
                     i, "Locked while a run is up - Stop to recompose"
                        if locked else "")
                 break
+        self._update_placing()
 
     def _refresh_setup_lists(self):
         """(Re)list scenes/ and fleets/ into the Setup dropdowns."""
@@ -3661,6 +4087,7 @@ class Console(QMainWindow):
         if index <= 0:
             return
         self._setup_scene = self.scene_combo.currentText()
+        self._formation, self._spacing = {}, {}
         # A new scene invalidates any placed fleet - spawns are coordinates
         # in the OLD world. Ask again rather than silently carrying them.
         self._setup_fleet = None
@@ -3670,6 +4097,9 @@ class Console(QMainWindow):
         self.fleet_combo.setCurrentIndex(0)
         self.red_combo.setEnabled(True)
         self.red_combo.setCurrentIndex(0)
+        # A new scene brings new named points, so the goal picker is rebuilt
+        # before anything can be swept against a point this world lacks.
+        self._refresh_goals()
         self._compose_setup()
         self.statusBar().showMessage(
             f"Scene {self._setup_scene} - now choose a blue fleet")
@@ -3722,6 +4152,13 @@ class Console(QMainWindow):
             self._fleet_docs.pop(side, None)
         new_spawns = dlg.spawns()
         self._doctrines.update(dlg.doctrines())
+        # Recorded, not just applied. The spawn dialog has already baked the
+        # shape into the coordinates, so the run does not need this - but the
+        # EXPERIMENT tab does, to offer the shape you actually placed as the
+        # default value on the formation axis, and the results need it to say
+        # what was flown.
+        self._formation[side] = dlg.formation()
+        self._spacing[side] = dlg.spacing()
         if side == "red":
             self._setup_red = fleet
             self._red_ids = set(new_spawns)
@@ -3730,10 +4167,11 @@ class Console(QMainWindow):
             self._blue_ids = set(new_spawns)
         self._spawns.update(new_spawns)
         self._compose_setup()
+        self._update_placing()
         both = " + ".join(x for x in (self._setup_fleet, self._setup_red) if x)
         self.statusBar().showMessage(
-            f"{self._setup_scene} + {both} - press Play, then "
-            f"SETMISSION <name> and blue launch")
+            f"{self._setup_scene} + {both} - drag a vehicle on the map to "
+            f"move it, then Play, SETMISSION <name>, blue launch")
 
     def _build_custom_fleet(self, side):
         """Open the fleet builder and hold the result IN MEMORY.
@@ -3815,6 +4253,8 @@ class Console(QMainWindow):
         for aid in list(getattr(self, "_doctrines", {})):
             if aid in ids:
                 self._doctrines.pop(aid, None)
+        self._formation.pop(side, None)
+        self._spacing.pop(side, None)
 
 
     def play_frames(self, frames, title=""):
@@ -3887,6 +4327,22 @@ class Console(QMainWindow):
                      "worst_sinr_db", "worst_pdr", "arrived", "distance_m",
                      "ended_s")
 
+    # The columns that describe HOW a run was configured, as opposed to what
+    # came out of it. Filtering or naming a series by an output is how you
+    # fool yourself, so outputs are deliberately absent.
+    SWEEP_CONFIG_COLS = ("authority", "routing", "formation", "spacing",
+                         "jam_rel_db", "seed")
+
+    @staticmethod
+    def _series_id(row, varying):
+        """A legend name from the configuration, short enough to read."""
+        bits = [str(row.get(c)) for c in ("authority", "routing")
+                if row.get(c) not in (None, "")]
+        bits += [str(row.get(c)) for c in varying
+                 if c not in ("authority", "routing")
+                 and row.get(c) not in (None, "")]
+        return "_".join(bits) or "run"
+
     def sweep_frames(self, rows, xkey="jam_rel_db"):
         """Turn swept results into frames the existing plotting can draw.
 
@@ -3898,6 +4354,17 @@ class Console(QMainWindow):
         """
         xs = sorted({float(r[xkey]) for r in rows
                      if r.get(xkey) not in (None, "")})
+        # ONE SERIES PER CONFIGURATION THAT ACTUALLY VARIES. The series used
+        # to be named authority_routing, which was right until formation and
+        # spacing became axes: two shapes then collapsed into one line and
+        # silently averaged with each other, which is the worst possible way
+        # for a chart to be wrong. Any configured column with more than one
+        # value in these rows goes into the name; any column with a single
+        # value stays out of it, so the legend does not carry a constant.
+        varying = [c for c in self.SWEEP_CONFIG_COLS
+                   if c != xkey
+                   and len({r.get(c) for r in rows if r.get(c) not in
+                            (None, "")}) > 1]
         frames = []
         for x in xs:
             agents = []
@@ -3907,7 +4374,7 @@ class Console(QMainWindow):
                         continue
                 except (TypeError, ValueError):
                     continue
-                aid = f"{r.get('authority', '?')}_{r.get('routing', '?')}"
+                aid = self._series_id(r, varying)
                 body = {"id": aid, "platform": "result", "network": "blue",
                         "colour": ResultPlot.AUTH_COLOUR.get(
                             r.get("authority"), "#AAAAAA")}
@@ -3983,7 +4450,7 @@ class Console(QMainWindow):
                  f"right-click a plot to split it.")
 
     def run_composition(self, compose, mission="advance", title="", seed=1,
-                        warmup_s=0.0, jam_dbm=None):
+                        warmup_s=0.0, jam_dbm=None, goal=None):
         """Start a LIVE run of a composition handed in from elsewhere.
 
         This is how an experiment cell is opened: the sweep's own composition,
@@ -4013,7 +4480,12 @@ class Console(QMainWindow):
         red = any(a.get("jammer") for a in (compose.get("agents") or []))
 
         def _order():
-            self._send_setup_orders(mission, red=False)
+            # THE GOAL TRAVELS WITH THE MISSION. Replaying a cell that ran on
+            # a scene whose points are not the corridor's would otherwise
+            # issue `advance to FAR` into a world with no FAR in it, and the
+            # fleet would sit still while the table said it had advanced.
+            self._send_setup_orders(
+                f"{mission} to {goal}" if goal else mission, red=False)
         QTimer.singleShot(900, _order)
         # THE JAMMER ARMS AFTER THE WARM-UP, exactly as it does in the sweep.
         # Arming it at t=0 instead would have jammed the fleet before it had
@@ -4098,20 +4570,117 @@ class Console(QMainWindow):
         i = self.exp_mission.findText(cur or "advance")
         self.exp_mission.setCurrentIndex(max(i, 0))
         self.exp_mission.blockSignals(False)
+        self._refresh_goals()
+
+    def _refresh_goals(self):
+        """List the CHOSEN SCENE's named points into the goal picker.
+
+        Read from the scene file rather than from a hardcoded list, so adding
+        a scene with its own points needs no code at all - which is the whole
+        difference between "experiments run on the corridor" and "experiments
+        run on scenes".
+        """
+        if not hasattr(self, "exp_goal"):
+            return
+        import yaml as _yaml
+        cur = self.exp_goal.currentText()
+        pts = {}
+        if self._setup_scene:
+            try:
+                doc = _yaml.safe_load(
+                    (REPO_ROOT / "scenes" / f"{self._setup_scene}.yaml")
+                    .read_text(encoding="utf-8")) or {}
+                pts = doc.get("points") or {}
+            except (OSError, ValueError) as exc:
+                self.say(f"cannot read the scene's points: {exc}")
+        self.exp_goal.blockSignals(True)
+        self.exp_goal.clear()
+        self.exp_goal.addItem("(none - advance until stopped)")
+        for name in sorted(pts):
+            q = pts[name] or {}
+            self.exp_goal.addItem(
+                f"{name}   ({_num(q.get('x')):.0f}, {_num(q.get('y')):.0f})")
+            self.exp_goal.setItemData(self.exp_goal.count() - 1, name)
+        # THE FAR END, by default. Not a name - a name only works on the one
+        # scene that happens to use it, which is the bug this replaces. The
+        # point furthest from the origin along x is what "advance" means on a
+        # corridor and is a defensible default anywhere else.
+        # Preserve the operator's choice - but "(none)" is what the picker
+        # shows before a scene is chosen, so treating THAT as a choice left
+        # every experiment goalless, which reads as "nothing arrives" rather
+        # than "nobody said where to go".
+        i = self.exp_goal.findText(cur) if getattr(self, "_goal_touched",
+                                                   False) else -1
+        if i < 0 and pts:
+            far = max(pts, key=lambda k: _num((pts[k] or {}).get("x")))
+            i = max(self.exp_goal.findData(far), 0)
+        self.exp_goal.setCurrentIndex(max(i, 0))
+        self.exp_goal.blockSignals(False)
+
+    def _goal_name(self):
+        """The goal point's NAME, or None for '(none)'."""
+        return self.exp_goal.currentData() if hasattr(self, "exp_goal") \
+            else None
+
+    def _sweep_axes(self):
+        """Every swept axis and its values, in one place.
+
+        Both the run counter and the experiment config read this, so the
+        number on the label and the number of runs cannot disagree - which
+        they could when each built its own list.
+        """
+        shapes = [k for k, act in getattr(self, "exp_forms", {}).items()
+                  if act.isChecked()] or [AS_SPAWNED]
+        axes = {
+            "authority": (["centralized", "decentralized", "hierarchical"]
+                          if self.auth_combo.currentText() == self.SWEEP_ALL
+                          else [self.auth_combo.currentText()]),
+            "routing": (["star", "mesh", "tiered"]
+                        if self.route_combo.currentText() == self.SWEEP_ALL
+                        else [self.route_combo.currentText()]),
+            "jam_rel_db": self.exp_power_axis.values(),
+            "formation": shapes,
+        }
+        # SPACING ONLY WHEN THERE IS A SHAPE TO SCALE. Sweeping it against
+        # (as spawned) alone would multiply the grid by runs that are
+        # byte-identical to each other, which is not a result, it is a wait.
+        if shapes != [AS_SPAWNED]:
+            axes["spacing"] = self.exp_space_axis.values()
+        return axes
 
     def _refresh_run_count(self):
         """The grid size, live, as you tick. Not a time estimate - an estimate
         is a guess you then have to defend; this is arithmetic."""
         if not hasattr(self, "lbl_runs") or self.mode_combo.currentIndex() != 2:
             return
-        na = 3 if self.auth_combo.currentText() == self.SWEEP_ALL else 1
-        nr = 3 if self.route_combo.currentText() == self.SWEEP_ALL else 1
-        powers = [db for db, b in self.exp_powers if b.isChecked()]
-        n = na * nr * len(powers)
+        axes = self._sweep_axes()
+        parts = " x ".join(f"{len(v)} {k}" for k, v in axes.items())
+        # THE SWEEP'S OWN GRID FUNCTION, not a second copy of the arithmetic.
+        # cells_of drops the cells that are duplicates by construction (a
+        # spacing swept against (as spawned) scales nothing), so counting the
+        # product here would promise runs that never happen.
+        try:
+            cells, _names = _sweep_module().cells_of(
+                {"axes": axes, "seeds": [1]})
+            n = len(cells)
+        except Exception:                                  # noqa: BLE001
+            n = 1
+            for v in axes.values():
+                n *= max(len(v), 0)
+        product = 1
+        for v in axes.values():
+            product *= max(len(v), 0)
+        dropped = product - n
         self.lbl_runs.setText(
-            f"{n} runs  =  {na} authority x {nr} routing x {len(powers)} "
-            f"power{'s' if len(powers) != 1 else ''}"
-            if n else "Tick at least one power.")
+            (f"{n} runs  =  {parts}"
+             + (f"   minus {dropped} that spacing cannot change - "
+                f"(as spawned) has no shape to scale" if dropped > 0 else ""))
+            if n else "An axis has no values - give every axis at least one.")
+        if hasattr(self, "exp_form_btn"):
+            ticked = axes["formation"]
+            self.exp_form_btn.setText(
+                f"{len(ticked)} formation"
+                f"{'s' if len(ticked) != 1 else ''}  \u25be")
 
 
     def _experiment_cfg(self):
@@ -4126,9 +4695,9 @@ class Console(QMainWindow):
         composed = getattr(self, "_composed", None)
         if not composed:
             return None, "Compose a run in Setup first (scene, then fleets)."
-        powers = [db for db, b in self.exp_powers if b.isChecked()]
-        if not powers:
-            return None, "Tick at least one jammer power to sweep."
+        axes = self._sweep_axes()
+        if not axes["jam_rel_db"]:
+            return None, "The jammer axis has no values - set steps to 1 or more."
         # Squads for the hierarchical and tiered cells. The first blue vehicle
         # leads - stated here rather than assumed silently, and replaced by a
         # squad column in the fleet table when that lands.
@@ -4138,27 +4707,25 @@ class Console(QMainWindow):
         squads = ({"alpha": {"leader": ids[0], "members": ids[1:]}}
                   if len(ids) >= 2 else {})
         name = "_".join(x for x in (self._setup_scene,
-                                    self.exp_mission.currentText()) if x)
+                                    self.exp_mission.currentText(),
+                                    self._goal_name()) if x)
         return {
             "name": name or "experiment",
             "compose": copy.deepcopy(composed),
             "mission": self.exp_mission.currentText() or "advance",
-            "goal": "FAR",
+            # None means "leave the mission's own destination alone". The
+            # sweep re-points every `advance` objective at this, so the same
+            # one-line mission file runs on any scene.
+            "goal": self._goal_name(),
             "duration_s": 400.0, "warmup_s": 5.0, "rate_hz": 10.0,
             "stop_when_stalled": True, "stall_grace_s": 5.0,
             "squads": squads, "coordinator": "gcs",
             "leader_loss": "fallback",
-            # Each axis is swept if its dropdown says `all`, and pinned to
-            # the single value otherwise. One place to look, and the run count
-            # above is the same arithmetic.
-            "axes": {
-                "authority": (["centralized", "decentralized", "hierarchical"]
-                              if self.auth_combo.currentText() == self.SWEEP_ALL
-                              else [self.auth_combo.currentText()]),
-                "routing": (["star", "mesh", "tiered"]
-                            if self.route_combo.currentText() == self.SWEEP_ALL
-                            else [self.route_combo.currentText()]),
-                "jam_rel_db": powers},
+            # THE SAME ARITHMETIC THE LABEL SHOWED. Built by _sweep_axes so
+            # the run counter on the Setup tab and the grid that actually runs
+            # cannot disagree - which they could when each assembled its own
+            # list of values.
+            "axes": axes,
             # One seed: measured, not assumed. Nothing is stochastic unless a
             # GNSS-band jammer or a lidar fleet is in play, and then this
             # should grow. See experiments/penetration.yaml.
@@ -5191,6 +5758,7 @@ class Console(QMainWindow):
             tree.collapseAll()
         if self.tabs.tabText(index) == "Setup":
             self._refresh_setup_lists()
+        self._update_placing()
         self.stack.setCurrentIndex(1 if self.tabs.tabText(index) == "Results" else 0)
 
     def refresh_series_tree(self, frame):

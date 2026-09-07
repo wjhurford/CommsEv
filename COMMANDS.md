@@ -72,7 +72,35 @@ do, and only then set it going.
 ```
 SETMISSION test             load missions/test.yaml and distribute it
 SETMISSION <name>           any file in missions/<name>.yaml
+SETMISSION <name> to <PT>   the same file, aimed at a point THIS scene defines
 ```
+
+### `to <POINT>` — why a mission is not welded to one scene
+
+A mission names a point; a **scene** defines the points. `missions/advance.yaml`
+says `to: FAR`, and `FAR` exists only in the corridor — so that one mission,
+which the whole experiment programme is built on, could only ever run on one
+scene. Pointed at any other, it did not fail loudly: it tasked **nobody**, and
+produced a table of vehicles that had not moved.
+
+`to <POINT>` re-points every `advance` objective in the file at a point the
+current scene actually declares, so one one-line mission runs anywhere:
+
+```
+SETMISSION advance to FAR   corridor_200m
+SETMISSION advance to B     open_field - same file, no edit
+```
+
+A goal the scene does not define is refused, and the refusal lists the points
+it does have. An `advance` with **no** destination is left alone by `to`,
+because that form means "go forward until a wall or until you lose command"
+and has no goal to overwrite.
+
+In an **experiment** the goal is a dropdown on the Setup tab, populated from
+the chosen scene's own points. Penetration is then measured along the line
+from where the fleet started to that point — the same number as before on the
+corridor, and a meaningful one on a scene that does not happen to run
+east-west.
 
 Applies that mission file's per-agent objectives to the running fleet and
 titles the run with its name, so results come out as
