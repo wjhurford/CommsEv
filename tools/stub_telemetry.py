@@ -2214,6 +2214,10 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
                                            arena.get("networks") or {},
                                            link_states=_states),
             "dimensions": a["dimensions"],
+            # The radio, so the Console can draw this agent's own reach beside
+            # the jammer rings. Hardware, and until now invisible - which left
+            # "why did that link drop" with no answer you could see.
+            "radio": dict(a.get("radio") or {}),
             "pose": poses[a["id"]],
             "scan": scan_for(a, lidars[0], poses, agents, arena, rng) if lidars else None,
             "publishes": publications_for(a),

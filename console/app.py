@@ -893,6 +893,39 @@ class Viewport(QWidget):
                        (f"{a.get('id')}: believes it is {err:.2f} m from here"
                         if gnss_view else f"thinks: {err:.1f} m off"))
 
+    def _comms_ring(self, p, agent, s):
+        """The distance at which this agent's own transmissions fall to the
+        noise floor - a NOMINAL omni contour, like the jammer's, and honest
+        about being one: real coverage is ragged and this ignores the far
+        end's power entirely. Its use is comparative, against the jammer
+        rings drawn beside it."""
+        if _jammer_range_m is None:
+            return
+        node = (agent.get("radio") or {}).get("tx_power")
+        tx = (_num(node.get("value")) if isinstance(node, dict)
+              else (_num(node) if isinstance(node, (int, float)) else None))
+        if tx is None:
+            return
+        noise, plexp = self.scene_rf
+        try:
+            r = _jammer_range_m(tx, 2400.0, noise, plexp)
+        except Exception:                              # noqa: BLE001
+            return
+        if not r or r <= 0:
+            return
+        pose = agent.get("pose", {})
+        c = self.to_screen(_num(pose.get("x")), _num(pose.get("y")),
+                           _num(pose.get("z")))
+        col = QColor(agent.get("colour") or "#2E6FB0").lighter(120)
+        pen = QPen(col, 1.1, Qt.DashDotLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(c, r * s, r * s)
+        p.setFont(QFont("Consolas", 7))
+        p.setPen(QPen(col))
+        p.drawText(c + QPointF(r * s * 0.7, r * s * 0.7),
+                   f"{agent.get('id')} reach ~{r:.0f} m @ {tx:.0f} dBm")
+
     def _range_rings(self, p):
         """Ring the influence area of a SELECTED jammer (TOP view only - a
         2-D contour only reads on the plan). Two rings: the J/N=0 influence
@@ -905,6 +938,16 @@ class Viewport(QWidget):
             if a.get("id") not in self.selected:
                 continue
             if not a.get("jammer"):
+                # NOT A JAMMER: draw its own COMMS REACH instead. Every agent
+                # with a radio has one, and the ground station's is the one
+                # that matters most - it is the difference between a star that
+                # covers the fleet and a star that does not. It was invisible,
+                # which meant "why did that link drop" had no answer you could
+                # see. Same computation as a jammer's contour, driven by this
+                # agent's own declared transmit power, so the two are directly
+                # comparable on the map: where the rings overlap is where the
+                # jammer is winning.
+                self._comms_ring(p, a, s)
                 continue
             r0 = self._jammer_range(a)
             if not r0 or r0 <= 0:
@@ -1325,6 +1368,16 @@ def discover_series(frame):
                     f"agents.{aid}.gnss_denied",
                     f"agents.{aid}.position_error_m",  # belief vs truth
                     f"agents.{aid}.noise_floor_dbm"]
+        # ANY numeric field an agent carries. Written generically rather than
+        # as a list, because a SWEPT result arrives as synthetic agents whose
+        # fields are metrics (penetration_m, adaptability, ...) rather than
+        # poses - and hardcoding the names would mean a new metric could never
+        # be plotted without editing this function.
+        for k, v in a.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                path = f"agents.{aid}.{k}"
+                if path not in out:
+                    out.append(path)
     for l in frame.get("links", []):
         tag = f"{l.get('a')}-{l.get('b')}"
         for k, v in l.items():
@@ -2440,8 +2493,16 @@ class ExperimentWindow(QDialog):
         self.bar.setFormat("idle")
         lay.addWidget(self.bar)
 
-        self.plot = ResultPlot()
-        lay.addWidget(self.plot, 2)
+        # No chart in this window. It belongs in Results, where the plotting
+        # works and where splitting panes and picking series already exist.
+        self.plot = ResultPlot()          # kept for the highlight colour map
+        self.plot.hide()
+        note = QLabel("Charts open in the RESULTS tab - drag a series onto "
+                      "the plot, right-click a plot to split it. The x axis "
+                      "is the swept jammer advantage, not seconds.")
+        note.setObjectName("hint")
+        note.setWordWrap(True)
+        lay.addWidget(note)
         # THE CHART, GUARANTEED. Three different in-widget drawing mechanisms
         # have failed to appear in this dialog - a custom paintEvent, the same
         # wrapped in a try/except that could not even print its own failure,
@@ -2584,6 +2645,18 @@ class ExperimentWindow(QDialog):
         self._build_filter()
         self._fill_table()
         self._apply_filter()
+        # The chart lives in the RESULTS TAB now, drawn by the plotting the
+        # Console already has and which demonstrably works. Four bespoke
+        # widgets failed in this dialog; this one reuses the tab whose whole
+        # job is plotting, and brings split panes and series selection with
+        # it for free.
+        if self.console is not None:
+            try:
+                self.console.show_sweep_results(self.rows)
+            except Exception as exc:                   # noqa: BLE001
+                import traceback
+                self.console.say("could not chart the sweep:\n"
+                                 + traceback.format_exc())
 
     def _build_filter(self):
         for b in self._boxes:
@@ -3559,6 +3632,89 @@ class Console(QMainWindow):
         if title:
             self.say(f"Opened {title} - {len(self.frames)} frames, showing the "
                      f"playing from the start. Drag the timeline to scrub.")
+
+    # Metrics a swept result offers as plottable series. Ordered so the ones
+    # people actually ask for come first in the tree.
+    SWEEP_METRICS = ("penetration_m", "penetration_frac", "commanded_fraction",
+                     "held_fraction", "belief_err_m", "track_err_m",
+                     "worst_sinr_db", "worst_pdr", "arrived", "distance_m",
+                     "ended_s")
+
+    def show_sweep_results(self, rows, xkey="jam_rel_db",
+                           xlabel="P_j/P_t (dB)"):
+        """Put a SWEPT result into the Results tab, using the plotting the
+        Console already has.
+
+        THE X AXIS WAS THE WHOLE PROBLEM. PlotPane draws against sim_time_s,
+        so anything handed to it without a time is drawn on an axis of zero
+        width - which renders as nothing at all, with no error, which is
+        exactly what four attempts at a bespoke chart widget produced.
+
+        The fix is not another widget. A sweep has the same SHAPE as a run -
+        a value per step - so each swept parameter value becomes a frame whose
+        `sim_time_s` IS that value, and each architecture becomes an agent
+        whose fields are its metrics. Everything the Results tab can already
+        do then works unchanged: right-click to split a pane, drag series in,
+        overlay them, scrub the cursor.
+
+        Read the x axis as the swept parameter, not as seconds. That is the
+        one honest compromise, and it is worth it to reuse plotting that
+        demonstrably works rather than to maintain a fifth version that does
+        not.
+        """
+        if not rows:
+            return
+        xs = sorted({float(r[xkey]) for r in rows
+                     if r.get(xkey) not in (None, "")})
+        frames = []
+        for x in xs:
+            agents = []
+            for r in rows:
+                try:
+                    if float(r.get(xkey)) != x:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                aid = f"{r.get('authority', '?')}_{r.get('routing', '?')}"
+                body = {"id": aid, "platform": "result", "network": "blue",
+                        "colour": ResultPlot.AUTH_COLOUR.get(
+                            r.get("authority"), "#AAAAAA")}
+                for k in self.SWEEP_METRICS:
+                    if r.get(k) in (None, ""):
+                        continue
+                    try:
+                        body[k] = float(r[k])
+                    except (TypeError, ValueError):
+                        pass
+                agents.append(body)
+            frames.append({"seq": len(frames), "sim_time_s": x,
+                           "run_state": "sweep", "mission": "sweep",
+                           "agents": agents, "links": [],
+                           "arena": self.viewport.arena or {}})
+        self.frames = frames
+        self.plots.frames = frames
+        self.plots.live = False
+        self.plots.cursor = 0
+        self._known_series = []            # force the tree to rebuild
+        self.refresh_series_tree(frames[0])
+        if hasattr(self, "series_mode"):
+            self.series_mode.setCurrentText("All series")
+        self.plots.refresh()
+        self.timeline.blockSignals(True)
+        self.timeline.setEnabled(True)
+        self.timeline.setMaximum(max(0, len(frames) - 1))
+        self.timeline.setValue(0)
+        self.timeline.blockSignals(False)
+        self.time_label.setText(f"swept: {xlabel}")
+        # Results is a different question from the world, so it takes the
+        # whole canvas - the same swap the tab already does.
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Results":
+                self.tabs.setCurrentIndex(i)
+                break
+        self.say(f"Swept result in Results: {len(rows)} runs, "
+                 f"x axis is {xlabel}. Drag a series onto the plot; "
+                 f"right-click a plot to split it.")
 
     def run_composition(self, compose, mission="advance", title="", seed=1):
         """Start a LIVE run of a composition handed in from elsewhere.
