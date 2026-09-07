@@ -82,6 +82,11 @@ def keeps_going_on_link_loss(agent):
     return (agent.get("on_link_loss") or "hold").lower() in LINK_LOSS_KEEPS_GOING
 
 
+# The transmit power a radio has when its agent declares none. rf_link()'s
+# long-standing default, kept as the fallback so nothing silently changes, and
+# named so it can be referred to rather than repeated.
+DEFAULT_TX_DBM = 20.0
+
 GNSS_BAND_MHZ = 1575.42          # GPS L1 - the band a GNSS jammer occupies
 # Jammer power (received, dBm) above which an agent loses its GNSS fix. GNSS
 # signals arrive at about -128 dBm, so a jammer only tens of dB stronger denies
@@ -460,6 +465,10 @@ def load_scenario(path):
             # (freeze, default) or continue. Read by step(). A real field on
             # the fleet already (lab cars declare on_link_loss: hold).
             "on_link_loss": a.get("on_link_loss", "hold"),
+            # THE RADIO. Hardware, declared on the agent, carried through
+            # rather than normalised away - a ground station transmits harder
+            # than a car and every link was scored as if it did not.
+            "radio": dict(a.get("radio") or {}),
             "ghost": bool(a.get("ghost", False)),
             "speed": _num((a.get("performance") or {}).get("max_speed"), 1.5),
             # VEHICLE DYNAMICS. Until now an agent reached full speed in one
@@ -1831,8 +1840,19 @@ def apply_routing(links, agents, networks, poses, world=None):
                              exclude=(a, b)),
                 jammer_rx_mw(poses[b], _jam, poses, _rf["plexp"], band,
                              exclude=(a, b)))
-        state = rf_link(poses[a], poses[b], plexp=_rf["plexp"],
+        # A LINK HAS TWO DIRECTIONS AND THEY ARE NOT THE SAME. The ground
+        # station may reach a car easily while the car struggles to reply, so
+        # the link is scored from the WEAKER direction - the one that decides
+        # whether an exchange completes. Using one power for both ends hid
+        # exactly this asymmetry.
+        _by = {x["id"]: x for x in agents}
+        tx_a = radio_tx_dbm(_by.get(a))
+        tx_b = radio_tx_dbm(_by.get(b))
+        st_ab = rf_link(poses[a], poses[b], tx_dbm=tx_a, plexp=_rf["plexp"],
                         noise_dbm=_rf["noise_dbm"], interference_mw=interf)
+        st_ba = rf_link(poses[b], poses[a], tx_dbm=tx_b, plexp=_rf["plexp"],
+                        noise_dbm=_rf["noise_dbm"], interference_mw=interf)
+        state = st_ab if st_ab["sinr_db"] <= st_ba["sinr_db"] else st_ba
 
         # CONTENTION: every other agent sharing this band and within earshot of
         # the receiver competes for airtime. Each costs a little delivered
@@ -1928,7 +1948,25 @@ def observed_topology(links_out):
             "max_betweenness": round(maxb, 3), "hub": hub}
 
 
-def rf_link(pa, pb, tx_dbm=20.0, freq_mhz=2400.0, plexp=2.8,
+def radio_tx_dbm(agent, default=DEFAULT_TX_DBM):
+    """This agent's transmit power, in dBm.
+
+    HARDWARE, so it belongs on the agent - and it was not there. Every link in
+    the model was scored at one hardcoded 20 dBm, which quietly asserted that
+    a ground station transmits exactly as hard as a small vehicle. It does
+    not: a bench has mains power, a bigger amplifier and a proper antenna, and
+    that difference is the whole reason a GCS can reach further than the cars
+    can reach each other. Getting it wrong understates a star and overstates
+    a mesh, which is the very comparison the framework exists to make.
+
+    Read from the agent's `radio: {tx_power: {...}}` block, falling back to
+    the fleet-wide default when a fleet does not declare one.
+    """
+    node = (agent or {}).get("radio") or {}
+    return _qty(node.get("tx_power"), default)
+
+
+def rf_link(pa, pb, tx_dbm=DEFAULT_TX_DBM, freq_mhz=2400.0, plexp=2.8,
             noise_dbm=-95.0, interference_mw=0.0, sensitivity_dbm=-85.0):
     """Signal-to-interference-plus-noise for one pair, and what it implies.
 

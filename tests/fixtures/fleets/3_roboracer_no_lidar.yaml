@@ -35,6 +35,7 @@ networks:
 agents:
   - id: gcs
     platform: ground_station
+    radio: {tx_power: {value: 30, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
@@ -45,6 +46,7 @@ agents:
     ghost: true
   - id: car1
     platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
@@ -58,6 +60,7 @@ agents:
       - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
   - id: car2
     platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
@@ -71,6 +74,7 @@ agents:
       - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
   - id: car3
     platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}

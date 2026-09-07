@@ -36,6 +36,14 @@ dimensions:
   width: {value: 0.4, unit: m, source: "Nominal - measure the bench"}
   height: {value: 1.0, unit: m, source: "Nominal - measure the bench"}
 
+# ITS RADIO. A bench has mains power, a proper amplifier and a real antenna,
+# so it transmits harder than anything it is talking to. Modelling every radio
+# at one power asserted a ground station is a car, which understates a star
+# network and overstates a mesh - the exact comparison this framework makes.
+# 30 dBm = 1 W, the usual ceiling for licence-exempt 2.4 GHz equipment.
+radio:
+  tx_power: {value: 30, unit: dBm, source: ""}   # <-- module datasheet
+
 performance:
   max_speed:       {value: 0.0, unit: m/s, source: "Nominal - measure the bench"}
   max_accel:       {value: 1.0, unit: m/s^2, source: "Nominal - measure the bench"}

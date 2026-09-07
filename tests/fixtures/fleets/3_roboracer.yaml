@@ -59,6 +59,7 @@ agents:
 
   - id: gcs
     platform: ground_station
+    radio: {tx_power: {value: 30, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: 0.0, y: -3.4, z: 0.0, yaw: 1.5708}
@@ -72,6 +73,7 @@ agents:
 
   - id: car1
     platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: -3.0, y: 2.0, z: 0.0, yaw: 0.0}
@@ -100,6 +102,7 @@ agents:
     on_link_loss: hold
   - id: car2
     platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: -3.0, y: 0.0, z: 0.0, yaw: 0.0}
@@ -128,6 +131,7 @@ agents:
     on_link_loss: hold
   - id: car3
     platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
     network: blue
     colour: "#2E6FB0"
     pose: {x: -3.0, y: -2.0, z: 0.0, yaw: 0.0}

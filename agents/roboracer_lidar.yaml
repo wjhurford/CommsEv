@@ -36,6 +36,13 @@ dimensions:
   width: {value: 0.3, unit: m, source: "Measured, car #1, 2026-07-21"}
   height: {value: 0.2, unit: m, source: "Measured, car #1, 2026-07-21"}
 
+# A small vehicle's radio: battery powered, a chip antenna, and a fraction of
+# the ground station's reach. This asymmetry is why a car can hear the bench
+# further than the bench can hear the car, and why a link is scored from its
+# weaker direction.
+radio:
+  tx_power: {value: 20, unit: dBm, source: ""}   # <-- module datasheet
+
 performance:
   max_speed:       {value: 1.5, unit: m/s, source: "Measured, car #1, 2026-07-21"}
   max_accel:       {value: 2.0, unit: m/s^2, source: "Measured, car #1, 2026-07-21"}
