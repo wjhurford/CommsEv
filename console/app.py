@@ -906,6 +906,23 @@ class Viewport(QWidget):
                        (f"{a.get('id')}: believes it is {err:.2f} m from here"
                         if gnss_view else f"thinks: {err:.1f} m off"))
 
+    def _ring_polygon(self, cx, cy, cz, radius, n=72):
+        """A horizontal circle of `radius` about (cx, cy), PROJECTED.
+
+        Drawn as a polygon of world points rather than as a screen-space
+        ellipse, so it lands correctly in every view instead of only on the
+        plan. The rings used to be TOP-only for exactly that reason - a
+        circle drawn with drawEllipse is a circle on screen, which is wrong
+        the moment the camera is not looking straight down, so they were
+        simply skipped and appeared to have vanished.
+        """
+        poly = QPolygonF()
+        for i in range(n + 1):
+            th = 2.0 * math.pi * i / n
+            poly.append(self.to_screen(cx + radius * math.cos(th),
+                                       cy + radius * math.sin(th), cz))
+        return poly
+
     def _comms_ring(self, p, agent, s):
         """The distance at which this agent's own transmissions fall to the
         noise floor - a NOMINAL omni contour, like the jammer's, and honest
@@ -933,19 +950,28 @@ class Viewport(QWidget):
         pen = QPen(col, 1.1, Qt.DashDotLine)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
-        p.drawEllipse(c, r * s, r * s)
+        p.drawPolyline(self._ring_polygon(_num(pose.get("x")),
+                                          _num(pose.get("y")),
+                                          _num(pose.get("z")), r))
         p.setFont(QFont("Consolas", 7))
         p.setPen(QPen(col))
-        p.drawText(c + QPointF(r * s * 0.7, r * s * 0.7),
+        p.drawText(c + QPointF(10, 12),
                    f"{agent.get('id')} reach ~{r:.0f} m @ {tx:.0f} dBm")
 
     def _range_rings(self, p):
-        """Ring the influence area of a SELECTED jammer (TOP view only - a
-        2-D contour only reads on the plan). Two rings: the J/N=0 influence
-        boundary (dashed) and the J/N=20 dB denial core (solid). A NOMINAL
-        omni contour - real jammed areas are ragged (sensors 2024)."""
-        if self.mode != self.TOP:
-            return
+        """Ring a SELECTED agent's reach: a jammer's influence, or anything
+        else's comms range.
+
+        Two rings for a jammer: the J/N=0 influence boundary (dashed) and the
+        J/N=20 dB denial core (filled). A NOMINAL omni contour - real jammed
+        areas are ragged (sensors 2024).
+
+        Drawn in EVERY view now. They were plan-only because a screen-space
+        ellipse is only correct looking straight down, so switching to ISO
+        made them silently vanish - which reads as a bug rather than as a
+        deliberate omission. Projecting the ring as a polygon of world points
+        costs nothing and is right from any angle.
+        """
         s = self.scale()
         for a in self.agents:
             if a.get("id") not in self.selected:
@@ -972,14 +998,17 @@ class Viewport(QWidget):
             # denial core (J/N=20 dB): a tenth the radius per 20 dB / (10*n)...
             # recompute directly for honesty rather than scaling.
             core = self._core_range(a)
+            px, py, pz = (_num(pose.get("x")), _num(pose.get("y")),
+                          _num(pose.get("z")))
             if core and core > 0:
                 p.setPen(QPen(col, 1.4))
-                p.setBrush(QBrush(QColor(col.red(), col.green(), col.blue(), 40)))
-                p.drawEllipse(c, core * s, core * s)
+                p.setBrush(QBrush(QColor(col.red(), col.green(),
+                                         col.blue(), 40)))
+                p.drawPolygon(self._ring_polygon(px, py, pz, core))
             pen = QPen(col, 1.2, Qt.DashLine)
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
-            p.drawEllipse(c, r0 * s, r0 * s)
+            p.drawPolyline(self._ring_polygon(px, py, pz, r0))
             p.setFont(QFont("Consolas", 7))
             p.setPen(QPen(col))
             p.drawText(c + QPointF(r0 * s * 0.7, -r0 * s * 0.7),
