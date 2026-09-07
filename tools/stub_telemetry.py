@@ -772,6 +772,29 @@ def _in_bounds(x, y, arena):
     return (-hx <= x <= hx and -hy <= y <= hy), hx, hy
 
 
+def clamp_to_arena(x, y, z, arena):
+    """The nearest position inside the arena's USABLE range.
+
+    Shares _in_bounds' half-widths deliberately. The Console lets you drag a
+    vehicle or a goal point around the map, and a drag that could put one past
+    the wall would build a run whose objectives validate_objective then
+    REFUSES - at which point the fleet sits still and the reason is three
+    panels away from the thing you did. Clamping here, against the very rule
+    that would have rejected it, means the map cannot express a setup the
+    model will not accept.
+
+    The wall margin is included, so "as far as you can drag it" and "as far as
+    you are allowed to send it" are the same place rather than differing by a
+    margin nobody can see.
+    """
+    if not arena or not arena.get("extent"):
+        return (x, y, z)
+    _ok, hx, hy = _in_bounds(0.0, 0.0, arena)
+    hz = _num((arena.get("extent") or {}).get("z"), 3.0)
+    return (max(-hx, min(hx, float(x))), max(-hy, min(hy, float(y))),
+            max(0.0, min(hz, float(z))))
+
+
 def validate_objective(mission_dict, points, arena):
     """Can this objective actually be ACCEPTED onto an agent right now?
 

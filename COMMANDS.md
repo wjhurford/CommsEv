@@ -45,6 +45,53 @@ the things worth measuring.
 
 ---
 
+## The map is an editor, before the run starts
+
+Everything below can also be done by hand, on the Setup tab, before you press
+Play. Nothing here needs a coordinate typed into a file.
+
+| Do this | And this happens |
+|---|---|
+| Drag a vehicle | It moves. The status bar prints its position and the gap to its nearest neighbour |
+| Sweep a box over several | They become one selection |
+| Drag any selected one | **All of them move together**, by the same vector — the formation translates instead of coming apart |
+| Shift while sweeping | Named points join the selection too |
+| Drag a named point | The objective itself moves. `FAR` is where you put it |
+| **Add point…** | Invent a destination this scene never had, then drag it |
+| Middle-drag | Pans the view (the left button is the placement tool while placing) |
+
+A drag is **clamped to the arena**, using the same bounds check that validates
+an objective — so the map cannot express a setup the model would then refuse.
+
+Points are excluded from a box selection unless you hold Shift, and that is a
+safety rule rather than a preference: penetration is measured to the goal, so a
+box swept round a fleet that quietly dragged `FAR` along with it would move the
+ruler and the thing being measured together, and the numbers would still look
+reasonable afterwards.
+
+A **named formation survives a translation and nothing else.** Move every
+mobile vehicle on a side together and the shape is untouched, so the experiment
+tab keeps calling it a wedge. Move some of them and it is not a wedge any more,
+and the label reverts to `(as spawned)`.
+
+### Spawn point
+
+Choosing a fleet asks one coordinate: **where this side sets up**. The ground
+station goes there and the vehicles form up ahead of it, one spacing clear of
+the bench, in whatever formation you picked. Move the spawn point and the whole
+side moves with it, shape intact.
+
+### Objectives, from the Setup tab
+
+In **Sandbox** mode the tab carries the mission, the goal, and a list of
+recommended objectives with what each one is *for*. Arguments are pre-filled
+from the loaded scene's own points, so a suggestion always validates.
+**Assign to selection** sends the objective to whatever is selected on the map
+— sweep a box round two cars and only those two are retasked — down the same
+channel a typed order uses, gated by command authority in the same way.
+
+---
+
 ## Arming — `LAUNCH` / `HALT`
 
 **Cell:** blue for blue, red for red. White for either.

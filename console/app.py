@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
     QComboBox, QDialog, QInputDialog, QLineEdit, QMenu, QSizePolicy,
     QSlider, QSplitter, QProgressBar, QCheckBox, QSpinBox, QDoubleSpinBox,
+    QScrollArea, QFrame,
     QVBoxLayout, QWidget,
 )
 
@@ -83,6 +84,7 @@ try:
     # spawn dialog previews is exactly what a swept run will place.
     from stub_telemetry import FORMATIONS, formation_offsets
     from stub_telemetry import custom_formations, save_formation
+    from stub_telemetry import clamp_to_arena as _clamp_to_arena
 except Exception:
     _resolve_mission = None
     _jammer_range_m = None
@@ -92,6 +94,7 @@ except Exception:
     formation_offsets = None
     custom_formations = lambda: []          # noqa: E731
     save_formation = None
+    _clamp_to_arena = None
 
 # The entry that means "leave every vehicle exactly where it was put". Used in
 # the spawn dialog and as a value on the swept formation axis, so "no
@@ -311,6 +314,13 @@ class Viewport(QWidget):
         self.band_filter = None
         self.links = []
         self.selected = set()   # highlighted agent ids
+        # NAMED POINTS the scene declares - HOME, FAR, A..F. These are what a
+        # mission is written against ("advance to FAR"), so they are the other
+        # half of setting up a run and they were invisible: you could see the
+        # vehicles and not the thing they were being sent to.
+        self.points = {}          # {name: {x, y, z}}
+        self.selected_points = set()
+        self._band = None         # rubber-band rectangle, screen coords
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
         self.show_axes = False
         # The key is collapsed by default: once you know it, it is clutter
@@ -383,6 +393,78 @@ class Viewport(QWidget):
             return (u, y, v)
         return (x, u, v)                      # SIDE
 
+    def delta_world(self, d_screen):
+        """A screen-pixel displacement as a world displacement, in the two
+        axes THIS view shows.
+
+        Separate from from_screen because a GROUP move is a translation, not a
+        set of positions: every member has to move by the same vector, taken
+        from the mouse, rather than each one being placed under the cursor in
+        turn. Doing it in deltas also means no member accumulates rounding as
+        it is dragged, which is what turns a formation into an almost-formation
+        after a few moves.
+        """
+        s = self.scale()
+        if s <= 0 or self.mode == self.ISO:
+            return (0.0, 0.0, 0.0)
+        du, dv = d_screen.x() / s, -d_screen.y() / s
+        if self.mode == self.TOP:
+            return (du, dv, 0.0)
+        if self.mode == self.FRONT:
+            return (du, 0.0, dv)
+        return (0.0, du, dv)                  # SIDE
+
+    def clamp(self, x, y, z):
+        """Keep a dragged thing inside the arena.
+
+        Not cosmetic, and deliberately THE MODEL'S OWN RULE rather than a
+        second copy of it: objectives are validated against the arena when
+        they are assigned, so a point dragged past the wall builds a run whose
+        mission is refused - and then the fleet sits still and the reason is
+        three panels away from the thing you did. Clamping against the very
+        function that would reject it means the map cannot express a setup the
+        model will not accept.
+        """
+        if _clamp_to_arena is None or not self.arena:
+            return (x, y, z)
+        return _clamp_to_arena(x, y, z, self.arena)
+
+    def point_at(self, pt, radius_px=16.0):
+        """The NAME of the scene point under this screen position."""
+        best, bestd = None, radius_px
+        for name, q in (self.points or {}).items():
+            c = self.to_screen(_num(q.get("x")), _num(q.get("y")),
+                               _num(q.get("z")))
+            d = math.hypot(c.x() - pt.x(), c.y() - pt.y())
+            if d <= bestd:
+                best, bestd = name, d
+        return best
+
+    def bodies_in(self, rect, with_points=False):
+        """(agent ids, point names) whose markers fall inside a screen rect.
+
+        POINTS ARE EXCLUDED UNLESS ASKED FOR, and that is a safety rule rather
+        than a preference. Penetration is measured to the goal point, so a box
+        swept round a fleet that also quietly picked up FAR and dragged it
+        along would move the ruler with the thing being measured - and the
+        numbers would still look perfectly reasonable afterwards. Hold Shift
+        to include points deliberately.
+        """
+        aids, names = set(), set()
+        for a in self.agents:
+            pose = a.get("pose", {})
+            c = self.to_screen(_num(pose.get("x")), _num(pose.get("y")),
+                               _num(pose.get("z")))
+            if rect.contains(c):
+                aids.add(a.get("id"))
+        if with_points:
+            for name, q in (self.points or {}).items():
+                c = self.to_screen(_num(q.get("x")), _num(q.get("y")),
+                                   _num(q.get("z")))
+                if rect.contains(c):
+                    names.add(name)
+        return aids, names
+
     def agent_body_at(self, pt, radius_px=18.0):
         """The agent DICT under this point, for dragging.
 
@@ -419,6 +501,11 @@ class Viewport(QWidget):
     # the world, and doing it sixty times a second while the mouse is down
     # would make the drag unusable.
     on_drop = None
+    # Told when a scene POINT is dragged, and when the selection changes, so
+    # the Console can write the new geometry into the composed run and say in
+    # the status bar what is now under the mouse.
+    on_point_moved = None
+    on_selection = None
     # True while Setup is placing a fleet: a press grabs a vehicle instead of
     # panning the view.
     placing = False
@@ -432,32 +519,86 @@ class Viewport(QWidget):
             self._press_at = None
             self.update()
             return
+        # MIDDLE DRAG ALWAYS PANS. While placing, the left button is the
+        # placement tool - grab a vehicle, or sweep a selection box - so the
+        # view needs its own button or there is no way to scroll a 200 m
+        # corridor without moving something in it.
+        if ev.button() == Qt.MiddleButton:
+            self._drag = ev.position()
+            self._press_at = None
+            return
         # PLACING MODE: a press on a vehicle grabs it instead of panning, so
         # a formation can be built by dragging rather than typed as numbers.
         # Only before a run - moving an agent mid-run would be teleporting it,
         # which is not something the physics should have to explain.
         if getattr(self, "placing", False) and self.mode != self.ISO:
             hit = self.agent_body_at(ev.position())
-            if hit is not None and not hit.get("ghost"):
-                self._grab = hit
+            pname = None if hit is not None else self.point_at(ev.position())
+            if hit is not None or pname is not None:
+                # GRABBING A MEMBER OF THE SELECTION MOVES THE WHOLE
+                # SELECTION. That is the difference between placing a fleet
+                # and placing four vehicles that happen to be near each other:
+                # once the shape is right, the shape is the thing you move,
+                # and dragging it apart one vehicle at a time to reposition it
+                # is how a formation stops being one.
+                inset = (hit is not None and hit.get("id") in self.selected) \
+                    or (pname is not None and pname in self.selected_points)
+                if not inset:
+                    self.selected = {hit.get("id")} if hit is not None else set()
+                    self.selected_points = {pname} if pname is not None else set()
+                    if hit is not None and self.on_pick:
+                        self.on_pick(hit.get("id"))
+                self._grab = self._grab_set(ev.position())
                 self._drag = None
-                self._press_at = None
+                self._press_at = ev.position()
+                self.update()
                 return
+            # Empty space: sweep out a selection box.
+            self._band = QRectF(ev.position(), ev.position())
+            self._drag = None
+            self._press_at = ev.position()
+            return
         self._drag = ev.position()
         self._press_at = ev.position()
 
+    def _grab_set(self, at):
+        """Everything the drag will move, with the pose each started from.
+
+        Recorded ONCE, at the press: the move is then original + delta rather
+        than a chain of relative nudges, so nothing accumulates rounding and
+        letting go in the same place leaves the formation exactly as it was.
+        """
+        items = []
+        for a in self.agents:
+            if a.get("id") in self.selected and not a.get("ghost"):
+                pose = a.setdefault("pose", {})
+                items.append(("agent", a.get("id"), pose,
+                              (_num(pose.get("x")), _num(pose.get("y")),
+                               _num(pose.get("z")))))
+        for name in self.selected_points:
+            q = (self.points or {}).get(name)
+            if q is not None:
+                items.append(("point", name, q,
+                              (_num(q.get("x")), _num(q.get("y")),
+                               _num(q.get("z")))))
+        return {"at": at, "items": items}
+
     def mouseMoveEvent(self, ev):
+        if self._band is not None and ev.buttons():
+            self._band = QRectF(self._press_at, ev.position()).normalized()
+            self.update()
+            return
         grab = getattr(self, "_grab", None)
         if grab is not None and ev.buttons():
-            pose = grab.get("pose", {})
-            world = (_num(pose.get("x")), _num(pose.get("y")),
-                     _num(pose.get("z")))
-            new = self.from_screen(ev.position(), world)
-            if new is not None:
-                pose["x"], pose["y"], pose["z"] = new
-                if self.on_moved:
-                    self.on_moved(grab.get("id"), pose)
-                self.update()
+            dx, dy, dz = self.delta_world(ev.position() - grab["at"])
+            for kind, ident, holder, (x0, y0, z0) in grab["items"]:
+                holder["x"], holder["y"], holder["z"] = self.clamp(
+                    x0 + dx, y0 + dy, z0 + dz)
+                if kind == "agent" and self.on_moved:
+                    self.on_moved(ident, holder)
+                elif kind == "point" and self.on_point_moved:
+                    self.on_point_moved(ident, holder)
+            self.update()
             return
         if self._drag is not None and ev.buttons():
             self.pan += ev.position() - self._drag
@@ -465,11 +606,32 @@ class Viewport(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, ev):
+        # A SELECTION BOX. Everything whose marker fell inside is now one
+        # thing to move - which is what "translate the formation" means:
+        # sweep it, then drag any member.
+        if self._band is not None:
+            band, self._band = self._band, None
+            if band.width() > 3 and band.height() > 3:
+                self.selected, self.selected_points = self.bodies_in(
+                    band, with_points=bool(ev.modifiers() & Qt.ShiftModifier))
+                if self.on_selection:
+                    self.on_selection(self.selected, self.selected_points)
+            else:
+                # A click on empty space clears the selection, so there is an
+                # obvious way out of a group without picking members off.
+                self.selected, self.selected_points = set(), set()
+                if self.on_selection:
+                    self.on_selection(self.selected, self.selected_points)
+            self.update()
+            return
         grab = getattr(self, "_grab", None)
         if grab is not None:
             self._grab = None
-            if self.on_drop:
-                self.on_drop(grab.get("id"), grab.get("pose", {}))
+            moved = math.hypot(ev.position().x() - grab["at"].x(),
+                               ev.position().y() - grab["at"].y())
+            if self.on_drop and moved >= 2:
+                self.on_drop([i[1] for i in grab["items"] if i[0] == "agent"],
+                             [i[1] for i in grab["items"] if i[0] == "point"])
             return
         # A click that did not drag is a selection, not a pan.
         start = getattr(self, "_press_at", None)
@@ -507,11 +669,13 @@ class Viewport(QWidget):
             self._jammer_affect_lines(p)
             self._belief_ghosts(p)
             self._link_lines(p)
+            self._points(p)
             for a in self.agents:
                 self._agent(p, a)
             if self.show_axes:
                 self._axes(p)
             self._overlay(p)
+            self._selection_box(p)
         except Exception as exc:
             if Viewport._paint_error is None:
                 import traceback
@@ -523,6 +687,38 @@ class Viewport(QWidget):
             p.drawText(16, 58, Viewport._paint_error or "")
         finally:
             p.end()
+
+    def _points(self, p):
+        """The scene's named points - what a mission is written against.
+
+        Drawn as an open cross rather than a filled marker, so a point never
+        reads as a vehicle. They were not drawn at all until now, which meant
+        the destination in "advance to FAR" was the one part of a run you
+        could not see: you set up the fleet by eye and the goal by faith.
+        """
+        if not self.points:
+            return
+        p.setFont(QFont("Consolas", 8))
+        for name, q in sorted(self.points.items()):
+            c = self.to_screen(_num(q.get("x")), _num(q.get("y")),
+                               _num(q.get("z")))
+            lit = name in self.selected_points
+            col = QColor("#E08A3C") if lit else QColor("#7FA8B8")
+            p.setPen(QPen(col, 2.0 if lit else 1.2))
+            p.setBrush(Qt.NoBrush)
+            r = 7.0 if lit else 5.0
+            p.drawLine(QPointF(c.x() - r, c.y()), QPointF(c.x() + r, c.y()))
+            p.drawLine(QPointF(c.x(), c.y() - r), QPointF(c.x(), c.y() + r))
+            p.drawEllipse(c, r, r)
+            p.drawText(QPointF(c.x() + r + 3, c.y() - r), name)
+
+    def _selection_box(self, p):
+        """The rubber band, while it is being swept."""
+        if self._band is None:
+            return
+        p.setPen(QPen(QColor("#E08A3C"), 1.0, Qt.DashLine))
+        p.setBrush(QBrush(QColor(224, 138, 60, 28)))
+        p.drawRect(self._band)
 
     def _grid(self, p):
         """One line per metre across the arena footprint."""
@@ -1307,6 +1503,16 @@ class Viewport(QWidget):
         row("cut off - no reachable commander", swatch(orange_f, True))
         row("cut off AND lost", swatch(orange_f, False))
 
+        section("POINTS   what a mission is written against")
+        def d_point(yy):
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor("#7FA8B8"), 1.2))
+            cxp = x_sw + 12
+            p.drawLine(QPointF(cxp - 5, yy), QPointF(cxp + 5, yy))
+            p.drawLine(QPointF(cxp, yy - 5), QPointF(cxp, yy + 5))
+            p.drawEllipse(QPointF(cxp, yy), 5, 5)
+        row("named point - drag it to move the objective", d_point)
+
         section("DOCTRINE, once cut off")
         p.setPen(QPen(QColor("#E08A3C")))
         p.setFont(QFont("Consolas", 8))
@@ -1318,6 +1524,18 @@ class Viewport(QWidget):
         p.drawText(x_sw, y, "\u2192 intent")
         p.setPen(QPen(QColor(C_DIM)))
         p.drawText(x_tx + 30, y, "still executing its last order")
+        y += LH
+
+        if self.placing:
+            section("PLACING   Setup tab, before the run")
+            p.setPen(QPen(QColor(C_DIM)))
+            p.setFont(QFont("Consolas", 8))
+            for line in ("drag a vehicle or a point to move it",
+                         "sweep a box to select several",
+                         "drag any selected one to move them all",
+                         "middle-drag to pan"):
+                p.drawText(x_sw, y, line)
+                y += LH - 3
 
         s_ = self.scale()
         if s_ > 2:
@@ -2448,6 +2666,34 @@ class SpawnDialog(QDialog):
         # against where the bench is, so shuffling it because the fleet
         # changed shape would move the ruler along with the thing being
         # measured.
+        # ---- SPAWN POINT ----------------------------------------------------
+        # ONE COORDINATE PLACES THE FLEET. A ground station is a real place -
+        # a bench, a vehicle, a mast - and everything else deploys FROM it, so
+        # typing four sets of coordinates to express "we set up here and they
+        # went that way" was three sets too many. Move this and the whole
+        # fleet moves with it, formation intact.
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("Spawn point"))
+        self.sp_boxes = []
+        for axis in ("x", "y", "z"):
+            b = QDoubleSpinBox()
+            b.setDecimals(1)
+            b.setRange(-10000.0, 10000.0)
+            b.setFixedWidth(78)
+            b.setPrefix(f"{axis} ")
+            b.valueChanged.connect(lambda _v: self._reform())
+            srow.addWidget(b)
+            self.sp_boxes.append(b)
+        srow.addStretch(1)
+        lay.addLayout(srow)
+        sphint = QLabel(
+            "Where this side sets up. The ground station goes here and the "
+            "vehicles form up ahead of it, one spacing clear of the bench. "
+            "Move it and everything moves together.")
+        sphint.setObjectName("hint")
+        sphint.setWordWrap(True)
+        lay.addWidget(sphint)
+
         frow = QHBoxLayout()
         frow.addWidget(QLabel("Formation"))
         self.form_combo = QComboBox()
@@ -2547,6 +2793,23 @@ class SpawnDialog(QDialog):
             self.table.setCellWidget(r, 5, box)
         self.table.resizeColumnsToContents()
         lay.addWidget(self.table)
+
+        # THE ANCHOR: the ground station if this side has one, otherwise the
+        # middle of whatever moves. Everything the spawn point does is
+        # expressed as a shift of this, so "spawn here" means the same thing
+        # for a blue fleet with a bench and for a red one with none.
+        self._anchor = next(
+            (str(a.get("id")) for a in agents
+             if a.get("platform") == "ground_station"), None)
+        self._has_gcs = self._anchor is not None
+        if self._anchor is None and self._movable:
+            self._anchor = None          # centroid of the movable, computed live
+        a0 = self._anchor_pose()
+        for b, v in zip(self.sp_boxes, a0):
+            b.blockSignals(True)
+            b.setValue(v)
+            b.blockSignals(False)
+
         row = QHBoxLayout()
         row.addStretch(1)
         ok = QPushButton("Spawn here")
@@ -2585,44 +2848,99 @@ class SpawnDialog(QDialog):
         """Metres between neighbouring vehicles."""
         return self.space_slider.value() / 10.0
 
-    def _reform(self):
-        """Rewrite the table's x/y/z from the shape and the spacing.
+    def _anchor_pose(self):
+        """Where this side currently sets up, as originally spawned.
 
-        The formation is applied to the table the operator is looking at, not
-        somewhere downstream, so what you press Spawn on is what you saw. It
-        is also non-destructive in the only way that matters: choosing
-        (as spawned) restores the coordinates the dialog opened with, so a
-        formation experiment cannot lose the poses you typed by hand.
+        The ground station if there is one - a bench is a real place and the
+        obvious thing to point at. Otherwise the middle of whatever moves,
+        which is the only defensible anchor for a side that is all vehicles
+        (the red fleet, typically).
+        """
+        if self._anchor and self._anchor in self._original:
+            q = self._original[self._anchor]
+            return (q["x"], q["y"], q["z"])
+        rows = [aid for aid in self._ids if aid in self._movable] or self._ids
+        if not rows:
+            return (0.0, 0.0, 0.0)
+        return tuple(sum(self._original[a][k] for a in rows) / len(rows)
+                     for k in "xyz")
+
+    def spawn_point(self):
+        return tuple(b.value() for b in self.sp_boxes)
+
+    def _reform(self):
+        """Rewrite the table's x/y/z from the spawn point, shape and spacing.
+
+        Everything is computed from the ORIGINAL poses rather than from
+        whatever is currently in the table, so dragging the spawn point back
+        and forth cannot accumulate drift, and choosing (as spawned) restores
+        the arrangement the dialog opened with rather than a slightly-mangled
+        version of it.
+
+        Three rules, in order:
+          the anchor lands on the spawn point;
+          everything that is not a vehicle moves with it, rigidly;
+          the vehicles take their shape, placed one spacing ahead of the
+          bench so a formation never spawns on top of the thing every link in
+          the run is measured against.
         """
         self.space_lbl.setText(f"{self.spacing():.1f} m")
+        a0 = self._anchor_pose()
+        sp = self.spawn_point()
+        shift = (sp[0] - a0[0], sp[1] - a0[1], sp[2] - a0[2])
         shape = self.formation()
-        if shape == AS_SPAWNED or formation_offsets is None:
-            for r, aid in enumerate(self._ids):
-                for c, key in ((1, "x"), (2, "y"), (3, "z")):
-                    self.table.item(r, c).setText(
-                        str(self._original[aid][key]))
-            return
         rows = [r for r, aid in enumerate(self._ids) if aid in self._movable]
+
+        def put(r, x, y, z):
+            self.table.item(r, 1).setText(f"{x:.3f}")
+            self.table.item(r, 2).setText(f"{y:.3f}")
+            self.table.item(r, 3).setText(f"{z:.3f}")
+
+        # Rigid translation for everything the formation does not govern -
+        # the ground station, a jammer, a ghost.
+        for r, aid in enumerate(self._ids):
+            if r in rows:
+                continue
+            q = self._original[aid]
+            put(r, q["x"] + shift[0], q["y"] + shift[1], q["z"] + shift[2])
+
         if not rows:
             return
-        # CENTRED ON WHERE THE FLEET ALREADY IS. Changing the shape must not
-        # also teleport the fleet across the arena; the operator placed it,
-        # and only its arrangement is being asked about.
-        cx = sum(self._original[self._ids[r]]["x"] for r in rows) / len(rows)
-        cy = sum(self._original[self._ids[r]]["y"] for r in rows) / len(rows)
-        cz = sum(self._original[self._ids[r]]["z"] for r in rows) / len(rows)
+        if shape == AS_SPAWNED or formation_offsets is None:
+            for r in rows:
+                q = self._original[self._ids[r]]
+                put(r, q["x"] + shift[0], q["y"] + shift[1], q["z"] + shift[2])
+            return
+
         offs = formation_offsets(shape, len(rows), self.spacing())
+        if self._has_gcs and offs:
+            # ONE SPACING CLEAR OF THE BENCH, along +x. The formation's own
+            # depth decides how far its centre has to be for its REAR rank to
+            # sit that clear, so a deep column starts further out than a flat
+            # rank does and neither ends up inside the ground station.
+            depth = max(q[0] for q in offs) - min(q[0] for q in offs)
+            cx = sp[0] + depth / 2.0 + self.spacing()
+            cy, cz = sp[1], sp[2]
+        else:
+            # No bench: hold the shape where the vehicles already were.
+            cx = sum(self._original[self._ids[r]]["x"] for r in rows) \
+                / len(rows) + shift[0]
+            cy = sum(self._original[self._ids[r]]["y"] for r in rows) \
+                / len(rows) + shift[1]
+            cz = sum(self._original[self._ids[r]]["z"] for r in rows) \
+                / len(rows) + shift[2]
         for r, (dx, dy, dz) in zip(rows, offs):
-            self.table.item(r, 1).setText(f"{cx + dx:.3f}")
-            self.table.item(r, 2).setText(f"{cy + dy:.3f}")
-            self.table.item(r, 3).setText(f"{cz + dz:.3f}")
+            put(r, cx + dx, cy + dy, cz + dz)
         # A SAVED SHAPE HAS A FIXED SIZE. Whoever it ran out of room for keeps
         # the pose they had, and is TOLD SO - a fleet quietly half in
         # formation is a run nobody can explain afterwards.
         short = len(rows) - len(offs)
-        self.space_lbl.setText(
-            f"{self.spacing():.1f} m" if short <= 0
-            else f"{self.spacing():.1f} m  ({short} not placed)")
+        if short > 0:
+            for r in rows[len(offs):]:
+                q = self._original[self._ids[r]]
+                put(r, q["x"] + shift[0], q["y"] + shift[1], q["z"] + shift[2])
+            self.space_lbl.setText(
+                f"{self.spacing():.1f} m  ({short} not placed)")
 
 
 # ---------------------------------------------------------------------------
@@ -3385,6 +3703,8 @@ class Console(QMainWindow):
         # physics should have to explain.
         self.viewport.on_moved = self._agent_dragged
         self.viewport.on_drop = self._agent_dropped
+        self.viewport.on_point_moved = self._point_dragged
+        self.viewport.on_selection = self._selection_changed
         self._build_centre()
         self._build_docks()
         self._build_menu()
@@ -3401,6 +3721,8 @@ class Console(QMainWindow):
         self._fleet_docs = {}          # {side: fleet dict} built, NOT saved
         self._spawns = {}              # {agent_id: {x,y,z,yaw}} across sides
         self._formation = {}           # {side: shape} chosen in the spawn dialog
+        self._points_override = {}     # {name: {x,y,z}} points moved by hand
+        self._spawn_point = {}         # {side: (x,y,z)} where it set up
         self._spacing = {}             # {side: metres}
         self._blue_ids = set()
         self._red_ids = set()
@@ -3568,9 +3890,29 @@ class Console(QMainWindow):
         # set here: a mission is a COMMAND, issued from the terminal
         # (SETMISSION <name>) once the run is up, before `blue launch`.
         setup = QWidget()
-        slay = QVBoxLayout(setup)
+        # A SPLITTER, WITH THE CONTROLS IN A SCROLL AREA. The tab has grown
+        # from three dropdowns to a full run configuration - run type, scene,
+        # two fleets, authority, routing, mission, goal, three swept axes -
+        # and a fixed column silently CLIPPED whatever did not fit, which is
+        # how the run-count line ended up half a line tall and unreadable. A
+        # scroll area cannot clip, and the splitter means the scene tree below
+        # can be dragged out of the way when the controls need the room.
+        souter = QVBoxLayout(setup)
+        souter.setContentsMargins(0, 0, 0, 0)
+        souter.setSpacing(0)
+        setup_split = QSplitter(Qt.Vertical)
+        controls = QWidget()
+        slay = QVBoxLayout(controls)
         slay.setContentsMargins(6, 6, 6, 6)
         slay.setSpacing(4)
+        setup_scroll = QScrollArea()
+        setup_scroll.setWidget(controls)
+        setup_scroll.setWidgetResizable(True)
+        setup_scroll.setFrameShape(QFrame.NoFrame)
+        # Never a HORIZONTAL bar: the panel is narrow and every control in it
+        # is meant to fit its width. Wrapping labels then wrap instead of
+        # pushing a scrollbar nobody wants under them.
+        setup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         # THE TAB STARTS BLANK. One question, asked first, because the answer
         # decides what everything else on this tab MEANS - a sandbox picks one
@@ -3644,6 +3986,55 @@ class Console(QMainWindow):
         slay.addWidget(self.compose_box)
         self.compose_box.setVisible(False)
 
+        # ---- MISSION: both run types ---------------------------------------
+        # ABOVE the architecture, and shared. It used to be an experiment-only
+        # control sitting at the bottom of the tab, which said two wrong
+        # things: that a sandbox run has no mission to choose (it does - it was
+        # just typed at a terminal instead), and that the mission matters less
+        # than the routing. What the fleet is being ASKED TO DO comes first;
+        # who decides and how the packets travel are answers to that question.
+        self.mission_box = QWidget()
+        mlay = QVBoxLayout(self.mission_box)
+        mlay.setContentsMargins(0, 6, 0, 0)
+        mlay.setSpacing(4)
+        mlay.addWidget(QLabel("Mission"))
+        self.exp_mission = QComboBox()
+        self.exp_mission.setToolTip(
+            "The order the fleet is given. In an experiment it is issued to "
+            "every vehicle when each run starts, because there is nobody to "
+            "type at a headless run. In a sandbox it is issued when you press "
+            "'Issue mission', or by hand at the terminal.")
+        mlay.addWidget(self.exp_mission)
+
+        # GOAL. A mission names a point; a scene defines the points. Pinning
+        # the goal to FAR in the mission file welded every experiment to the
+        # corridor - the only scene that has a point by that name - so the
+        # goal is chosen here, from the points the CHOSEN SCENE actually
+        # declares, and the mission is re-pointed at it.
+        mlay.addWidget(QLabel("Goal (from this scene's points)"))
+        self.exp_goal = QComboBox()
+        self.exp_goal.activated.connect(self._on_goal_chosen)
+        self.exp_goal.setToolTip(
+            "Where 'advance' is advancing TO. Penetration is measured along "
+            "the line from where the fleet starts to this point, so it means "
+            "the same thing on any scene, not just an east-west corridor.\n"
+            "Drag the point itself on the map to move it.\n"
+            "(none) leaves the mission's own destination alone - use it for "
+            "'advance until a wall or until you lose command'.")
+        mlay.addWidget(self.exp_goal)
+        prow2 = QHBoxLayout()
+        addpt = QPushButton("Add point...")
+        addpt.setToolTip(
+            "Put a new named point on the map, then drag it where you want "
+            "it. A mission is written against points, so this is how you "
+            "invent a destination without opening a scene file.")
+        addpt.clicked.connect(self.add_point)
+        prow2.addWidget(addpt)
+        prow2.addStretch(1)
+        mlay.addLayout(prow2)
+        slay.addWidget(self.mission_box)
+        self.mission_box.setVisible(False)
+
         # ---- ARCHITECTURE: both run types, but different meanings ----------
         # SWEEP_ALL is the fourth option. In a sandbox it is not offered -
         # you cannot watch three authorities at once. In an experiment it is
@@ -3688,12 +4079,58 @@ class Console(QMainWindow):
             "    SETMISSION <name>\n"
             "then `blue launch`. Results are titled by this name.")
         sblay.addWidget(self.lbl_mission)
-        hint = QLabel("Press Play, then in the terminal:\n"
-                      "  SETMISSION <name>\n"
-                      "  SETMISSION <name> to <POINT>   (aim it at any point\n"
-                      "                                  this scene defines)\n"
-                      "  blue launch\n"
-                      "Drag a vehicle on the map to move it before you Play.")
+        issue = QPushButton("Issue mission + launch blue")
+        issue.setToolTip(
+            "Sends the mission above to the running fleet and arms it - the "
+            "same two lines you would type:\n"
+            "    SETMISSION <name> to <POINT>\n"
+            "    blue launch\n"
+            "It goes down the same command channel, so it is gated by command "
+            "authority exactly as a typed order is: a vehicle its commander "
+            "cannot reach is skipped, and the skip is printed. That refusal is "
+            "a RESULT, not an error.")
+        issue.clicked.connect(self.issue_sandbox_mission)
+        sblay.addWidget(issue)
+
+        # ---- OBJECTIVES: the sandbox's own tasking, per agent --------------
+        # A mission file is one order for the whole fleet. This is the other
+        # half - retasking one vehicle, or a few, mid-run - and it is where a
+        # sandbox earns its name: a scout pushed ahead of a wedge, one car
+        # left behind as a deliberate relay, a pursuer chasing whoever is
+        # furthest forward. All of it was typeable and none of it was
+        # discoverable, so the verbs are listed with what they do and their
+        # arguments are pre-filled from THIS scene's points, which means the
+        # suggestion is always one that will validate.
+        sblay.addWidget(QLabel("Objective (sandbox tasking)"))
+        self.obj_combo = QComboBox()
+        for verb, lab, tip in self.OBJECTIVE_MENU:
+            self.obj_combo.addItem(lab, verb)
+            self.obj_combo.setItemData(self.obj_combo.count() - 1, tip,
+                                       Qt.ToolTipRole)
+        self.obj_combo.activated.connect(lambda _i: self._fill_objective_args())
+        sblay.addWidget(self.obj_combo)
+        self.obj_args = QLineEdit()
+        self.obj_args.setToolTip(
+            "Arguments for the verb. Named points come from this scene, so "
+            "the same objective runs on any scene that names them; a literal "
+            "(x,y,z) welds it to these coordinates.")
+        sblay.addWidget(self.obj_args)
+        orow = QHBoxLayout()
+        assign = QPushButton("Assign to selection")
+        assign.setToolTip(
+            "Sends this objective to every vehicle currently selected on the "
+            "map - sweep a box round them first. With nothing selected it "
+            "goes to the whole blue fleet.\n"
+            "Gated by command authority like any other order.")
+        assign.clicked.connect(self.assign_objective)
+        orow.addWidget(assign)
+        orow.addStretch(1)
+        sblay.addLayout(orow)
+
+        hint = QLabel(
+            "Drag a vehicle to move it. Sweep a box to select several and "
+            "drag any one of them to move the formation as one. Drag a named "
+            "point to move the objective itself. Middle-drag pans.")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         sblay.addWidget(hint)
@@ -3705,30 +4142,6 @@ class Console(QMainWindow):
         elay = QVBoxLayout(self.exp_box)
         elay.setContentsMargins(0, 6, 0, 0)
         elay.setSpacing(4)
-        elay.addWidget(QLabel("Mission"))
-        self.exp_mission = QComboBox()
-        self.exp_mission.setToolTip(
-            "Issued to every vehicle when each run starts. There is nobody "
-            "to type at a headless run, so it is chosen here.")
-        elay.addWidget(self.exp_mission)
-
-        # GOAL. A mission names a point; a scene defines the points. Pinning
-        # the goal to FAR in the mission file welded every experiment to the
-        # corridor - the only scene that has a point by that name - so the
-        # goal is chosen here, from the points the CHOSEN SCENE actually
-        # declares, and the sweep re-points the mission at it.
-        elay.addWidget(QLabel("Goal (from this scene's points)"))
-        self.exp_goal = QComboBox()
-        self.exp_goal.activated.connect(
-            lambda _i: setattr(self, "_goal_touched", True))
-        self.exp_goal.setToolTip(
-            "Where 'advance' is advancing TO. Penetration is measured along "
-            "the line from where the fleet starts to this point, so it means "
-            "the same thing on any scene, not just an east-west corridor.\n"
-            "(none) leaves the mission's own destination alone - use it for "
-            "'advance until a wall or until you lose command'.")
-        elay.addWidget(self.exp_goal)
-
         elay.addWidget(QLabel("Jammer advantage P_j/P_t (dB)"))
         self.exp_power_axis = AxisRange(
             0.0, 30.0, 7, unit="dB", decimals=1, lo_min=-60.0, hi_max=120.0,
@@ -3781,6 +4194,12 @@ class Console(QMainWindow):
         self.lbl_runs = QLabel("")
         self.lbl_runs.setObjectName("hint")
         self.lbl_runs.setWordWrap(True)
+        # RESERVED HEIGHT. A word-wrapped QLabel reports the height for ONE
+        # line until it has been laid out at its final width, so in a narrow
+        # column the run count came out as half a line of clipped text. Three
+        # lines is what the longest form of this sentence needs.
+        self.lbl_runs.setMinimumHeight(
+            3 * self.lbl_runs.fontMetrics().height() + 4)
         elay.addWidget(self.lbl_runs)
         expb = QPushButton("Run the experiment...")
         expb.setToolTip("Sweep, then double-click any result to watch that "
@@ -3792,7 +4211,12 @@ class Console(QMainWindow):
 
         # The scene tree (arena + background conditions) lives under the
         # pickers - it describes what Setup composed.
-        slay.addWidget(self.tab_env, 1)
+        slay.addStretch(1)
+        setup_split.addWidget(setup_scroll)
+        setup_split.addWidget(self.tab_env)
+        setup_split.setStretchFactor(0, 3)
+        setup_split.setStretchFactor(1, 2)
+        souter.addWidget(setup_split)
         self._refresh_setup_lists()
 
         # CONTESTED - everything degrading the spectrum, in one tree:
@@ -4027,6 +4451,12 @@ class Console(QMainWindow):
         keep.update({"x": round(float(pose.get("x", 0.0)), 3),
                      "y": round(float(pose.get("y", 0.0)), 3),
                      "z": round(float(pose.get("z", 0.0)), 3)})
+        n = len(self.viewport.selected) + len(self.viewport.selected_points)
+        if n > 1:
+            self.statusBar().showMessage(
+                f"moving {n} together - {aid} at "
+                f"({keep['x']:.2f}, {keep['y']:.2f}, {keep['z']:.2f}) m")
+            return
         near = None
         for oid, o in self._spawns.items():
             if oid == aid:
@@ -4038,23 +4468,80 @@ class Console(QMainWindow):
             f"{aid}  ({keep['x']:.2f}, {keep['y']:.2f}, {keep['z']:.2f}) m"
             + (f"   nearest vehicle {near:.2f} m" if near is not None else ""))
 
-    def _agent_dropped(self, aid, _pose):
+    def _point_dragged(self, name, q):
+        """A scene point, moved by hand.
+
+        Held as an OVERRIDE rather than written back to scenes/: the scene is
+        the world as it is, and where you decide to send a fleet inside it is
+        a decision about this run. _compose_setup writes the override into the
+        composed doc, where the model's own one-level points merge puts it
+        over the scene's own value.
+        """
+        if not name:
+            return
+        self._points_override[name] = {
+            "x": round(float(q.get("x", 0.0)), 3),
+            "y": round(float(q.get("y", 0.0)), 3),
+            "z": round(float(q.get("z", 0.0)), 3)}
+        v = self._points_override[name]
+        self.statusBar().showMessage(
+            f"point {name}  ({v['x']:.2f}, {v['y']:.2f}, {v['z']:.2f}) m")
+
+    def _agent_dropped(self, aids, pnames=()):
         """Let go: recompose once, so the run, the trees and the map agree.
 
         Recomposing writes the composed YAML and reloads the world, which is
         far too expensive to do on every mouse move - hence a separate drop
-        hook rather than doing it in _agent_dragged.
+        hook rather than doing it in the move handlers.
         """
-        if not aid or aid not in self._spawns:
+        aids = [a for a in (aids or []) if a in self._spawns]
+        if not aids and not pnames:
             return
-        # The fleet no longer stands in a named shape once you have moved one
-        # of its vehicles by hand, and saying otherwise on the experiment tab
-        # would be a lie about what is on the map.
-        for side, ids in (("blue", self._blue_ids), ("red", self._red_ids)):
-            if aid in (ids or set()):
+        # A NAMED SHAPE SURVIVES A TRANSLATION AND NOTHING ELSE. Every member
+        # of a group drag moves by the same vector, so if EVERY mobile vehicle
+        # on a side moved, its shape is untouched and calling it a wedge is
+        # still true. Move some of them and it is not a wedge any more, so
+        # the experiment tab must stop saying it is - claiming a shape the map
+        # does not show is exactly the kind of quiet wrongness that makes a
+        # result impossible to explain later.
+        moved = set(aids)
+        for side in ("blue", "red"):
+            mine = self._mobile_ids(side)
+            if not mine or not (moved & mine):
+                continue
+            if not mine <= moved:
                 self._formation[side] = AS_SPAWNED
         if self._setup_scene:
             self._compose_setup()
+
+    def _mobile_ids(self, side):
+        """The spawned agents on this side a formation governs.
+
+        Not the ground station: it is never in a formation, so whether it came
+        along on a drag says nothing about whether the shape survived.
+        """
+        ids = (self._red_ids if side == "red" else self._blue_ids) or set()
+        view = getattr(self, "resolved", None) or self.doc or {}
+        bodies = {a.get("id"): a for a in (view.get("agents") or [])}
+        out = set()
+        for aid in ids:
+            b = bodies.get(aid) or {}
+            if b.get("ghost") or b.get("jammer") \
+                    or b.get("platform") == "ground_station":
+                continue
+            out.add(aid)
+        return out
+
+    def _selection_changed(self, aids, pnames):
+        n = len(aids) + len(pnames)
+        if n == 0:
+            self.statusBar().showMessage(
+                "nothing selected - sweep a box round the fleet to move it "
+                "as one, or drag a single vehicle")
+        else:
+            self.statusBar().showMessage(
+                f"{n} selected ({', '.join(sorted(aids) + sorted(pnames))})"
+                f" - drag any one of them to move them all together")
 
     def _update_placing(self):
         """Dragging is allowed only where it means something: on the Setup
@@ -4111,7 +4598,10 @@ class Console(QMainWindow):
         if index <= 0:
             return
         self._setup_scene = self.scene_combo.currentText()
-        self._formation, self._spacing = {}, {}
+        self._formation, self._spacing, self._spawn_point = {}, {}, {}
+        # Points are coordinates in the OLD world. Carrying them would put
+        # FAR somewhere the new scene never put it.
+        self._points_override = {}
         # A new scene invalidates any placed fleet - spawns are coordinates
         # in the OLD world. Ask again rather than silently carrying them.
         self._setup_fleet = None
@@ -4121,10 +4611,11 @@ class Console(QMainWindow):
         self.fleet_combo.setCurrentIndex(0)
         self.red_combo.setEnabled(True)
         self.red_combo.setCurrentIndex(0)
-        # A new scene brings new named points, so the goal picker is rebuilt
-        # before anything can be swept against a point this world lacks.
-        self._refresh_goals()
+        # COMPOSE FIRST, then list the points: the composition is what
+        # actually resolves the scene (and any points added by hand on top of
+        # it), so listing before it would offer the previous world's points.
         self._compose_setup()
+        self._refresh_goals()
         self.statusBar().showMessage(
             f"Scene {self._setup_scene} - now choose a blue fleet")
 
@@ -4183,6 +4674,7 @@ class Console(QMainWindow):
         # what was flown.
         self._formation[side] = dlg.formation()
         self._spacing[side] = dlg.spacing()
+        self._spawn_point[side] = dlg.spawn_point()
         if side == "red":
             self._setup_red = fleet
             self._red_ids = set(new_spawns)
@@ -4341,6 +4833,7 @@ class Console(QMainWindow):
                 self._doctrines.pop(aid, None)
         self._formation.pop(side, None)
         self._spacing.pop(side, None)
+        self._spawn_point.pop(side, None)
 
 
     def play_frames(self, frames, title=""):
@@ -4591,14 +5084,7 @@ class Console(QMainWindow):
                  else [f"SETMISSION {mission}", "LAUNCH blue"])
         if red:
             lines.append("LAUNCH red")
-        d = getattr(self, "_retask_dir", None) or (REPO_ROOT / "runs" / "retask")
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-            for i, ln in enumerate(lines):
-                (d / f"cmd_{time.time_ns()}_{i}.txt").write_text(
-                    ln + "\n", encoding="utf-8")
-        except OSError as exc:
-            self.say(f"could not issue the mission: {exc}")
+        self._send_lines(lines)
 
     def open_experiment(self):
         """The experiment window: run a sweep, read the table, watch a run."""
@@ -4621,14 +5107,15 @@ class Console(QMainWindow):
         """
         mode = self.mode_combo.currentIndex()      # 0 none, 1 sandbox, 2 exp
         self.compose_box.setVisible(mode > 0)
+        self.mission_box.setVisible(mode > 0)
         self.arch_box.setVisible(mode > 0)
         self.sandbox_box.setVisible(mode == 1)
         self.exp_box.setVisible(mode == 2)
         if mode == 0:
             return
         experiment = mode == 2
+        self._refresh_missions()
         if experiment:
-            self._refresh_missions()
             self._refresh_formation_axis()
         # `all` only exists in an experiment: you cannot watch three
         # authorities at once, and in a sweep it is the default because that
@@ -4647,6 +5134,156 @@ class Console(QMainWindow):
         self._on_arch_chosen()
         self._refresh_run_count()
 
+
+    # THE RECOMMENDED OBJECTIVES, with what each is FOR. A verb list is not
+    # much use on its own - `orbit 2.0` tells you nothing about why you would
+    # want it - so each carries the situation it was written for. These are
+    # the verbs _parse_objective_verb already understands; nothing here is a
+    # new capability, it is the existing grammar made findable.
+    OBJECTIVE_MENU = (
+        ("advance", "advance to a point  (formation preserved)",
+         "The fleet moves so its CENTRE lands on the point, every vehicle\n"
+         "holding its offset - a wedge stays a wedge. The penetration\n"
+         "objective. Args: a point name, or (x,y,z)."),
+        ("advance", "advance  (until a wall or until command is lost)",
+         "No destination: go forward until something stops you. Use it to\n"
+         "find where the fleet's command actually fails rather than\n"
+         "assuming a distance. Args: none."),
+        ("shuttle", "shuttle between two points  (back and forth, forever)",
+         "Drives between two points until retasked. The steady-state\n"
+         "workload: useful when you want the fleet busy while you attack\n"
+         "the spectrum. Args: two point names, or two (x,y,z)."),
+        ("patrol", "patrol a circuit  (loop the waypoints)",
+         "Loops a circuit of points. A wider version of shuttle, and the\n"
+         "one that takes vehicles in and out of a jammer's reach\n"
+         "repeatedly. Args: three or more point names."),
+        ("pursue", "pursue another agent  (follow at a standoff)",
+         "Follows a named agent. Interesting under jamming because the\n"
+         "pursuer steers from its BELIEF about where the target is, so a\n"
+         "stale position report is a visible tracking error. Args: an\n"
+         "agent id."),
+        ("orbit", "orbit the origin  (circle at a radius)",
+         "Circles the origin at a radius. A constant-motion objective with\n"
+         "no destination to argue about. Args: a radius in metres."),
+        ("wall_follow", "wall follow  (track a wall - needs a lidar)",
+         "Tracks a wall with the lidar. The one objective that does not\n"
+         "need a position fix at all, which is exactly what makes it worth\n"
+         "comparing against under GNSS denial. Args: left or right."),
+        ("stop", "hold position", "Freeze here. Args: none."),
+    )
+
+    def _fill_objective_args(self):
+        """Pre-fill arguments from THIS scene's points.
+
+        A suggested objective that does not validate is worse than no
+        suggestion: it teaches you the feature is broken. Every default here
+        names points the loaded scene actually declares, so pressing Assign
+        immediately after choosing a verb always works.
+        """
+        verb = self.obj_combo.currentData()
+        label = self.obj_combo.currentText()
+        pts = sorted((self._view() or {}).get("points") or {})
+        goal = self._goal_name()
+        mob = sorted(a for a in (self._blue_ids or set()) if a != "gcs")
+        if verb == "advance":
+            self.obj_args.setText("" if "until a wall" in label
+                                  else (goal or (pts[-1] if pts else "")))
+        elif verb == "shuttle":
+            self.obj_args.setText(" ".join(pts[:2]) if len(pts) >= 2 else "")
+        elif verb == "patrol":
+            self.obj_args.setText(" ".join(pts[:3]) if len(pts) >= 3 else "")
+        elif verb == "pursue":
+            self.obj_args.setText(mob[0] if mob else "")
+        elif verb == "orbit":
+            self.obj_args.setText("2.0")
+        elif verb == "wall_follow":
+            self.obj_args.setText("right")
+        else:
+            self.obj_args.setText("")
+
+    def assign_objective(self):
+        """Send the chosen objective to the selected vehicles.
+
+        Down the ordinary retask channel, in the ordinary grammar, so it is
+        gated by command authority exactly as a typed order is. Selection
+        comes from the map - sweep a box round two cars and only those two are
+        retasked, which is how a scout gets pushed ahead of a formation
+        without touching the rest of it.
+        """
+        verb = self.obj_combo.currentData()
+        args = self.obj_args.text().strip()
+        if verb == "shuttle" and args and not args.lower().startswith("between") \
+                and "(" not in args:
+            # 'shuttle between E F' reads better and is what COMMANDS.md
+            # documents; the parser takes either.
+            args = f"between {args}"
+        who = sorted(self.viewport.selected) or sorted(
+            a for a in (self._blue_ids or set()) if a != "gcs")
+        who = [a for a in who if a not in (self._red_ids or set())]
+        if not who:
+            self.say("Nothing to task. Select vehicles on the map, or compose "
+                     "a blue fleet first.")
+            return
+        lines = [f"{aid}: {verb}{(' ' + args) if args else ''}" for aid in who]
+        self._send_lines(lines)
+        self.say(f"{verb} -> {', '.join(who)}"
+                 + (f"  ({args})" if args else "")
+                 + "\n  Any vehicle whose commander cannot reach it will be "
+                   "skipped, and the skip printed. That is a result.")
+
+    def issue_sandbox_mission(self):
+        """SETMISSION (with the goal) then LAUNCH blue, from a button."""
+        name = self.exp_mission.currentText()
+        if not name:
+            self.say("Choose a mission first.")
+            return
+        goal = self._goal_name()
+        self._send_setup_orders(f"{name} to {goal}" if goal else name,
+                                red=False)
+        self._mission_name = name
+        self.lbl_mission.setText(
+            f"Mission: {name}" + (f" -> {goal}" if goal else ""))
+
+    def add_point(self):
+        """Invent a named point and put it on the map to be dragged.
+
+        A mission is written against points, and until now the only way to get
+        a new one was to edit a scene file - which is the exact thing this
+        project says it does not do. The point is created at the arena's
+        centre because that is always inside it, and then you drag it.
+        """
+        if not self._setup_scene:
+            self.say("Choose a scene first - a point has to be somewhere.")
+            return
+        name, ok = QInputDialog.getText(self, "Add point", "Name this point:")
+        name = (name or "").strip().upper().replace(" ", "_")
+        if not ok or not name:
+            return
+        if name in (self.viewport.points or {}):
+            self.say(f"'{name}' already exists - drag it instead.")
+            return
+        self._points_override[name] = {"x": 0.0, "y": 0.0, "z": 0.0}
+        self._compose_setup()
+        self._refresh_goals()
+        self.viewport.selected_points = {name}
+        self.viewport.update()
+        self.say(f"Added point {name} at the centre of the arena - drag it "
+                 f"where you want it, then pick it as the goal.")
+
+    def _on_goal_chosen(self, _i):
+        self._goal_touched = True
+        self._fill_objective_args()
+
+    def _send_lines(self, lines):
+        """Write command lines to the retask spool - one file per command."""
+        d = getattr(self, "_retask_dir", None) or (REPO_ROOT / "runs" / "retask")
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            for i, ln in enumerate(lines):
+                (d / f"cmd_{time.time_ns()}_{i}.txt").write_text(
+                    ln + "\n", encoding="utf-8")
+        except OSError as exc:
+            self.say(f"could not send that order: {exc}")
 
     def _refresh_missions(self):
         cur = self.exp_mission.currentText()
@@ -4671,8 +5308,11 @@ class Console(QMainWindow):
             return
         import yaml as _yaml
         cur = self.exp_goal.currentText()
-        pts = {}
-        if self._setup_scene:
+        # THE RESOLVED COMPOSITION, not the scene file - so a point added or
+        # dragged in this session is offered as a goal like any other. The
+        # file is the fallback for before anything has been composed.
+        pts = dict((self._view() or {}).get("points") or {})
+        if not pts and self._setup_scene:
             try:
                 doc = _yaml.safe_load(
                     (REPO_ROOT / "scenes" / f"{self._setup_scene}.yaml")
@@ -4703,6 +5343,8 @@ class Console(QMainWindow):
             i = max(self.exp_goal.findData(far), 0)
         self.exp_goal.setCurrentIndex(max(i, 0))
         self.exp_goal.blockSignals(False)
+        if hasattr(self, "obj_combo"):
+            self._fill_objective_args()
 
     def _goal_name(self):
         """The goal point's NAME, or None for '(none)'."""
@@ -4915,6 +5557,14 @@ class Console(QMainWindow):
             nets[k] = {**(nets.get(k) or {}), **v}
         if nets:
             doc["networks"] = nets
+        if self._points_override:
+            # POINTS MOVED BY HAND. A scene declares where FAR is; where you
+            # decide to send a fleet is a decision about this run, so it is an
+            # override on the composition and not an edit to scenes/. The
+            # model merges `points` one level deep, so naming one leaves the
+            # rest of the scene's points alone.
+            doc["points"] = {k: dict(v)
+                             for k, v in self._points_override.items()}
         if self._spawns:
             # DOCTRINE rides with the spawn, because both are per-agent
             # decisions taken in the same dialog. _overlay merges agent
@@ -4935,6 +5585,9 @@ class Console(QMainWindow):
         # spawns, same per-agent doctrine. One source of truth, so an
         # experiment can never quietly differ from what you set up.
         self._composed = copy.deepcopy(doc)
+        # Placing is only meaningful once there is something on the map to
+        # place; a recompose is where that becomes true.
+        self._update_placing()
         path = REPO_ROOT / "runs" / "current_setup.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         header = ("# Composed by the Console's Setup tab - scene + fleets + "
@@ -5201,6 +5854,9 @@ class Console(QMainWindow):
         if not view:
             return
         self.viewport.arena = view.get("arena")
+        # The scene's named points, so the DESTINATION of a mission is on the
+        # map beside the fleet rather than being a word in a dropdown.
+        self.viewport.points = dict(view.get("points") or {})
         self.viewport.agents = [
             {"id": a.get("id"), "colour": a.get("colour"),
              "dimensions": a.get("dimensions", {}), "pose": a.get("pose", {}),
@@ -5680,6 +6336,10 @@ class Console(QMainWindow):
         self.viewport.agents = agents
         self.viewport.links = f.get("links", [])
         self.viewport.arena = f.get("arena") or self.viewport.arena
+        # Points ride in the frame's arena during a live run, so the goal
+        # stays drawn while the fleet advances on it.
+        self.viewport.points = ((f.get("arena") or {}).get("points")
+                                or self.viewport.points)
         self.viewport.update()
         self.refresh_sensor_view()
         # EVERY PANEL, NOT JUST THE MAP. Scrubbing used to move the vehicles
@@ -6702,6 +7362,8 @@ class Console(QMainWindow):
             self.viewport.agents = agents
             self.viewport.links = frame.get("links", [])
             self.viewport.arena = frame.get("arena") or self.viewport.arena
+            self.viewport.points = ((frame.get("arena") or {}).get("points")
+                                    or self.viewport.points)
             self.viewport.update()
             self.refresh_sensor_view()
         if self.stack.currentIndex() == 1:

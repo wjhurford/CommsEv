@@ -1805,6 +1805,80 @@ def test_a_hand_drawn_formation_saves_scales_and_sweeps():
               sum(1 for g in got if g[0] == sweep.AS_SPAWNED) == 1, str(got))
 
 
+def test_the_map_cannot_place_what_the_model_will_refuse():
+    """Dragging a vehicle or a goal point is bounded by the SAME rule that
+    validates an objective.
+
+    Two rules would have differed by the wall margin, and the failure would
+    have been silent in the worst way: you drag the goal to the end of the
+    corridor, the mission is refused for being outside the arena, and the
+    fleet sits still while the reason is three panels away from the thing you
+    just did.
+    """
+    print("\nA DRAG CANNOT BUILD A RUN THE MODEL REFUSES")
+    arena, agents, links = st.load_scenario({
+        "scene": "corridor_200m",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    hx = arena["extent"]["x"] / 2
+    x, y, z = st.clamp_to_arena(10_000.0, 10_000.0, -5.0, arena)
+    check("a drag past the wall is clamped, not accepted",
+          x < hx and abs(y) < arena["extent"]["y"] / 2 and z >= 0.0,
+          f"{x}, {y}, {z}")
+    ok, _hx, _hy = st._in_bounds(x, y, arena)
+    check("...and lands somewhere an objective will actually validate", ok)
+    good, err = st.validate_objective(
+        {"type": "advance", "to": {"x": x, "y": y, "z": z}},
+        arena.get("points") or {}, arena)
+    check("an advance to the furthest draggable point is accepted",
+          good, str(err))
+    inside = st.clamp_to_arena(1.0, 2.0, 0.5, arena)
+    check("a position already inside is left exactly alone",
+          inside == (1.0, 2.0, 0.5), str(inside))
+
+
+def test_a_moved_point_overrides_the_scene_without_editing_it():
+    """A scene says where FAR is; where you decide to send a fleet inside it
+    is a decision about THIS run.
+
+    So a point dragged on the map is an override on the composition, merged
+    over the scene's own value - which is the same mechanism the architecture
+    override uses, and it has to leave the scene's OTHER points alone. A
+    shallow merge here would delete every point you did not drag, and the
+    missions that named them would start failing for no visible reason.
+    """
+    print("\nA DRAGGED POINT OVERRIDES ONE POINT, NOT ALL OF THEM")
+    base = {"scene": "corridor_200m",
+            "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]}
+    arena0, _a, _l = st.load_scenario(dict(base))
+    before = dict(arena0.get("points") or {})
+    check("the corridor starts with its own points",
+          {"HOME", "FAR"} <= set(before), str(sorted(before)))
+
+    moved = dict(base, points={"FAR": {"x": 40.0, "y": 6.0, "z": 0.0}})
+    arena1, _a, _l = st.load_scenario(moved)
+    after = arena1.get("points") or {}
+    check("the dragged point takes its new position",
+          (after["FAR"]["x"], after["FAR"]["y"]) == (40.0, 6.0),
+          str(after.get("FAR")))
+    check("every other point is untouched",
+          all(after[k] == before[k] for k in before if k != "FAR"),
+          str(sorted(set(before) - set(after))))
+
+    # A point INVENTED in the Console, which no scene file has ever heard of.
+    added = dict(base, points={"RALLY": {"x": -20.0, "y": 0.0, "z": 0.0}})
+    arena2, _a, _l = st.load_scenario(added)
+    pts2 = arena2.get("points") or {}
+    check("a point added by hand joins the scene's own",
+          "RALLY" in pts2 and "FAR" in pts2, str(sorted(pts2)))
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "advance.yaml"),
+        {a["id"]: a for a in _a}, pts2, arena2, goal="RALLY")
+    check("...and can immediately be used as a goal",
+          len(changed) >= 3 and all(mm.get("to") == "RALLY"
+                                    for _i, mm in changed),
+          f"{len(changed)} tasked: {msgs[:1]}")
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -1836,7 +1910,9 @@ if __name__ == "__main__":
                test_penetration_is_measured_along_the_axis_of_advance,
                test_formation_and_spacing_are_swept_axes_that_reach_the_model,
                test_a_swept_axis_is_min_max_steps_not_a_row_of_tickboxes,
-               test_a_hand_drawn_formation_saves_scales_and_sweeps):
+               test_a_hand_drawn_formation_saves_scales_and_sweeps,
+               test_the_map_cannot_place_what_the_model_will_refuse,
+               test_a_moved_point_overrides_the_scene_without_editing_it):
         try:
             fn()
         except Exception:
