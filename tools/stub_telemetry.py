@@ -20,6 +20,7 @@ Console never notices the difference.
 
 import argparse
 import json
+import collections
 import math
 import os
 import re
@@ -770,6 +771,298 @@ def _in_bounds(x, y, arena):
     hx = arena["extent"]["x"] / 2 - WALL_MARGIN_M
     hy = arena["extent"]["y"] / 2 - WALL_MARGIN_M
     return (-hx <= x <= hx and -hy <= y <= hy), hx, hy
+
+
+# ===========================================================================
+# MISSION PLANS - a mission has an END, an objective does not
+# ===========================================================================
+# THE DISTINCTION THIS SECTION EXISTS TO MAKE:
+#
+#   A MISSION is a task with a terminating condition. "Shuttle between A and B
+#   four times." It can be PASSED or FAILED, and a run can be scored on what
+#   fraction of the fleet passed.
+#
+#   An OBJECTIVE is an open-ended way of doing part of one. "Go to A." It has
+#   no notion of enough.
+#
+# Everything in this framework used to be an objective. A shuttling vehicle
+# shuttles forever, so there was no outcome to measure and every metric was a
+# rate or a mean - never "did it work". The one exception, `advance`, was
+# bolted on for the penetration experiment.
+#
+# THE MECHANISM, AND WHY IT MATTERS MORE THAN THE METRIC. A plan is held by the
+# COORDINATOR, not by the vehicle. The vehicle is only ever told one leg at a
+# time - "go to A" - and when it reports arriving, the coordinator sends the
+# next leg. That reassignment is a COMMAND, and a command has to travel:
+#
+#   * a vehicle whose coordinator cannot reach it never receives its next leg,
+#     so it sits on the waypoint it reached and the mission stalls. Not because
+#     anything scripted it to - because the order did not arrive.
+#   * every reassignment is a transmission on the network's band, so it can be
+#     INTERCEPTED. That is what makes the red cell's LISTEN possible, and it is
+#     the groundwork for deception: to spoof an order you must first be able to
+#     hear one.
+#
+# A fleet that plans locally would show neither. This is the whole reason the
+# plan lives at the coordinator.
+# ===========================================================================
+
+# Every reassignment ever transmitted this run, newest last. Bounded, because
+# a long run at 10 Hz would otherwise grow without limit; the Console reads
+# what arrives in each frame rather than this, so the buffer is for inspection
+# and for the replay path.
+TRANSMISSIONS = collections.deque(maxlen=2000)
+
+
+def arrival_tolerance_m(agent):
+    """How close counts as arrived, for THIS vehicle.
+
+    Its own length. A car whose nose is on the point has got there, and a
+    bigger vehicle has a bigger nose - so this is a property of the hardware
+    rather than a tolerance somebody picked. It was a hardcoded 1.0 in the
+    sweep, which quietly asserted that every vehicle in every fleet is the
+    same size.
+    """
+    d = (agent or {}).get("dimensions") or {}
+    return max(_num(d.get("length"), 0.5), 0.25)
+
+
+def plan_from_mission(doc):
+    """The plan a mission file declares, normalised, or None.
+
+        plan: {waypoints: [A, B], laps: 4}
+
+    An `advance` objective with a destination is ALSO a plan - one waypoint,
+    one lap - so that every terminating mission has an end that can be scored
+    the same way, rather than penetration being a special case with its own
+    private notion of arrival.
+    """
+    plan = doc.get("plan")
+    if isinstance(plan, dict) and plan.get("waypoints"):
+        return {"waypoints": [str(w) for w in plan["waypoints"]],
+                "laps": max(int(plan.get("laps", 1)), 1),
+                "who": str(plan.get("who", "all"))}
+    return None
+
+
+def install_plan(agent, waypoints, laps=1):
+    """Give this agent a plan and put it on its first leg.
+
+    The objective it is handed is an ordinary `advance` - no new verb. That
+    matters: an advance already preserves formation offsets, is validated at
+    assignment, and is what penetration is measured against, so a planned
+    mission inherits all of it instead of running down a parallel path that
+    can drift away from the one the experiments use.
+    """
+    wps = [str(w) for w in waypoints if str(w)]
+    if not wps:
+        return False
+    agent["_plan"] = {"waypoints": wps, "laps": max(int(laps), 1),
+                      "leg": 0, "laps_done": 0, "state": "running",
+                      "drifted": False, "awaiting_orders": False,
+                      "reassignments": 0}
+    agent["mission"] = {"type": "advance", "to": wps[0]}
+    agent["last_rejection"] = None
+    return True
+
+
+def plan_state(agent):
+    """running / complete / failed / none - one word for the outcome."""
+    pl = agent.get("_plan")
+    if not pl:
+        return "none"
+    return pl.get("state", "running")
+
+
+def _plan_target(agent, arena, knowledge, t):
+    """Where this agent's current leg actually wants it, offsets included."""
+    try:
+        return mission_target(agent, t, knowledge or {}, arena)
+    except Exception:                                   # noqa: BLE001
+        st_ = agent.get("start") or {}
+        return (_num(st_.get("x")), _num(st_.get("y")))
+
+
+def advance_plans(agents, arena, links, poses, t, link_states=None):
+    """THE COORDINATOR'S SUPERVISORY LOOP. Run once per tick, before movement.
+
+    For every agent carrying a plan: has it reported reaching its leg, and if
+    so can its coordinator reach it to send the next one?
+
+    Both halves are gated on the SAME reachability the rest of the model uses,
+    which is the point. A vehicle out of contact:
+      * cannot be heard reporting its arrival, and
+      * cannot be told where to go next,
+    so it stops on the waypoint and the mission stalls. Nothing scripts that;
+    it falls out of the link budget.
+
+    Returns the transmissions emitted this tick, for interception.
+    """
+    nets = (arena or {}).get("networks") or {}
+    # THE FLEET, VISIBLE TO mission_target. An `advance` works out each
+    # vehicle's offset from the formation's centre by looking at its peers,
+    # and that list is normally published by step(). advance_plans runs BEFORE
+    # step, so on the first tick the list was empty, every vehicle thought it
+    # was alone, and every offset came out zero - the whole fleet was sent to
+    # the same coordinate and piled into itself. Publish it here too.
+    global _ALL_AGENTS
+    _ALL_AGENTS = agents
+    out = []
+    for a in agents:
+        pl = a.get("_plan")
+        if not pl or pl.get("state") != "running":
+            continue
+        aid = a["id"]
+        auth = command_authority(a, arena, links, poses, nets,
+                                 link_states=link_states)
+        reachable = bool(auth.get("reachable", True))
+        tol = arrival_tolerance_m(a)
+        tx, ty = _plan_target(a, arena, a.get("knowledge") or poses, t)
+
+        # ARRIVAL IS JUDGED ON THE AGENT'S OWN BELIEF, because that is what it
+        # would report. It has no other position to send.
+        b = a.get("belief") or poses.get(aid) or {}
+        d_believed = math.hypot(_num(b.get("x")) - tx, _num(b.get("y")) - ty)
+        if d_believed > tol:
+            pl["awaiting_orders"] = False
+            continue
+
+        # IT BELIEVES IT HAS ARRIVED. Is that true?
+        #
+        # THE DRIFT FAILURE, and note there is no invented threshold here: the
+        # test is whether the arrival it is REPORTING is one it has actually
+        # made, judged with the same tolerance the vehicle itself used. A
+        # fleet under GNSS denial reports mission success while sitting
+        # somewhere else entirely, and that is a failure however confident the
+        # telemetry sounds.
+        truth = poses.get(aid) or {}
+        d_true = math.hypot(_num(truth.get("x")) - tx,
+                            _num(truth.get("y")) - ty)
+        if d_true > tol:
+            pl["drifted"] = True
+            pl["state"] = "failed"
+            pl["failed_reason"] = (
+                f"reported reaching {pl['waypoints'][pl['leg']]} while "
+                f"{d_true:.1f} m away (tolerance {tol:.1f} m)")
+            continue
+
+        if not reachable:
+            # Arrived, and nobody can be told. The vehicle holds the waypoint
+            # because no next leg exists for it - the mission is stalled, not
+            # finished, and the difference is the whole experiment.
+            pl["awaiting_orders"] = True
+            continue
+
+        pl["awaiting_orders"] = False
+        pl["leg"] += 1
+        if pl["leg"] >= len(pl["waypoints"]):
+            pl["leg"] = 0
+            pl["laps_done"] += 1
+        if pl["laps_done"] >= pl["laps"]:
+            pl["state"] = "complete"
+            a["mission"] = {"type": "static"}
+            continue
+
+        nxt = pl["waypoints"][pl["leg"]]
+        # CARRY THE FORMATION OFFSET ACROSS THE LEG. A vehicle's place in the
+        # formation belongs to the fleet's shape, not to one destination -
+        # recomputing it per leg would let whoever was reassigned first
+        # rediscover an offset of zero (it is briefly the only vehicle headed
+        # that way) and drive into the middle of everyone else. Keeping it
+        # means a wedge stays a wedge all the way round the circuit.
+        keep_off = (a.get("mission") or {}).get("_offset")
+        a["mission"] = {"type": "advance", "to": nxt}
+        if keep_off is not None:
+            a["mission"]["_offset"] = keep_off
+        a["phase_t0"] = t
+        pl["reassignments"] += 1
+        net = nets.get(a.get("network")) or {}
+        pt = (arena.get("points") or {}).get(nxt) or {}
+        out.append({
+            "t": round(t, 3),
+            "network": a.get("network"),
+            "band_mhz": _qty(net.get("band"), 2400.0),
+            "from": auth.get("decider") or net.get("coordinator") or "?",
+            "to": aid,
+            "kind": "reassign",
+            # The words a listener would recover. Deliberately readable: the
+            # point of intercepting an order is to know what it said.
+            "text": (f"{aid} go {nxt} "
+                     f"({_num(pt.get('x')):.1f},{_num(pt.get('y')):.1f},"
+                     f"{_num(pt.get('z')):.1f})"),
+        })
+    TRANSMISSIONS.extend(out)
+    return out
+
+
+def intercept(txs, agents, poses, arena, jammers=None):
+    """Who, on another side, could actually HEAR each transmission.
+
+    Ordinary RF: the order goes out from the coordinator on the network's band
+    at the coordinator's own transmit power, and a listener hears it if the
+    link would stand up at its position. Same rf_link, same path loss, same
+    interference - a jammer sitting on the band degrades interception exactly
+    as it degrades the command itself, which is the honest consequence of
+    attacking a channel you also want to listen to.
+
+    Annotates each transmission with `heard_by` and returns them.
+    """
+    rf = scene_rf(arena)
+    by = {a["id"]: a for a in agents}
+    for tx in txs:
+        src_pose = poses.get(tx.get("from"))
+        src = by.get(tx.get("from"))
+        heard = []
+        if src_pose is not None:
+            band = _num(tx.get("band_mhz"), 2400.0)
+            for a in agents:
+                if a.get("network") == tx.get("network"):
+                    continue                       # own side, not an intercept
+                lp = poses.get(a["id"])
+                if lp is None:
+                    continue
+                interf = (jammer_rx_mw(lp, jammers or [], poses, rf["plexp"],
+                                       band, exclude=(a["id"],))
+                          if jammers else 0.0)
+                link = rf_link(src_pose, lp,
+                               tx_dbm=radio_tx_dbm(src) if src else DEFAULT_TX_DBM,
+                               freq_mhz=band, plexp=rf["plexp"],
+                               noise_dbm=rf["noise_dbm"],
+                               interference_mw=interf)
+                if link["state"] != "down":
+                    heard.append({"id": a["id"], "network": a.get("network"),
+                                  "sinr_db": link["sinr_db"],
+                                  "pdr": link["pdr"]})
+        tx["heard_by"] = heard
+    return txs
+
+
+def mission_score(agents):
+    """The run's outcome: what fraction of the tasked fleet passed.
+
+    A mission is PASSED by a vehicle that completed every lap it was given,
+    and FAILED by one that did not - including one still running when the run
+    ended, and one that reported an arrival it had not made. Reporting the
+    percentage rather than a boolean is what makes a partial result legible:
+    two of three vehicles crossing is a different outcome from none, and both
+    are different from all.
+    """
+    tasked = [a for a in agents if a.get("_plan")]
+    if not tasked:
+        return {"tasked": 0, "complete": 0, "failed": 0, "running": 0,
+                "drifted": 0, "awaiting_orders": 0, "pass_frac": None}
+    st_ = [plan_state(a) for a in tasked]
+    return {
+        "tasked": len(tasked),
+        "complete": st_.count("complete"),
+        "failed": st_.count("failed"),
+        "running": st_.count("running"),
+        "drifted": sum(1 for a in tasked if (a["_plan"] or {}).get("drifted")),
+        "awaiting_orders": sum(
+            1 for a in tasked
+            if (a["_plan"] or {}).get("awaiting_orders")),
+        "pass_frac": round(st_.count("complete") / len(tasked), 4),
+    }
 
 
 def clamp_to_arena(x, y, z, arena):
@@ -2400,6 +2693,17 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     # Distribute position reports over the routes as they stand entering this
     # tick, THEN act. An agent acts on what it has been told, not on truth.
     update_knowledge(agents, poses, _pre, t)
+    # THE COORDINATOR SUPERVISES, THEN THE FLEET MOVES. Between the reports
+    # arriving and the vehicles acting is exactly where a commander sits: it
+    # reads what came in, decides whether a leg is done, and issues the next
+    # one - over the same links everything else uses, so an order that cannot
+    # get through simply does not. Placed after update_knowledge so the
+    # coordinator is working from what it was actually told, and before step()
+    # so a reassignment takes effect this tick rather than next.
+    _txs = advance_plans(agents, arena, links, poses, t,
+                         link_states=_pre_states)
+    if _txs:
+        intercept(_txs, agents, poses, arena, jammers=_jam0)
     contacts = step(agents, poses, t, dt, arena, unreachable=_unreachable,
                     position_lost=_position_lost, drift_rates=_drift_rates,
                     rng=rng)
@@ -2462,6 +2766,17 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # POSITION ESTIMATE vs truth. `believed` is where the agent thinks
             # it is; `position_error_m` is how wrong that is (0 with a fix,
             # growing under GNSS denial). `gnss_denied` flags the cause.
+            # THE MISSION, AS OPPOSED TO THE OBJECTIVE. `mission_state` is
+            # the outcome - running, complete, failed - and `mission_progress`
+            # is how far round the circuit it has got. An objective has
+            # neither, which is precisely why missions needed to exist.
+            "mission_state": plan_state(a),
+            "mission_progress": (
+                {k: (a.get("_plan") or {}).get(k)
+                 for k in ("leg", "laps_done", "laps", "waypoints",
+                           "awaiting_orders", "drifted", "failed_reason",
+                           "reassignments")}
+                if a.get("_plan") else None),
             "believed": dict(a.get("belief") or {}),
             "position_error_m": round(
                 math.hypot(_num((a.get("drift") or {}).get("x")),
@@ -2532,6 +2847,16 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
              "tx_dbm": a["jammer"]["tx_dbm"], "band_mhz": a["jammer"]["band_mhz"]}
             for a in agents_out if a.get("jammer") and a["jammer"]["on"]],
         "contacts": [{"agent": i, "with": w} for i, w in contacts],
+        # THE OUTCOME, LIVE. What fraction of the tasked fleet has passed its
+        # mission, how many failed, and how many are sitting on a waypoint
+        # waiting for an order that cannot reach them. That last number is the
+        # one to watch: it is a fleet that has not failed and cannot proceed.
+        "mission_score": mission_score(agents),
+        # REASSIGNMENTS TRANSMITTED THIS TICK, with who could hear them.
+        # An order is a transmission; a transmission can be intercepted. This
+        # is what the red cell's LISTEN reads, and the groundwork for
+        # deception - you cannot spoof an order you have never heard.
+        "transmissions": _txs,
     }
 
 
@@ -2707,7 +3032,21 @@ def apply_mission_file(path, agents_by_id, points, arena,
                     f"it defines {', '.join(sorted(points or {})) or 'none'}"], \
                None
 
+    # A PLAN, IF THE MISSION DECLARES ONE. The plan is the mission: waypoints
+    # and how many times round. The objective each vehicle is actually handed
+    # is generated from it, one leg at a time, by the coordinator - see
+    # advance_plans. A mission file that declares a plan does not need to write
+    # objectives at all.
+    plan = plan_from_mission(doc)
+    if plan and goal:
+        # The goal re-points a single-waypoint plan the same way it re-points
+        # an advance; a multi-leg circuit has no single destination to move.
+        if len(plan["waypoints"]) == 1:
+            plan["waypoints"] = [goal]
+
     raw = dict(doc.get("objectives") or {})
+    if plan and not raw:
+        raw = {plan["who"]: {"do": "advance", "to": plan["waypoints"][0]}}
     expanded, group_keys = {}, []
     for key, obj in raw.items():
         who = _members(key)
@@ -2753,6 +3092,20 @@ def apply_mission_file(path, agents_by_id, points, arena,
             agents_by_id[aid]["last_rejection"] = err
             continue
         agents_by_id[aid]["mission"] = block
+        # EVERY TERMINATING MISSION GETS AN END. A declared plan wins; failing
+        # that, an `advance` with a destination is itself a one-waypoint,
+        # one-lap plan. That is what makes penetration and a four-lap shuttle
+        # the same kind of thing - both pass or fail, both scored the same way
+        # - instead of penetration being a special case with its own private
+        # notion of arrival.
+        if plan and (plan["who"] == "all"
+                     or aid in (_members(plan["who"]) or [])):
+            install_plan(agents_by_id[aid], plan["waypoints"], plan["laps"])
+        elif block.get("type") == "advance" and block.get("to") not in (
+                None, "", "forward"):
+            install_plan(agents_by_id[aid], [block["to"]], 1)
+        else:
+            agents_by_id[aid].pop("_plan", None)
         agents_by_id[aid]["last_rejection"] = None
         changed.append((aid, block))
     if not changed:
@@ -2780,6 +3133,30 @@ def _resolve_scope(token, agents_by_id, networks):
     return None, None
 
 
+def _plan_targets(who, agents_by_id, networks):
+    """Which agents a SETPLAN `who` names: all, a network, or one id.
+
+    The same three-way scope SETMISSION's objective keys use, so a plan and a
+    mission file address a fleet the same way. A ground station is furniture
+    with a radio - it is the thing ISSUING the plan, never a thing carrying
+    one out.
+    """
+    def mobile(body):
+        return (not body.get("ghost")
+                and body.get("platform") != "ground_station"
+                and _is_taskable(body, networks))
+
+    key = str(who).lower()
+    if key == "all":
+        return [a for a, b in agents_by_id.items() if mobile(b)]
+    if key in {str(n).lower() for n in (networks or {})}:
+        return [a for a, b in agents_by_id.items()
+                if str(b.get("network", "")).lower() == key and mobile(b)]
+    if who in agents_by_id and mobile(agents_by_id[who]):
+        return [who]
+    return []
+
+
 def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
     """Apply any pending commands from the retask queue and return what
     changed.
@@ -2799,6 +3176,12 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
         <agent>: <verb> <args>      REOBJECTIVE, one agent (parse_retask)
         LAUNCH <network-or-agent>   arm - see "The state machine"
         HALT <network-or-agent>     un-arm, freezes at current pose
+        SETPLAN <who> <pt> [<pt>...] [laps <n>]
+                                    THE MISSION: a circuit and how many times
+                                    round it. The coordinator issues one leg
+                                    at a time as each is reached, so the
+                                    mission can be PASSED or FAILED and a run
+                                    scores what fraction of the fleet passed
         SETMISSION <name-or-path>   set the run's mission: apply the file's
                                     objectives, gated by command authority
                                     (an unreachable agent is not retasked),
@@ -2941,6 +3324,70 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                   file=sys.stderr)
             continue
 
+        if verb0 == "SETPLAN" and len(head) == 2:
+            # SETPLAN <who> <point> [<point> ...] [laps <n>]
+            #
+            # THE MISSION, TYPED. `who` is `all`, a network name, or an agent
+            # id; the points are the circuit; laps is how many times round it
+            # has to go before the mission is passed. One lap of one point is
+            # the penetration mission; four laps of two points is a shuttle
+            # with an end.
+            #
+            # This is the whole reason the command exists: a shuttle objective
+            # runs forever and can therefore never be passed or failed, so
+            # "did the mission work" had no answer. Now it does, and the
+            # answer is a percentage of the fleet.
+            toks = head[1].split()
+            laps = 1
+            if len(toks) >= 2 and toks[-2].upper() == "LAPS":
+                try:
+                    laps = max(int(toks[-1]), 1)
+                except ValueError:
+                    print("SETPLAN: laps must be a whole number",
+                          file=sys.stderr)
+                    continue
+                toks = toks[:-2]
+            if len(toks) < 2:
+                print("SETPLAN: expected 'SETPLAN <who> <point> [<point>...] "
+                      "[laps <n>]'", file=sys.stderr)
+                continue
+            who, wps = toks[0], toks[1:]
+            bad = [w for w in wps if w not in points]
+            if bad:
+                print(f"SETPLAN: no point{'s' if len(bad) > 1 else ''} "
+                      f"{', '.join(bad)} on this map; it defines "
+                      f"{', '.join(sorted(points)) or 'none'}",
+                      file=sys.stderr)
+                continue
+            targets = _plan_targets(who, agents_by_id, networks)
+            if not targets:
+                print(f"SETPLAN: '{who}' matches nothing taskable - use all, "
+                      f"a network name, or an agent id", file=sys.stderr)
+                continue
+            done = []
+            for aid in targets:
+                # GATED BY COMMAND AUTHORITY, like any other order. A plan is
+                # issued to a fleet, and a fleet you cannot reach is a fleet
+                # you cannot task - which is a result, not an error.
+                auth = command_authority(agents_by_id[aid], arena, links,
+                                         poses, networks)
+                if not auth.get("reachable", True):
+                    print(f"SETPLAN: {aid} unreachable (decider "
+                          f"{auth.get('decider')}) - not tasked",
+                          file=sys.stderr)
+                    continue
+                if install_plan(agents_by_id[aid], wps, laps):
+                    agents_by_id[aid]["phase_t0"] = t
+                    done.append((aid, agents_by_id[aid]["mission"]))
+            if done:
+                print(f"SETPLAN: {len(done)} agent"
+                      f"{'s' if len(done) != 1 else ''} on "
+                      f"{' -> '.join(wps)} x{laps}"
+                      f"  (first leg {wps[0]}; the coordinator sends the rest "
+                      f"as each is reached)", file=sys.stderr)
+            changed += done
+            continue
+
         if verb0 == "SETMISSION" and len(head) == 2:
             # SETMISSION <name>             the mission as written
             # SETMISSION <name> to <POINT>  the same mission, re-pointed at a
@@ -2991,6 +3438,16 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                 agents_by_id[aid]["last_rejection"] = err
                 continue
             agents_by_id[aid]["mission"] = block
+            # A single-agent `advance <point>` is a one-lap plan, so a
+            # retasked scout is scored the same way as the fleet it left.
+            # Every other verb is open-ended and clears any plan it had -
+            # `pursue` has no end, and pretending otherwise would put a
+            # permanently-running mission in the pass/fail column forever.
+            if block.get("type") == "advance" and block.get("to") not in (
+                    None, "", "forward"):
+                install_plan(agents_by_id[aid], [block["to"]], 1)
+            else:
+                agents_by_id[aid].pop("_plan", None)
             agents_by_id[aid]["last_rejection"] = None
             agents_by_id[aid]["phase_t0"] = t
             changed.append((aid, block))

@@ -277,8 +277,10 @@ That last one is the point of the whole exercise. Write it down when it happens.
 blue launch / halt        y       y       -
 red launch / halt         y       -       y
 <agent> launch / halt     y    own side  own side
-SETMISSION <name>         y       y       -
+SETPLAN <who> <pts> laps  y       y       -
+SETMISSION <name> [to P]  y       y       -
 REOBJECTIVE <agent> ...   y    own side  own side
 JAM <id> band .. power .. y       -       y
+LISTEN <MHz> | off        y       -       y
 shell commands            y       y       y
 ```

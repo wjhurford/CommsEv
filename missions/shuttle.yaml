@@ -1,0 +1,55 @@
+# =============================================================================
+# Deadband MISSION — shuttle
+# =============================================================================
+# A MISSION, NOT AN OBJECTIVE, AND THE DIFFERENCE IS THE POINT.
+#
+# `objectives:` describe an open-ended way of behaving. A shuttle objective
+# shuttles until you stop it, so "did it work?" has no answer and every metric
+# it produces is a rate or a mean.
+#
+# `plan:` is a task with an END. Go round this circuit this many times. It can
+# be PASSED or FAILED, and a run scores what FRACTION of the fleet passed —
+# which is what makes two of three getting through a different result from
+# none, rather than the same slightly-lower average.
+#
+# HOW IT IS FLOWN, and this is the part that matters more than the metric:
+# the plan is held by the COORDINATOR, not by the vehicle. Each vehicle is
+# only ever told ONE LEG — "go to HOME". When it reports arriving, the
+# coordinator sends the next one. So:
+#
+#   * a vehicle its coordinator cannot reach never receives its next leg. It
+#     arrives, and it sits there. The mission STALLS — it has not failed and
+#     it cannot proceed. Nothing scripts that; it falls out of the link budget.
+#
+#   * every reassignment is a transmission on the command band, so it can be
+#     INTERCEPTED. From the red cell:  LISTEN 2400
+#     You will hear "car1 go HOME (-95.0,0.0,0.0)" as it is sent. That is the
+#     groundwork for deception: you cannot spoof an order you have never heard.
+#
+# FAILURE HAS TWO SHAPES. Not finishing is one. The other is finishing a lie:
+# a vehicle under GNSS denial reports reaching a waypoint it is not actually
+# at, and a reported arrival that is not true is a FAILED mission however
+# confident the telemetry sounds. The test uses the vehicle's own arrival
+# tolerance — its length — so no threshold is invented anywhere.
+#
+#     SETMISSION shuttle
+#     blue launch
+#
+# or, without a file at all, from the blue cell or the Setup tab:
+#
+#     SETPLAN all HOME FAR laps 4
+# =============================================================================
+
+spec_version: 0.1
+name: shuttle
+kind: mission
+
+description: >
+  The fleet shuttles between HOME and FAR four times. Passed by a vehicle that
+  completes every lap; failed by one that does not, or one that reports an
+  arrival it did not make. Fits any fleet, any size, any shape.
+
+plan:
+  who: all
+  waypoints: [HOME, FAR]
+  laps: 4

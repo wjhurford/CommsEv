@@ -85,9 +85,10 @@ JAM_OFF = -999.0        # sentinel power meaning "the emitter is silent"
 # The fleet's own transmit power. rf_link()'s default, and the reference every
 # relative jammer power is measured against: jam_rel_db = P_j - P_t.
 FLEET_TX_DBM = 20.0
-# How close counts as arrived. One vehicle length - a car whose nose is at the
-# goal has got there.
-ARRIVE_TOL_M = 1.0
+# How close counts as arrived now comes from the VEHICLE - st.arrival_
+# tolerance_m(agent), its own length. The constant that used to live here
+# quietly asserted that every vehicle in every fleet is the same size, which
+# stops being harmless the moment a fleet mixes a rover with a quadcopter.
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +368,8 @@ def run_one(args):
             done = True
             for a in blue_out:
                 arrived = (goal_x is not None
-                           and along(a["id"]) >= goal_x - ARRIVE_TOL_M)
+                           and along(a["id"]) >= goal_x
+                           - st.arrival_tolerance_m(by[a["id"]]))
                 cut = not (a["authority"] or {}).get("reachable", True)
                 if not (arrived or cut):
                     done = False
@@ -386,15 +388,31 @@ def run_one(args):
 
     pen = {i: deepest[i] - x0[i] for i in blue_ids}
     reach = ([i for i in blue_ids
-              if goal_x is not None and deepest[i] >= goal_x - ARRIVE_TOL_M]
+              if goal_x is not None
+              and deepest[i] >= goal_x - st.arrival_tolerance_m(by[i])]
              if goal_x is not None else [])
     full = 0.0
     if goal_x is not None and blue_ids:
         full = max((goal_x - x0[i]) for i in blue_ids) or 1.0
 
+    score = st.mission_score(agents)
     row = {
         **cell,
         "runs_agents": len(blue_ids),
+        # THE OUTCOME, AS A PERCENTAGE OF THE FLEET. Penetration says how far
+        # they got; this says whether the job was done. Two of three getting
+        # through is a different result from none, and both are different from
+        # all - a mean distance hides that and a pass rate does not.
+        "mission_pass_frac": score["pass_frac"],
+        "mission_complete": score["complete"],
+        "mission_failed": score["failed"],
+        # STALLED, NOT FAILED: arrived at a waypoint and never told the next
+        # leg, because the order could not get through. The number to watch -
+        # a fleet that has not failed and cannot proceed.
+        "mission_awaiting_orders": score["awaiting_orders"],
+        # Reported an arrival it had not made. Under GNSS denial a fleet can
+        # report success from somewhere else entirely.
+        "mission_drifted": score["drifted"],
         # THE HEADLINE. How far the fleet advanced, in metres and as a
         # fraction of the corridor it was asked to cross. A complete success
         # is every vehicle at the goal: penetration_frac 1.0, arrived 3.
@@ -521,6 +539,9 @@ def main(argv=None):
     rows.sort(key=lambda r: r.get("cell", ""))
 
     fields = (names + ["seed", "cell", "runs_agents",
+                       "mission_pass_frac", "mission_complete",
+                       "mission_failed", "mission_awaiting_orders",
+                       "mission_drifted",
                        "penetration_m", "penetration_frac",
                        "penetration_max_m", "penetration_min_m",
                        "arrived", "complete_success", "ended_s",

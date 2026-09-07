@@ -2242,10 +2242,18 @@ class ShellPanel(QWidget):
             if self._cell_allows("REOBJECTIVE", scope=scope):
                 self._retask(head)
             return
+        if head and head[0].upper() == "SETPLAN":
+            if self._cell_allows("SETMISSION"):
+                self._retask(head)
+            return
         if head and head[0].upper() == "JAM":
             scope = head[1] if len(head) > 1 else None
             if self._cell_allows("JAM", scope=scope):
                 self._send_queue_line(cmd + "\n", cmd)
+            return
+        if head and head[0].upper() == "LISTEN":
+            if self._cell_allows("LISTEN"):
+                self._listen(head[1:])
             return
 
         full = (f"cd {self.cwd} 2>/dev/null; "
@@ -2267,6 +2275,53 @@ class ShellPanel(QWidget):
             self.out.appendPlainText(
                 "[cannot start wsl.exe - is WSL installed and on PATH?]")
 
+    def _listen(self, args):
+        """LISTEN <MHz> | LISTEN band <MHz> | LISTEN off | LISTEN
+
+        Tune this cell's receiver to a band and print every transmission on it
+        that one of your OWN agents could actually hear. Whether a given order
+        reaches you is ordinary RF - your listener's position, the
+        coordinator's transmit power, the path loss, and whatever you are
+        jamming with - so eavesdropping on a channel you are also attacking
+        gets harder the harder you attack it. That trade is the interesting
+        part, and it comes out of the link budget rather than a rule.
+
+        This is the first half of deception. You cannot spoof an order you
+        have never heard.
+        """
+        c = self.console
+        if c is None:
+            return
+        toks = [t for t in args if t]
+        if toks and toks[0].lower() == "band":
+            toks = toks[1:]
+        if not toks:
+            cur = getattr(c, "_listen_band", None)
+            self.out.appendPlainText(
+                f"# listening on {cur:g} MHz" if cur else
+                "# not listening. LISTEN <MHz>, e.g. LISTEN 2400 (the "
+                "command band) or LISTEN 1575.42 (GPS L1).")
+            return
+        if toks[0].lower() in ("off", "stop", "none"):
+            c._listen_band = None
+            c._listen_shell = None
+            self.out.appendPlainText("# receiver off")
+            return
+        try:
+            band = float(toks[0])
+        except ValueError:
+            self.out.appendPlainText(
+                "[LISTEN: expected a frequency in MHz, e.g. LISTEN 2400]")
+            return
+        c._listen_band = band
+        c._listen_shell = self
+        self.out.appendPlainText(
+            f"# receiver on {band:g} MHz. Anything your side can hear on this "
+            f"band prints here as it is transmitted.\n"
+            f"# Nothing will appear until blue actually sends an order - the "
+            f"coordinator only transmits when a vehicle reports reaching a "
+            f"waypoint and needs the next one.")
+
     def _cell_allows(self, verb, scope=None):
         """Is this cell permitted to issue this command? White may do
         anything. Blue/red may act only on their own side. A refusal prints
@@ -2285,6 +2340,18 @@ class ShellPanel(QWidget):
             if remit != "red":
                 self.out.appendPlainText(
                     "[blocked: JAM is a RED-cell action]")
+                return False
+            return True
+        if verb == "LISTEN":
+            # RECEIVING IS RED'S. Blue listening to its own command net is not
+            # an intercept, it is just blue reading its own traffic, and
+            # letting the blue cell do it here would blur the one distinction
+            # the three cells exist to keep: a cell sees what its OWN side
+            # sees. Blue already knows what it ordered.
+            if remit != "red":
+                self.out.appendPlainText(
+                    "[blocked: LISTEN is a RED-cell action - blue already "
+                    "knows what it ordered]")
                 return False
             return True
         # launch / halt / REOBJECTIVE: the scope must be on this cell's side.
@@ -3775,6 +3842,29 @@ class Console(QMainWindow):
         tool("\u2913", "Save the scenario file, keeping its comments",
              self.save_scenario)
 
+        # THE TWO OPERATORS, ONE BUTTON EACH. White stays below as the tab it
+        # has always been - it is the umpire's working terminal. Blue and red
+        # are two people looking at two different pictures, which is hard to
+        # arrange when only one of them can be on screen at a time.
+        row.addSpacing(20)
+        for _cell, _lab, _tip in (
+                ("blue", "BLUE", "Open the blue operator's terminal in its "
+                                 "own window.\n"
+                                 "SETPLAN, SETMISSION, REOBJECTIVE, "
+                                 "launch / halt."),
+                ("red", "RED", "Open the red operator's terminal in its own "
+                               "window.\n"
+                               "JAM to attack a band, LISTEN to hear what "
+                               "blue is ordering on one.")):
+            b = QPushButton(_lab)
+            b.setToolTip(_tip)
+            b.setFixedHeight(26)
+            b.setObjectName("tool")
+            b.setStyleSheet(
+                f"color:{self._CELL_COLOUR[_cell]}; font-weight:600;")
+            b.clicked.connect(lambda _c=False, k=_cell: self.open_cell(k))
+            row.addWidget(b)
+
         row.addSpacing(24)
         row.addWidget(QLabel("Source"))
         self.source_combo = QComboBox()
@@ -4113,8 +4203,36 @@ class Console(QMainWindow):
         self.obj_args.setToolTip(
             "Arguments for the verb. Named points come from this scene, so "
             "the same objective runs on any scene that names them; a literal "
-            "(x,y,z) welds it to these coordinates.")
+            "(x,y,z) welds it to these coordinates.\n"
+            "Drag the points on the map to move them.")
         sblay.addWidget(self.obj_args)
+
+        # LAPS - what turns an objective into a MISSION.
+        # A shuttle objective shuttles forever, so "did it work" has no
+        # answer. Saying how many times round makes it a task with an END,
+        # which can be passed or failed, and a run then scores what fraction
+        # of the fleet passed. The vehicles are still only ever told one leg
+        # at a time: the coordinator sends the next when they report arriving,
+        # over the network, where it can be blocked or overheard.
+        lrow = QHBoxLayout()
+        lrow.addWidget(QLabel("Laps"))
+        self.obj_laps = QSpinBox()
+        self.obj_laps.setRange(1, 999)
+        self.obj_laps.setValue(1)
+        self.obj_laps.setFixedWidth(72)
+        self.obj_laps.setToolTip(
+            "How many times round the circuit before the mission is PASSED.\n"
+            "This is what makes it a mission rather than an objective: an "
+            "objective has no notion of enough.\n"
+            "Only meaningful for verbs that visit points - advance, shuttle, "
+            "patrol.")
+        lrow.addWidget(self.obj_laps)
+        self.lbl_laps = QLabel("")
+        self.lbl_laps.setObjectName("hint")
+        self.lbl_laps.setWordWrap(True)
+        lrow.addWidget(self.lbl_laps, 1)
+        sblay.addLayout(lrow)
+
         orow = QHBoxLayout()
         assign = QPushButton("Assign to selection")
         assign.setToolTip(
@@ -4557,6 +4675,61 @@ class Console(QMainWindow):
         self.viewport.placing = bool(
             on_setup and self._spawns
             and not getattr(self, "_setup_locked", False))
+
+    # -- interception -------------------------------------------------------
+
+    def _print_intercepts(self, f):
+        """Print, into the listening cell, every order it could actually hear.
+
+        The RF decision is the model's - each transmission arrives already
+        carrying who could hear it, scored with the same rf_link as everything
+        else. All this does is choose which of them to show: the ones on the
+        band the red cell tuned to, heard by an agent on the listening cell's
+        own side.
+        """
+        band = getattr(self, "_listen_band", None)
+        shell = getattr(self, "_listen_shell", None)
+        if band is None or shell is None:
+            return
+        side = ShellPanel.CELL_SIDE.get(getattr(shell, "cell", "red"), "red")
+        for tx in (f.get("transmissions") or []):
+            if abs(_num(tx.get("band_mhz")) - band) > 0.5:
+                continue
+            mine = [h for h in (tx.get("heard_by") or [])
+                    if h.get("network") == side]
+            if not mine:
+                continue
+            best = max(mine, key=lambda h: _num(h.get("sinr_db")))
+            shell.out.appendPlainText(
+                f"[{_num(tx.get('t')):7.1f}s  {band:g} MHz  "
+                f"SINR {_num(best.get('sinr_db')):+5.1f} dB  "
+                f"via {best.get('id')}]  "
+                f"{tx.get('from')} -> {tx.get('to')}:  {tx.get('text')}")
+
+    def _show_mission_score(self, f):
+        """The mission outcome in the status bar, live.
+
+        Three numbers, and the middle one is the interesting one: passed,
+        AWAITING ORDERS, failed. A fleet that is awaiting orders has not
+        failed and cannot proceed - it arrived somewhere and the order telling
+        it where to go next never came.
+        """
+        sc = f.get("mission_score") or {}
+        if not sc.get("tasked"):
+            self._mission_line = ""
+            return
+        bits = [f"mission {sc.get('pass_frac', 0) or 0:.0%}"
+                f" ({sc.get('complete', 0)}/{sc.get('tasked', 0)})"]
+        if sc.get("awaiting_orders"):
+            bits.append(f"{sc['awaiting_orders']} AWAITING ORDERS")
+        if sc.get("failed"):
+            bits.append(f"{sc['failed']} failed"
+                        + (f" ({sc['drifted']} drifted)"
+                           if sc.get("drifted") else ""))
+        self._mission_line = "   ".join(bits)
+        if hasattr(self, "lbl_mission") and self._mission_name:
+            self.lbl_mission.setText(
+                f"Mission: {self._mission_name}   {self._mission_line}")
 
     def _lock_setup(self, locked):
         """The Setup tab is how a run is COMPOSED; while one is actually
@@ -5200,34 +5373,88 @@ class Console(QMainWindow):
             self.obj_args.setText("right")
         else:
             self.obj_args.setText("")
+        plannable = verb in self.PLANNABLE
+        if hasattr(self, "obj_laps"):
+            self.obj_laps.setEnabled(plannable)
+            n = len([w for w in self.obj_args.text().split() if w])
+            self.lbl_laps.setText(
+                (f"a mission: {n} point{'s' if n != 1 else ''}, passed when "
+                 f"every lap is done" if plannable and n else
+                 "a mission: name the points above" if plannable else
+                 "open-ended - no end, so no pass or fail"))
+
+    # The verbs that VISIT POINTS, and can therefore be a mission with an
+    # end. Everything else - pursue, orbit, wall_follow, stop - is open-ended
+    # by nature, and giving it a lap count would put a task that can never
+    # finish into the pass/fail column forever.
+    PLANNABLE = ("advance", "shuttle", "patrol")
 
     def assign_objective(self):
-        """Send the chosen objective to the selected vehicles.
+        """Send the chosen objective, or the chosen MISSION, to the selection.
 
-        Down the ordinary retask channel, in the ordinary grammar, so it is
-        gated by command authority exactly as a typed order is. Selection
-        comes from the map - sweep a box round two cars and only those two are
-        retasked, which is how a scout gets pushed ahead of a formation
-        without touching the rest of it.
+        A verb that visits points becomes a SETPLAN - a circuit and a number
+        of laps - so it has an end and can be passed or failed. Everything
+        else stays a plain open-ended objective, and says so.
+
+        Either way it goes down the ordinary command channel and is gated by
+        command authority exactly as a typed order is. Selection comes from
+        the map, so a scout can be pushed ahead of a formation without
+        touching the rest of it.
         """
         verb = self.obj_combo.currentData()
         args = self.obj_args.text().strip()
+        who = sorted(self.viewport.selected) or sorted(
+            a for a in (self._blue_ids or set()) if a != "gcs")
+        who = [a for a in who if a not in (self._red_ids or set())
+               and a != "gcs"]
+        if not who:
+            self.say("Nothing to task. Select vehicles on the map, or compose "
+                     "a blue fleet first.")
+            return
+
+        pts = [w for w in args.replace(",", " ").split() if w]
+        if verb in self.PLANNABLE and pts and "(" not in args:
+            laps = int(self.obj_laps.value())
+            self._send_lines([f"SETPLAN {aid} {' '.join(pts)} laps {laps}"
+                              for aid in who])
+            self.say(
+                f"MISSION -> {', '.join(who)}:  {' -> '.join(pts)} x{laps}\n"
+                f"  Each vehicle is told the FIRST leg only. The coordinator "
+                f"sends the next one when it reports arriving - over the "
+                f"network, so an order that cannot get through does not "
+                f"arrive and the mission stalls where it stands.\n"
+                f"  Watch the mission line: passed / awaiting orders / "
+                f"failed.")
+            return
+
         if verb == "shuttle" and args and not args.lower().startswith("between") \
                 and "(" not in args:
             # 'shuttle between E F' reads better and is what COMMANDS.md
             # documents; the parser takes either.
             args = f"between {args}"
-        who = sorted(self.viewport.selected) or sorted(
-            a for a in (self._blue_ids or set()) if a != "gcs")
-        who = [a for a in who if a not in (self._red_ids or set())]
-        if not who:
-            self.say("Nothing to task. Select vehicles on the map, or compose "
-                     "a blue fleet first.")
+        lines = []
+        for aid in who:
+            a = args
+            if verb == "pursue" and a == aid:
+                # NOBODY PURSUES THEMSELVES. The pre-filled target is just the
+                # first vehicle in the fleet, which is the one you most often
+                # have selected - so the suggestion has to step aside rather
+                # than produce an order that is silently a no-op.
+                others = [x for x in sorted(self._blue_ids or set())
+                          if x not in (aid, "gcs")]
+                if not others:
+                    self.say(f"{aid} has nobody else to pursue - skipped.")
+                    continue
+                a = others[0]
+            lines.append(f"{aid}: {verb}{(' ' + a) if a else ''}")
+        if not lines:
             return
-        lines = [f"{aid}: {verb}{(' ' + args) if args else ''}" for aid in who]
         self._send_lines(lines)
         self.say(f"{verb} -> {', '.join(who)}"
                  + (f"  ({args})" if args else "")
+                 + "\n  OPEN-ENDED: this objective has no finish, so it is "
+                   "not scored pass/fail. Use advance, shuttle or patrol with "
+                   "named points for a mission that can be passed."
                  + "\n  Any vehicle whose commander cannot reach it will be "
                    "skipped, and the skip printed. That is a result.")
 
@@ -6340,6 +6567,8 @@ class Console(QMainWindow):
         # stays drawn while the fleet advances on it.
         self.viewport.points = ((f.get("arena") or {}).get("points")
                                 or self.viewport.points)
+        self._print_intercepts(f)
+        self._show_mission_score(f)
         self.viewport.update()
         self.refresh_sensor_view()
         # EVERY PANEL, NOT JUST THE MAP. Scrubbing used to move the vehicles
@@ -6369,17 +6598,65 @@ class Console(QMainWindow):
     _CELL_COLOUR = {"blue": "#2E6FB0", "red": "#C4685A", "white": "#B8C0C6"}
 
     def _build_cells(self):
-        """The three cells, in order: Blue (friendly command), Red (adversary),
-        White (umpire + shell). This is the command structure as a UI - a blue
-        operator, a red operator, and the umpire who sees and does everything.
-        See docs/cells-and-network.md."""
-        for cell in ("blue", "red", "white"):
+        """WHITE STAYS IN THE WINDOW. Blue and red open as their own.
+
+        The umpire's terminal is where you work - shell commands, git, the
+        test suite - so it belongs in the main window where it has always
+        been. Blue and red are different: they are two OPERATORS, and having
+        them as tabs behind the umpire's meant only one side was ever visible,
+        which is a strange way to run an exercise whose whole point is that
+        the two sides see different things. As separate windows they can sit
+        side by side on the desk, or on two screens, or in front of two
+        people. See docs/cells-and-network.md.
+        """
+        shell = ShellPanel(REPO_WSL_PATH, cell="white", console=self)
+        self.shells.append(shell)
+        idx = self.terminals.addTab(shell, "White cell")
+        self.terminals.tabBar().setTabTextColor(
+            idx, QColor(self._CELL_COLOUR["white"]))
+        self._cell_windows = {}
+        self._cells_built = True
+
+    def open_cell(self, cell):
+        """Open (or raise) the blue or red operator's terminal as a window."""
+        win = (getattr(self, "_cell_windows", None) or {}).get(cell)
+        if win is None:
             shell = ShellPanel(REPO_WSL_PATH, cell=cell, console=self)
             self.shells.append(shell)
-            idx = self.terminals.addTab(shell, f"{cell.capitalize()} cell")
-            self.terminals.tabBar().setTabTextColor(
-                idx, QColor(self._CELL_COLOUR[cell]))
-        self._cells_built = True
+            win = QDialog(self)
+            win.setWindowTitle(
+                {"blue": "BLUE cell - friendly command",
+                 "red": "RED cell - adversary"}.get(cell, cell))
+            # NOT MODAL. The whole point is to type into it while the run goes
+            # on in the window behind, and to have both cells open at once.
+            win.setModal(False)
+            lay = QVBoxLayout(win)
+            lay.setContentsMargins(6, 6, 6, 6)
+            hdr = QLabel(
+                {"blue": "Blue commands the BLUE network.   SETPLAN, "
+                         "SETMISSION, REOBJECTIVE, launch / halt.",
+                 "red": "Red commands the RED network.   JAM, LISTEN, "
+                        "red launch / halt."}.get(cell, ""))
+            hdr.setWordWrap(True)
+            hdr.setStyleSheet(f"color:{self._CELL_COLOUR.get(cell, '#B8C0C6')};")
+            lay.addWidget(hdr)
+            lay.addWidget(shell, 1)
+            win.resize(820, 460)
+            self._cell_windows[cell] = win
+            win.finished.connect(lambda *_c, k=cell: self._cell_closed(k))
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        for sh in self.shells:
+            if sh.cell == cell:
+                sh.inp.setFocus()
+                break
+        return win
+
+    def _cell_closed(self, cell):
+        """Closing the window hides it; the shell and its history survive, so
+        reopening a cell mid-exercise does not lose what it has been told."""
+        return
 
     def new_terminal(self, focus=False):
         """Open another WHITE (umpire) shell tab - an extra plain terminal.

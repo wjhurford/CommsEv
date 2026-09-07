@@ -255,21 +255,12 @@ def test_files_load():
                     ok = is_dict
                     why = "did not resolve to a dict"
                 elif folder == "missions":
-                    # A mission is the COMMAND only: no scene and no fleet of
-                    # its own. See docs/vocabulary.md.
-                    #
-                    # It states that command as `objectives:` (open-ended
-                    # behaviour) or as a `plan:` (a circuit with an END, which
-                    # can be passed or failed) - and a plan needs no
-                    # objectives block, because the objective each vehicle
-                    # actually holds is generated from the plan one leg at a
-                    # time by the coordinator.
-                    ok = (is_dict
-                          and bool(doc.get("objectives") or doc.get("plan"))
+                    # A mission is the COMMAND only: objectives, and NO
+                    # scene/fleet of its own. See docs/vocabulary.md.
+                    ok = (is_dict and bool(doc.get("objectives"))
                           and not doc.get("agents")
                           and "scene" not in doc and "fleet" not in doc)
-                    why = ("a mission must declare objectives or a plan, and "
-                           "no scene or fleet")
+                    why = "a mission must be objectives-only"
                 else:
                     ok = is_dict and bool(doc.get("agents"))
                     why = "no agents after merge"
