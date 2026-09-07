@@ -2442,6 +2442,22 @@ class ExperimentWindow(QDialog):
 
         self.plot = ResultPlot()
         lay.addWidget(self.plot, 2)
+        # THE CHART, GUARANTEED. Three different in-widget drawing mechanisms
+        # have failed to appear in this dialog - a custom paintEvent, the same
+        # wrapped in a try/except that could not even print its own failure,
+        # and a QLabel showing a pixmap. The drawing code is demonstrably
+        # sound: tools/plot_results.py renders the identical chart to SVG with
+        # pure standard library and it is correct every time.
+        #
+        # So rather than debug a fourth attempt blind, this writes that SVG
+        # and opens it. It is one click, it works in any browser, and it is
+        # the file you would put in a slide anyway. If the embedded chart
+        # above ever starts working it is a convenience; this is the chart.
+        svgb = QPushButton("Open the chart in a browser  (always works)")
+        svgb.setToolTip("Writes an SVG beside the results and opens it. Pure "
+                        "standard library - nothing here can stop it.")
+        svgb.clicked.connect(self.open_svg)
+        lay.addWidget(svgb)
 
         # The power tickboxes: which jammer advantages are drawn. Opens on ONE
         # of them, because nine lines is a chart and twenty-seven is a wall.
@@ -2551,10 +2567,12 @@ class ExperimentWindow(QDialog):
             for r in bad[:5]:
                 self.console.say(f"  FAILED {r.get('cell')}: {r['error']}")
         self.outdir = outdir
+        self._csv_path = csv_path
         self.load_csv(csv_path)
 
     # -- results -----------------------------------------------------------
     def load_csv(self, path):
+        self._csv_path = path
         import csv as _csv
         try:
             with open(path, newline="", encoding="utf-8") as fh:
@@ -2611,50 +2629,93 @@ class ExperimentWindow(QDialog):
                 self.table.setItem(r, c, it)
         self.table.resizeColumnsToContents()
 
+    def open_svg(self):
+        """Render the current results to SVG and open it."""
+        import webbrowser
+        csvp = getattr(self, "_csv_path", None)
+        if not csvp:
+            self.bar.setFormat("run an experiment first")
+            return
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "deadband_plot", str(REPO_ROOT / "tools" / "plot_results.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            keep = {float(db) for db, b in
+                    getattr(self.console, "exp_powers", []) if b.isChecked()} \
+                if self.console is not None else None
+            rows = list(self.rows)
+            series = mod.series_of(rows, "penetration_m")
+            out = Path(csvp).with_suffix(".svg")
+            out.write_text(mod.svg(series, "penetration (m advanced)"),
+                           encoding="utf-8")
+        except Exception as exc:                       # noqa: BLE001
+            import traceback
+            self.bar.setFormat(f"could not write the chart: {exc}")
+            if self.console is not None:
+                self.console.say(traceback.format_exc())
+            return
+        webbrowser.open(out.as_uri())
+        self.bar.setFormat(f"chart -> {out.name}")
+        if self.console is not None:
+            self.console.say(f"chart written to {out}")
+
     # -- playback ----------------------------------------------------------
     def replay_row(self, row, _col):
-        """Re-run this one cell here and hand its frames to the viewport.
+        """Open this cell AS A LIVE RUN, not as a recording.
 
-        In-process, like the sweep: no subprocess, no JSONL file on disk, and
-        no second interpreter that can fail in ways this one cannot see. The
-        run is a pure function of (config, seed), so this IS the same run the
-        table row came from - not a recording of it.
+        It used to compute all the frames and then scrub them, which showed
+        the outcome and hid the mechanism - and the mechanism is the whole
+        point: vehicles advancing, one dropping out and going held, the rest
+        pushing past it. Now the cell's exact configuration - its authority,
+        its routing, its jammer power, its seed - is composed into a run and
+        handed to the ordinary sandbox path, so it plays out in front of you
+        with every panel live and every agent clickable, exactly like a run
+        you set up by hand. There is one run path in this application, not
+        two, and this is it.
         """
         if row < 0 or row >= len(self.rows):
             return
-        row_d = self.rows[row]
-        key = row_d.get("cell")
+        r = self.rows[row]
         cfg = getattr(self, "_cfg", None)
-        names = getattr(self, "_names", None)
-        if not key or cfg is None:
-            self.bar.setFormat("open a results set first (press Run)")
+        if cfg is None:
+            self.bar.setFormat("run an experiment first")
             return
-        self.bar.setFormat(f"re-running {key} ...")
-        QApplication.processEvents()
         try:
-            sweep = _sweep_module()
-            cells, _ = sweep.cells_of(cfg)
-            match = [c for c in cells if c.get("cell") == key]
-            if not match:
-                self.bar.setFormat(f"no such cell: {key}")
+            compose = copy.deepcopy(cfg.get("compose") or {})
+            if not compose:
+                self.bar.setFormat(
+                    "this experiment came from a file, so there is no "
+                    "composition to replay live - run it from the Setup tab")
                 return
-            result = sweep.run_one((cfg, match[0], True))
-            frames = result[1] if isinstance(result, tuple) else []
+            nets = compose.setdefault("networks", {})
+            blue = nets.setdefault("blue", {})
+            blue["authority"] = blue["topology"] = r.get("authority")
+            blue["routing"] = r.get("routing")
+            if cfg.get("squads"):
+                blue["squads"] = copy.deepcopy(cfg["squads"])
+                blue["leader_loss"] = cfg.get("leader_loss", "fallback")
+            # The jammer at the cell's own power, derived from the same
+            # dimensionless ratio the sweep used - never a second definition.
+            sweep = _sweep_module()
+            dbm = sweep.FLEET_TX_DBM + float(r.get("jam_rel_db") or 0.0)
+            for a in compose.get("agents") or []:
+                if a.get("jammer"):
+                    a["jammer"] = dict(a.get("jammer") or {})
+                    a["jammer"]["tx_power"] = {"value": dbm, "unit": "dBm",
+                                               "source": "experiment cell"}
         except Exception as exc:                       # noqa: BLE001
-            import traceback
-            self.bar.setFormat(f"replay failed: {exc}")
-            if self.console is not None:
-                self.console.say("REPLAY FAILED\n" + traceback.format_exc())
+            self.bar.setFormat(f"could not compose that cell: {exc}")
             return
-        if not frames:
-            self.bar.setFormat("replay produced no frames")
-            return
-        self.plot.highlight = (row_d.get("authority"), row_d.get("routing"))
+
+        self.plot.highlight = (r.get("authority"), r.get("routing"))
         self.plot.render_chart()
         if self.console is not None:
-            self.console.play_frames(frames, title=key)
-        self.bar.setFormat(f"opened {key}  ({len(frames)} frames) - "
-                           f"playing in the Console")
+            self.console.run_composition(
+                compose, mission=cfg.get("mission") or "advance",
+                title=r.get("cell", ""), seed=int(r.get("seed") or 1))
+        self.bar.setFormat(f"running {r.get('cell')} live in the Console")
 
 
 
@@ -2869,92 +2930,132 @@ class Console(QMainWindow):
         slay = QVBoxLayout(setup)
         slay.setContentsMargins(6, 6, 6, 6)
         slay.setSpacing(4)
-        # RUN MODE, first, because it decides what the rest of this tab means.
+
+        # THE TAB STARTS BLANK. One question, asked first, because the answer
+        # decides what everything else on this tab MEANS - a sandbox picks one
+        # architecture and issues its mission live; an experiment sweeps
+        # architectures and must decide everything before it starts. Showing
+        # both sets of controls at once, greyed, made it look as though the
+        # difference were cosmetic. It is not.
         slay.addWidget(QLabel("Run"))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Sandbox - one run, watched live",
-                                  "Experiment - swept, headless (not built)"])
+        self.mode_combo.addItems([
+            "(choose a run type)",
+            "Sandbox - one run, watched live",
+            "Experiment - many runs, swept"])
         self.mode_combo.setToolTip(
-            "Sandbox    one run you watch and can interfere with: retask mid-\n"
-            "           run, tune the jammer live, pick the architecture below.\n"
-            "Experiment many runs, parallel, nothing interactive - every\n"
-            "           choice is made before it starts. Not built yet.")
-        self.mode_combo.model().item(1).setEnabled(False)
+            "Sandbox    one run you watch and can interfere with: retask\n"
+            "           mid-run, tune the jammer live, and issue the mission\n"
+            "           from the terminal - where whether the order can even\n"
+            "           get through is part of what you are watching.\n"
+            "Experiment many runs, headless, nothing interactive. Every\n"
+            "           choice is made here, before it starts.")
         self.mode_combo.activated.connect(self._on_mode_chosen)
         slay.addWidget(self.mode_combo)
-        slay.addWidget(QLabel("Scene"))
+
+        # ---- COMPOSE: shown for both run types -----------------------------
+        self.compose_box = QWidget()
+        clay = QVBoxLayout(self.compose_box)
+        clay.setContentsMargins(0, 6, 0, 0)
+        clay.setSpacing(4)
+        clay.addWidget(QLabel("Scene"))
         self.scene_combo = QComboBox()
         self.scene_combo.setToolTip("The world: arena, radio background, "
                                     "named points. scenes/*.yaml")
         self.scene_combo.activated.connect(self.on_scene_chosen)
-        slay.addWidget(self.scene_combo)
-        slay.addWidget(QLabel("Blue fleet (friendly)"))
+        clay.addWidget(self.scene_combo)
+        clay.addWidget(QLabel("Blue fleet (friendly)"))
         self.fleet_combo = QComboBox()
-        self.fleet_combo.setToolTip("The friendly agents and their wiring. "
-                                    "fleets/*.yaml. Choosing one asks where "
-                                    "to spawn them.")
+        self.fleet_combo.setToolTip(
+            "Composed from agents/ hardware. Choosing one asks where to spawn "
+            "them and what doctrine each follows.")
         self.fleet_combo.setEnabled(False)
-        self.fleet_combo.activated.connect(lambda i: self.on_fleet_chosen(i, "blue"))
-        slay.addWidget(self.fleet_combo)
-        slay.addWidget(QLabel("Red fleet (adversary)"))
+        self.fleet_combo.activated.connect(
+            lambda i: self.on_fleet_chosen(i, "blue"))
+        clay.addWidget(self.fleet_combo)
+        clay.addWidget(QLabel("Red fleet (adversary)"))
         self.red_combo = QComboBox()
-        self.red_combo.setToolTip("The adversary side - jammers, spoofers - "
-                                  "spawned SEPARATELY from blue and never the "
-                                  "same file. Optional.")
+        self.red_combo.setToolTip("Jammers and, later, spoofers. Spawned "
+                                  "separately from blue. Optional.")
         self.red_combo.setEnabled(False)
-        self.red_combo.activated.connect(lambda i: self.on_fleet_chosen(i, "red"))
-        slay.addWidget(self.red_combo)
-        # ARCHITECTURE. The two axes the whole project is about, and until now
-        # the one thing you could not change without editing a YAML by hand.
-        # They are INDEPENDENT and set independently - authority is who
-        # decides, routing is how packets travel - which is the separation the
-        # framework exists to demonstrate.
-        #
-        # "(from fleet)" means: leave whatever the fleet file declared. Pick
-        # anything else and it is an OVERRIDE, recorded in the composed run and
-        # therefore in the CSV's meta sidecar. A setting you cannot trace back
-        # from the results is worse than no setting.
-        slay.addWidget(QLabel("Command authority (who decides)"))
+        self.red_combo.activated.connect(
+            lambda i: self.on_fleet_chosen(i, "red"))
+        clay.addWidget(self.red_combo)
+        savrow = QHBoxLayout()
+        for _side, _lab in (("blue", "Save blue fleet as..."),
+                            ("red", "Save red fleet as...")):
+            b = QPushButton(_lab)
+            b.setToolTip("Write the fleet built this session to "
+                         "fleets/<name>.yaml. Nothing is saved until you "
+                         "press this.")
+            b.clicked.connect(lambda _c=False, sd=_side: self.save_fleet_as(sd))
+            savrow.addWidget(b)
+        clay.addLayout(savrow)
+        slay.addWidget(self.compose_box)
+        self.compose_box.setVisible(False)
+
+        # ---- ARCHITECTURE: both run types, but different meanings ----------
+        # SWEEP_ALL is the fourth option. In a sandbox it is not offered -
+        # you cannot watch three authorities at once. In an experiment it is
+        # the default, because the 3x3 IS the framework's claim.
+        self.arch_box = QWidget()
+        alay = QVBoxLayout(self.arch_box)
+        alay.setContentsMargins(0, 6, 0, 0)
+        alay.setSpacing(4)
+        alay.addWidget(QLabel("Command authority (who decides)"))
         self.auth_combo = QComboBox()
-        self.auth_combo.addItems(["centralized", "decentralized",
-                                  "hierarchical"])
         self.auth_combo.setToolTip(
-            "centralized    one coordinator decides for everyone. Lose the\n"
-            "               link to it and you have no orders.\n"
-            "decentralized  every agent decides for itself. Losing a link\n"
-            "               costs information, never authority.\n"
-            "hierarchical   agents answer to a squad leader, leaders answer\n"
-            "               up. Degraded rather than decapitated - but only\n"
-            "               if the ROUTING carries the squad links.")
+            "centralized    one coordinator decides for everyone.\n"
+            "decentralized  every agent decides for itself.\n"
+            "hierarchical   agents answer to a squad leader, leaders up.\n"
+            "all            sweep all three (experiment only).")
         self.auth_combo.activated.connect(lambda _i: self._on_arch_chosen())
-        slay.addWidget(self.auth_combo)
-        slay.addWidget(QLabel("Routing (how packets travel)"))
+        alay.addWidget(self.auth_combo)
+        alay.addWidget(QLabel("Routing (how packets travel)"))
         self.route_combo = QComboBox()
-        self.route_combo.addItems(["star", "mesh", "tiered"])
         self.route_combo.setToolTip(
             "star    every agent to the hub, no peer links.\n"
-            "mesh    everything to everything. Authority can relay.\n"
-            "tiered  the squad meshes internally; only the leader talks up.\n"
-            "        One link out of the squad - one link to lose.")
+            "mesh    everything to everything; authority can relay.\n"
+            "tiered  the squad meshes internally, only the leader talks up.\n"
+            "all     sweep all three (experiment only).")
         self.route_combo.activated.connect(lambda _i: self._on_arch_chosen())
-        slay.addWidget(self.route_combo)
-        # SAVE FLEET AS. The only thing that writes into fleets/. Explicit,
-        # because a fleet you are still experimenting with is not one you have
-        # decided to keep.
-        # EXPERIMENT CONTROLS. Hidden in Sandbox, where the mission is issued
-        # from the terminal and there is nothing to sweep. In Experiment mode
-        # there is nobody to type at a running fleet, so the mission and the
-        # swept powers have to be decided here, before it starts.
+        alay.addWidget(self.route_combo)
+        self.lbl_arch = QLabel("")
+        self.lbl_arch.setObjectName("hint")
+        self.lbl_arch.setWordWrap(True)
+        alay.addWidget(self.lbl_arch)
+        slay.addWidget(self.arch_box)
+        self.arch_box.setVisible(False)
+
+        # ---- SANDBOX ONLY --------------------------------------------------
+        self.sandbox_box = QWidget()
+        sblay = QVBoxLayout(self.sandbox_box)
+        sblay.setContentsMargins(0, 6, 0, 0)
+        sblay.setSpacing(4)
+        self.lbl_mission = QLabel("Mission: UNASSIGNED")
+        self.lbl_mission.setToolTip(
+            "Issued from the terminal once the run is started:\n"
+            "    SETMISSION <name>\n"
+            "then `blue launch`. Results are titled by this name.")
+        sblay.addWidget(self.lbl_mission)
+        hint = QLabel("Press Play, then in the terminal:\n"
+                      "  SETMISSION <name>\n  blue launch")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        sblay.addWidget(hint)
+        slay.addWidget(self.sandbox_box)
+        self.sandbox_box.setVisible(False)
+
+        # ---- EXPERIMENT ONLY -----------------------------------------------
         self.exp_box = QWidget()
         elay = QVBoxLayout(self.exp_box)
-        elay.setContentsMargins(0, 0, 0, 0)
+        elay.setContentsMargins(0, 6, 0, 0)
         elay.setSpacing(4)
-        elay.addWidget(QLabel("Mission (experiment)"))
+        elay.addWidget(QLabel("Mission"))
         self.exp_mission = QComboBox()
         self.exp_mission.setToolTip(
-            "Issued to every vehicle when each run starts. In Sandbox you "
-            "type SETMISSION instead - there, whether the order can even get "
-            "through is part of what you are watching.")
+            "Issued to every vehicle when each run starts. There is nobody "
+            "to type at a headless run, so it is chosen here.")
         elay.addWidget(self.exp_mission)
         elay.addWidget(QLabel("Jammer advantage P_j/P_t to sweep (dB)"))
         prow = QHBoxLayout()
@@ -2966,6 +3067,7 @@ class Console(QMainWindow):
                 "The jammer's power RELATIVE to the fleet's own radios. A "
                 "ratio, so the absolute powers cancel out of the physics and "
                 "the result holds for any radio at any scale.")
+            b.stateChanged.connect(lambda *_: self._refresh_run_count())
             prow.addWidget(b)
             self.exp_powers.append((db, b))
         prow.addStretch(1)
@@ -2974,41 +3076,14 @@ class Console(QMainWindow):
         self.lbl_runs.setObjectName("hint")
         self.lbl_runs.setWordWrap(True)
         elay.addWidget(self.lbl_runs)
-        for _db, _b in self.exp_powers:
-            _b.stateChanged.connect(lambda *_: self._refresh_run_count())
+        expb = QPushButton("Run the experiment...")
+        expb.setToolTip("Sweep, then double-click any result to watch that "
+                        "exact run play out.")
+        expb.clicked.connect(self.open_experiment)
+        elay.addWidget(expb)
         slay.addWidget(self.exp_box)
         self.exp_box.setVisible(False)
 
-        expb = QPushButton("Run an experiment...")
-        expb.setToolTip("Sweep authority x routing x jammer power headless, "
-                        "then double-click any result to watch that run.")
-        expb.clicked.connect(self.open_experiment)
-        slay.addWidget(expb)
-        savrow = QHBoxLayout()
-        for _side, _lab in (("blue", "Save blue fleet as..."),
-                            ("red", "Save red fleet as...")):
-            b = QPushButton(_lab)
-            b.setToolTip("Write the fleet built this session to "
-                         "fleets/<name>.yaml. Nothing is saved until you "
-                         "press this.")
-            b.clicked.connect(lambda _c=False, sd=_side: self.save_fleet_as(sd))
-            savrow.addWidget(b)
-        slay.addLayout(savrow)
-        self.lbl_arch = QLabel("")
-        self.lbl_arch.setObjectName("hint")
-        self.lbl_arch.setWordWrap(True)
-        slay.addWidget(self.lbl_arch)
-        self.lbl_mission = QLabel("Mission: UNASSIGNED")
-        self.lbl_mission.setToolTip(
-            "Set from the terminal once the run is started:\n"
-            "    SETMISSION <name>     (missions/<name>.yaml)\n"
-            "then `blue launch`. Results are titled by this name.")
-        slay.addWidget(self.lbl_mission)
-        hint = QLabel("Play, then in the terminal:\n"
-                      "  SETMISSION <name>\n  blue launch")
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        slay.addWidget(hint)
         # The scene tree (arena + background conditions) lives under the
         # pickers - it describes what Setup composed.
         slay.addWidget(self.tab_env, 1)
@@ -3485,6 +3560,55 @@ class Console(QMainWindow):
             self.say(f"Opened {title} - {len(self.frames)} frames, showing the "
                      f"playing from the start. Drag the timeline to scrub.")
 
+    def run_composition(self, compose, mission="advance", title="", seed=1):
+        """Start a LIVE run of a composition handed in from elsewhere.
+
+        This is how an experiment cell is opened: the sweep's own composition,
+        with that cell's authority, routing, jammer power and seed, is written
+        out and started through the ordinary run path. The result is a live
+        run - every panel updating, every agent clickable, the timeline
+        filling as it happens - not a recording being scrubbed. There is one
+        run path in this application, and both the sandbox and an experiment
+        replay go down it.
+        """
+        import yaml as _yaml
+        self.stop_run()
+        self._run_seed = int(seed)
+        path = REPO_ROOT / "runs" / "replay_setup.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# Written by the Console to replay an experiment cell live.\n"
+            "# Regenerated every time; safe to delete.\n"
+            + _yaml.safe_dump(compose, sort_keys=False), encoding="utf-8")
+        self.load_scenario(path)
+        self.start_run()
+        # The order goes in once the sim is up. It travels the same retask
+        # spool a human types into, so a replayed run is commanded exactly the
+        # way a sandbox run is - including being refused if the fleet cannot
+        # be reached, which is itself part of what an experiment measures.
+        from PySide6.QtCore import QTimer
+        red = any(a.get("jammer") for a in (compose.get("agents") or []))
+
+        def _order():
+            self._send_setup_orders(mission, red)
+        QTimer.singleShot(900, _order)
+        self.say(f"Running {title or 'composition'} live - mission "
+                 f"{mission}, seed {seed}.")
+
+    def _send_setup_orders(self, mission, red):
+        """SETMISSION, then launch, down the ordinary command channel."""
+        lines = [f"SETMISSION {mission}", "LAUNCH blue"]
+        if red:
+            lines.append("LAUNCH red")
+        d = getattr(self, "_retask_dir", None) or (REPO_ROOT / "runs" / "retask")
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            for i, ln in enumerate(lines):
+                (d / f"cmd_{time.time_ns()}_{i}.txt").write_text(
+                    ln + "\n", encoding="utf-8")
+        except OSError as exc:
+            self.say(f"could not issue the mission: {exc}")
+
     def open_experiment(self):
         """The experiment window: run a sweep, read the table, watch a run."""
         if getattr(self, "_expwin", None) is None:
@@ -3492,31 +3616,45 @@ class Console(QMainWindow):
         self._expwin.show()
         self._expwin.raise_()
 
-    def _on_mode_chosen(self, _index):
-        """Sandbox and Experiment want different things decided here.
+    SWEEP_ALL = "all  (sweep all three)"
 
-        SANDBOX     one run you watch. You pick ONE authority and ONE routing,
-                    and issue the mission from the terminal - where whether
-                    the order can even get through is part of what you are
-                    watching.
-        EXPERIMENT  many runs, nobody to type at them. Authority and routing
-                    are SWEPT rather than chosen (all nine, always - that
-                    3x3 is the framework's whole claim), so their dropdowns
-                    become read-only, and the mission and the jammer powers
-                    are decided here instead.
+    def _on_mode_chosen(self, _index):
+        """Reveal only the controls this run type actually uses.
+
+        The tab starts blank because the run type decides what everything else
+        MEANS. A sandbox picks one architecture and issues its mission live,
+        at the terminal, where whether the order can get through is part of
+        what you are watching. An experiment sweeps architectures and has
+        nobody to type at it, so the mission and the powers are decided here.
+        Showing both sets greyed made that difference look cosmetic.
         """
-        sandbox = self.mode_combo.currentIndex() == 0
-        for w in (self.auth_combo, self.route_combo):
-            w.setEnabled(sandbox)
-        self.exp_box.setVisible(not sandbox)
-        if not sandbox:
+        mode = self.mode_combo.currentIndex()      # 0 none, 1 sandbox, 2 exp
+        self.compose_box.setVisible(mode > 0)
+        self.arch_box.setVisible(mode > 0)
+        self.sandbox_box.setVisible(mode == 1)
+        self.exp_box.setVisible(mode == 2)
+        if mode == 0:
+            return
+        experiment = mode == 2
+        if experiment:
             self._refresh_missions()
-            self.lbl_arch.setText(
-                "Experiment: authority x routing are SWEPT - all nine "
-                "combinations, every run. The dropdowns above do not apply.")
-        else:
-            self._on_arch_chosen()
+        # `all` only exists in an experiment: you cannot watch three
+        # authorities at once, and in a sweep it is the default because that
+        # 3x3 is the framework's whole claim.
+        for combo, opts in ((self.auth_combo, ["centralized", "decentralized",
+                                               "hierarchical"]),
+                            (self.route_combo, ["star", "mesh", "tiered"])):
+            keep = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(opts + ([self.SWEEP_ALL] if experiment else []))
+            i = combo.findText(keep)
+            combo.setCurrentIndex(i if i >= 0
+                                  else (combo.count() - 1 if experiment else 0))
+            combo.blockSignals(False)
+        self._on_arch_chosen()
         self._refresh_run_count()
+
 
     def _refresh_missions(self):
         cur = self.exp_mission.currentText()
@@ -3530,14 +3668,18 @@ class Console(QMainWindow):
 
     def _refresh_run_count(self):
         """The grid size, live, as you tick. Not a time estimate - an estimate
-        is a guess you then have to defend."""
-        if not hasattr(self, "lbl_runs"):
+        is a guess you then have to defend; this is arithmetic."""
+        if not hasattr(self, "lbl_runs") or self.mode_combo.currentIndex() != 2:
             return
+        na = 3 if self.auth_combo.currentText() == self.SWEEP_ALL else 1
+        nr = 3 if self.route_combo.currentText() == self.SWEEP_ALL else 1
         powers = [db for db, b in self.exp_powers if b.isChecked()]
-        n = 3 * 3 * max(len(powers), 0)
+        n = na * nr * len(powers)
         self.lbl_runs.setText(
-            f"{n} runs  =  3 authorities x 3 routings x {len(powers)} powers"
+            f"{n} runs  =  {na} authority x {nr} routing x {len(powers)} "
+            f"power{'s' if len(powers) != 1 else ''}"
             if n else "Tick at least one power.")
+
 
     def _experiment_cfg(self):
         """The sweep configuration, built ENTIRELY from this Setup tab.
@@ -3573,10 +3715,17 @@ class Console(QMainWindow):
             "stop_when_stalled": True, "stall_grace_s": 5.0,
             "squads": squads, "coordinator": "gcs",
             "leader_loss": "fallback",
-            "axes": {"authority": ["centralized", "decentralized",
-                                   "hierarchical"],
-                     "routing": ["star", "mesh", "tiered"],
-                     "jam_rel_db": powers},
+            # Each axis is swept if its dropdown says `all`, and pinned to
+            # the single value otherwise. One place to look, and the run count
+            # above is the same arithmetic.
+            "axes": {
+                "authority": (["centralized", "decentralized", "hierarchical"]
+                              if self.auth_combo.currentText() == self.SWEEP_ALL
+                              else [self.auth_combo.currentText()]),
+                "routing": (["star", "mesh", "tiered"]
+                            if self.route_combo.currentText() == self.SWEEP_ALL
+                            else [self.route_combo.currentText()]),
+                "jam_rel_db": powers},
             # One seed: measured, not assumed. Nothing is stochastic unless a
             # GNSS-band jammer or a lidar fleet is in play, and then this
             # should grow. See experiments/penetration.yaml.
@@ -3593,6 +3742,8 @@ class Console(QMainWindow):
         auth = self.auth_combo.currentText()
         route = self.route_combo.currentText()
         note = []
+        if self.mode_combo.currentIndex() == 2:
+            self._refresh_run_count()
         # A hierarchy over a star is not a hierarchy. Star carries no peer
         # links, so every squad member reaches its leader VIA the coordinator,
         # and its fallback goes to the same coordinator - which is identical
@@ -3617,10 +3768,12 @@ class Console(QMainWindow):
         # would fall back to an invisible default - and an invisible default
         # is the thing that made the routing axis silently do nothing for a
         # whole sweep. What the dropdown shows is what runs.
-        if auth is not None:
+        # `all` is a SWEEP instruction, never a value: it must never reach
+        # the model, which would not know what to do with it.
+        if auth is not None and auth.currentText() != self.SWEEP_ALL:
             # `topology` is the legacy alias command_authority() falls back on.
             over["authority"] = over["topology"] = auth.currentText()
-        if route is not None:
+        if route is not None and route.currentText() != self.SWEEP_ALL:
             over["routing"] = route.currentText()
         if over.get("authority") == "hierarchical" or \
                 over.get("routing") == "tiered":
@@ -5121,6 +5274,10 @@ class Console(QMainWindow):
         argv = ["-u", str(script)]
         if self.path:
             argv += ["--scenario", str(self.path)]
+        # The seed, when this run is an experiment cell being watched live. A
+        # run is a pure function of (scenario, seed), so passing it is what
+        # makes what you watch the SAME run the results table scored.
+        argv += ["--seed", str(int(getattr(self, "_run_seed", 1)))]
         # A retask channel at a fixed, known path. The terminal's REOBJECTIVE
         # command writes here and the running sim picks it up next tick. Fixed
         # rather than passed around, so terminal and sim agree without wiring.

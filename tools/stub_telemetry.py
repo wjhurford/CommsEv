@@ -2698,6 +2698,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Deadband stub telemetry source")
     ap.add_argument("--scenario", default=str(DEFAULT_SCENARIO))
     ap.add_argument("--record", type=float, metavar="SECONDS")
+    ap.add_argument("--seed", type=int, default=1,
+                    help="RNG seed. A run is a pure function of (scenario, "
+                         "seed), so replaying an experiment cell live needs "
+                         "the seed that cell used.")
     ap.add_argument("--retask", metavar="DIR", default=None,
                     help="watch DIR/queue for live retask commands, e.g. "
                          "echo 'car3: pursue car1' > DIR/queue")
@@ -2714,7 +2718,8 @@ if __name__ == "__main__":
 
     if args.record:
         with open("sample_telemetry.jsonl", "w") as fh:
-            stream(arena, agents, links, duration=args.record, out=fh)
+            stream(arena, agents, links, duration=args.record, out=fh,
+                   seed=args.seed)
         print(f"wrote sample_telemetry.jsonl ({args.record}s)")
     else:
-        stream(arena, agents, links, retask_dir=retask_dir)
+        stream(arena, agents, links, retask_dir=retask_dir, seed=args.seed)
