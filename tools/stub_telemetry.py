@@ -21,6 +21,7 @@ Console never notices the difference.
 import argparse
 import json
 import collections
+import itertools
 import math
 import os
 import re
@@ -1056,6 +1057,11 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
     global _ALL_AGENTS
     _ALL_AGENTS = agents
     out = []
+    # PASS 1 - WHO BELIEVES IT HAS ARRIVED, and is that report honest? Kept
+    # separate from the decision to advance, because a formation turns a
+    # corner TOGETHER (pass 2). The fastest member touching its slot is not
+    # the leg being finished.
+    info, arrived, _fleet_targets = {}, {}, {}
     for a in agents:
         pl = a.get("_plan")
         if not pl or pl.get("state") != "running":
@@ -1071,10 +1077,82 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
         # would report. It has no other position to send.
         b = a.get("belief") or poses.get(aid) or {}
         d_believed = math.hypot(_num(b.get("x")) - tx, _num(b.get("y")) - ty)
-        if d_believed > tol:
+        info[aid] = (a, pl, auth, reachable, tol)
+        # WHAT THE FLEET IS AIMED AT, and where it believes it is. A leg is
+        # finished when the FORMATION has arrived, not when this vehicle has:
+        # `advance <point>` means "put the fleet's centre on that point,
+        # holding its shape", so the centre is the thing to test.
+        #
+        # Testing each vehicle against its own slot instead breaks twice over.
+        # The member whose slot trails the shape reports arriving seconds
+        # before the member whose slot leads, so the fleet tears into three
+        # vehicles flying three different legs of the same circuit. And a slot
+        # that lands in a wall gets clamped inside the room, so that vehicle
+        # can never be within tolerance of it and the leg NEVER completes -
+        # measured on a three-point patrol in an 8 m box, where a 4 m column
+        # turning a corner put two slots outside the arena and froze the
+        # mission at 0%. Averaging both sides removes both failures: the
+        # clamped target is in the average too, so the fleet is scored against
+        # what it was actually able to be told to do.
+        _fleet_targets.setdefault(aid, (tx, ty))
+        arrived[aid] = d_believed <= tol
+        if not arrived[aid]:
             pl["awaiting_orders"] = False
-            continue
+            pl["holding_for_formation"] = False
+        # The drift check belongs with the DECISION, not here: a member the
+        # formation carries over the line (pass 2) is reporting an arrival
+        # too, and its report has to be tested like anyone else's.
+        continue
 
+    # PASS 2 - THE COHORT. Vehicles flying the same leg of the same plan
+    # advance together.
+    #
+    # Judged one at a time, a formation tears itself apart. Each vehicle is
+    # steering at the goal PLUS its own slot, so the member whose slot trails
+    # the shape reaches its target seconds before the member whose slot
+    # leads - and it then takes the next leg on its own. Measured on a
+    # three-point, two-lap patrol: car3 had finished the whole mission at
+    # t=10.5 s while car1 was still on lap 1, and the three cars were flying
+    # three different legs of the same circuit. That is not a formation.
+    #
+    # A leg is done when every member that can still be TOLD has reported
+    # arriving. A member out of contact is left out of the count rather than
+    # blocking the rest, so jamming still strands the vehicle it strands
+    # without freezing the fleet around it - the stall stays local, which is
+    # the behaviour the link-loss experiments measure.
+    def _cohort(a_, pl_):
+        return (a_.get("network"), tuple(pl_.get("waypoints") or ()),
+                pl_.get("leg"), pl_.get("laps_done"))
+
+    groups = {}
+    for aid, (a, pl, auth, reachable, tol) in info.items():
+        if pl.get("state") != "running" or not reachable:
+            continue                    # failed in pass 1, or out of contact
+        groups.setdefault(_cohort(a, pl), []).append(aid)
+
+    ready, turned = {}, {}
+    for k, ids in groups.items():
+        n = float(len(ids))
+        cx = sum(_num((info[i][0].get("belief")
+                       or poses.get(i) or {}).get("x")) for i in ids) / n
+        cy = sum(_num((info[i][0].get("belief")
+                       or poses.get(i) or {}).get("y")) for i in ids) / n
+        gx = sum(_fleet_targets[i][0] for i in ids) / n
+        gy = sum(_fleet_targets[i][1] for i in ids) / n
+        tol = max(info[i][4] for i in ids)
+        ready[k] = math.hypot(cx - gx, cy - gy) <= tol
+        if ready[k]:
+            # The formation is on the waypoint. Every member of it has
+            # arrived as far as the mission is concerned, including one still
+            # sliding along a wall into a slot it can never quite reach.
+            for i in ids:
+                arrived[i] = True
+
+    for aid, (a, pl, auth, reachable, tol) in info.items():
+        if pl.get("state") != "running" or not arrived.get(aid):
+            continue
+        b = a.get("belief") or poses.get(aid) or {}
+        tx, ty = _fleet_targets.get(aid, (_num(b.get("x")), _num(b.get("y"))))
         # IT BELIEVES IT HAS ARRIVED. Is what it is REPORTING materially
         # false?
         #
@@ -1121,8 +1199,16 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
             # finished, and the difference is the whole experiment.
             pl["awaiting_orders"] = True
             continue
+        if not ready.get(_cohort(a, pl), True):
+            # Arrived first. Sit in the slot and wait for the formation - the
+            # order for the next leg has not been given yet.
+            pl["awaiting_orders"] = False
+            pl["holding_for_formation"] = True
+            continue
 
+        pl["holding_for_formation"] = False
         pl["awaiting_orders"] = False
+        turned.setdefault(_cohort(a, pl), []).append(a)
         pl["leg"] += 1
         if pl["leg"] >= len(pl["waypoints"]):
             pl["leg"] = 0
@@ -1133,16 +1219,16 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
             continue
 
         nxt = pl["waypoints"][pl["leg"]]
-        # CARRY THE FORMATION OFFSET ACROSS THE LEG. A vehicle's place in the
-        # formation belongs to the fleet's shape, not to one destination -
-        # recomputing it per leg would let whoever was reassigned first
-        # rediscover an offset of zero (it is briefly the only vehicle headed
-        # that way) and drive into the middle of everyone else. Keeping it
-        # means a wedge stays a wedge all the way round the circuit.
-        keep_off = (a.get("mission") or {}).get("_offset")
+        # The formation slot lives on the AGENT now, not on the mission, so a
+        # new leg inherits it automatically and there is nothing to carry.
+        keep_rot = (a.get("mission") or {}).get("rotate")
         a["mission"] = {"type": "advance", "to": nxt}
-        if keep_off is not None:
-            a["mission"]["_offset"] = keep_off
+        if keep_rot is not None:
+            a["mission"]["rotate"] = keep_rot
+        # The corner. The new leg runs from the fleet's centre as it stands at
+        # the turn to the next waypoint, and the formation rotates onto that
+        # line - once, here, rather than continuously all the way round.
+        a["_leg_from"] = _fleet_centre(a, a.get("knowledge") or poses)
         a["phase_t0"] = t
         pl["reassignments"] += 1
         net = nets.get(a.get("network")) or {}
@@ -1160,6 +1246,11 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
                      f"({_num(pt.get('x')):.1f},{_num(pt.get('y')):.1f},"
                      f"{_num(pt.get('z')):.1f})"),
         })
+    # Every vehicle that took a new leg this tick now holds its new goal and
+    # its new `_leg_from`, so the rotated slots are known and can be dealt out
+    # by proximity - see _rematch_slots.
+    for members in turned.values():
+        _rematch_slots(members, arena, poses)
     TRANSMISSIONS.extend(out)
     return out
 
@@ -1310,6 +1401,182 @@ def validate_objective(mission_dict, points, arena):
     return True, None
 
 
+def _fleet_peers(agent):
+    """This agent's own side, mobile only - the vehicles a formation is made
+    of. The bench is what they are measured against, never a member."""
+    return [a for a in (_ALL_AGENTS or [agent])
+            if a.get("network") == agent.get("network")
+            and not a.get("ghost") and not a.get("jammer")
+            and a.get("platform") != "ground_station"]
+
+
+def _fleet_centre(agent, poses):
+    """Where this agent BELIEVES the formation's centre is."""
+    known = [poses.get(a["id"]) for a in _fleet_peers(agent)]
+    known = [q for q in known if q is not None]
+    if not known:
+        q = poses.get(agent["id"]) or agent.get("start") or {}
+        return (_num(q.get("x")), _num(q.get("y")))
+    return (sum(_num(q.get("x")) for q in known) / len(known),
+            sum(_num(q.get("y")) for q in known) / len(known))
+
+
+def _capture_slots(agent, poses, arena):
+    """Freeze the whole fleet's formation slots, once.
+
+    Called from the first `advance` evaluation that needs one, and it captures
+    for EVERY vehicle on the side rather than only the caller - which is the
+    whole fix. Slots taken one at a time, as each vehicle first needed one,
+    were taken against different peer sets and stopped describing one shape.
+
+    The slot is stored in the FORMATION's own frame: the offset from the
+    fleet's centre, rotated back through the bearing the fleet was facing when
+    it was captured. Stored that way it can be rotated forward to any later
+    heading, which is what makes the shape rigid rather than merely
+    translated.
+    """
+    peers = _fleet_peers(agent)
+    if any(a.get("_slot") is not None for a in peers):
+        return
+    cx, cy = _fleet_centre(agent, poses)
+    # The heading the formation was facing when it was captured: toward
+    # wherever it was first sent. Without this reference the shape would snap
+    # to a new orientation the instant it started rotating.
+    pts = arena.get("points") or {}
+    spec = (agent.get("mission") or {}).get("to")
+    ref = 0.0
+    ok, gx, gy, _gz, _e = resolve_waypoint(spec, pts) if spec else (False, 0, 0, 0, None)
+    if ok and math.hypot(gx - cx, gy - cy) > 1e-6:
+        ref = math.atan2(gy - cy, gx - cx)
+    cb, sb = math.cos(-ref), math.sin(-ref)
+    for a in peers:
+        q = poses.get(a["id"]) or a.get("start") or {}
+        dx, dy = _num(q.get("x")) - cx, _num(q.get("y")) - cy
+        a["_slot"] = (round(dx * cb - dy * sb, 4), round(dx * sb + dy * cb, 4))
+        a["_slot_ref"] = 0.0
+        # WHERE THIS LEG IS BEING FLOWN FROM. The formation's orientation is
+        # the direction of the LEG - from here to the goal - and that has to
+        # be a fixed quantity for as long as the leg lasts. Measured from the
+        # fleet's CURRENT centre instead, it swings as the fleet moves and
+        # then flips through 180 degrees the moment the centre passes the
+        # waypoint, whipping every slot round the goal and handing vehicles a
+        # target that sails past them: cars reported arriving two metres
+        # short, advanced legs early, and finished a two-lap patrol in eleven
+        # seconds without visiting the far corner. Frozen at the start of the
+        # leg it turns once, at the corner, which is what a formation does.
+        a["_leg_from"] = (cx, cy)
+
+
+def _formation_fit(agent, arena, gx, gy, bearing):
+    """(dx, dy, k) - how the WHOLE shape has to move, and only if the room is
+    genuinely smaller than the formation, shrink, to sit inside the arena.
+
+    Two earlier answers were both wrong, and it is worth saying why.
+
+    Clamping each slot on its own destroys the formation exactly where it
+    matters: two slots that fall outside the same corner get clamped onto
+    nearly one coordinate, the vehicles holding them drive into each other and
+    stop, and the leg never completes. Measured on a three-point patrol in an
+    8 m box: the mission froze at 0%.
+
+    Shrinking the shape to fit is worse still near a wall. A waypoint 0.4 m
+    from the usable edge lets a column pointing at that wall be 0.4 m long -
+    so three 0.6 m cars were scaled to a fifth of their spacing and ended up
+    inside one another.
+
+    A formation closing on a wall does not squash and it does not fan out: it
+    stops with its leading element AT the wall and the rest of the shape
+    trailing back into the room. That is a translation, and it is what this
+    returns - the smallest shift along each axis that brings the whole shape
+    inside. The fleet's centre therefore ends up short of the waypoint, which
+    is honest: that is as close as the room lets it get, and arrival is judged
+    on where the fleet was actually told to be. Scaling is kept only for the
+    case the shift cannot solve - a shape wider than the room itself.
+    """
+    _ok_c, hx, hy = _in_bounds(gx, gy, arena)
+    cb, sb = math.cos(bearing), math.sin(bearing)
+    offs = []
+    for a in _fleet_peers(agent):
+        sl = a.get("_slot")
+        if sl:
+            offs.append((sl[0] * cb - sl[1] * sb, sl[0] * sb + sl[1] * cb))
+    if not offs:
+        return (0.0, 0.0, 1.0)
+    k = 1.0
+    for ax, h in ((0, hx), (1, hy)):
+        span = max(o[ax] for o in offs) - min(o[ax] for o in offs)
+        if span > 2.0 * h and span > 1e-9:
+            k = min(k, (2.0 * h) / span)
+    shift = [0.0, 0.0]
+    for ax, g, h in ((0, gx, hx), (1, gy, hy)):
+        lo, hi = (k * min(o[ax] for o in offs), k * max(o[ax] for o in offs))
+        if g + hi > h:
+            shift[ax] = h - (g + hi)
+        elif g + lo < -h:
+            shift[ax] = -h - (g + lo)
+    return (shift[0], shift[1], k)
+
+
+def _rematch_slots(members, arena, poses):
+    """At a corner, hand each vehicle the slot NEAREST to it.
+
+    The SHAPE is the formation; which vehicle stands in which place in it is
+    not. Insist on both and a column that turns back on itself has to drag its
+    rear vehicle the whole length of the shape and past everyone in it: they
+    meet head-on, block, and stop. Measured on a three-point patrol, the turn
+    at P3 left all three cars inside half a metre of each other, none able to
+    move, and the mission frozen at 0%.
+
+    Re-matched by distance the same shape is filled from where the fleet
+    already is - the column simply changes which end leads - and the crossing
+    disappears. The assignment is the one with the least total travel, found
+    exactly for the fleet sizes this runs at; minimising the sum of Euclidean
+    distances is also what makes it non-crossing, which is the property that
+    actually stops the collisions.
+    """
+    members = [a for a in members if a.get("_slot") is not None]
+    if len(members) < 2:
+        return
+    pts = arena.get("points") or {}
+    a0 = members[0]
+    ok, gx, gy, _gz, _e = resolve_waypoint((a0.get("mission") or {}).get("to"),
+                                           pts)
+    if not ok:
+        return
+    fx, fy = a0.get("_leg_from") or (gx, gy)
+    if math.hypot(gx - fx, gy - fy) <= 1e-6:
+        return
+    bearing = math.atan2(gy - fy, gx - fx) - _num(a0.get("_slot_ref"))
+    dx, dy, k = _formation_fit(a0, arena, gx, gy, bearing)
+    cb, sb = math.cos(bearing), math.sin(bearing)
+    slots = [a["_slot"] for a in members]
+    targets = [(gx + dx + k * (sx * cb - sy * sb),
+                gy + dy + k * (sx * sb + sy * cb))
+               for sx, sy in slots]
+    here = []
+    for a in members:
+        q = a.get("belief") or poses.get(a["id"]) or a.get("start") or {}
+        here.append((_num(q.get("x")), _num(q.get("y"))))
+    n = len(members)
+    cost = [[math.dist(here[i], targets[j]) for j in range(n)]
+            for i in range(n)]
+    if n <= 7:
+        best, best_c = None, None
+        for perm in itertools.permutations(range(n)):
+            c = sum(cost[i][perm[i]] for i in range(n))
+            if best_c is None or c < best_c - 1e-12:
+                best, best_c = perm, c
+    else:                       # big fleet: greedy, still far better than none
+        best = [None] * n
+        taken = set()
+        for _d, i, j in sorted((cost[i][j], i, j)
+                               for i in range(n) for j in range(n)):
+            if best[i] is None and j not in taken:
+                best[i], _ = j, taken.add(j)
+    for i, a in enumerate(members):
+        a["_slot"] = slots[best[i]]
+
+
 def mission_target(agent, t, poses, arena):
     """Where the mission WANTS this agent to be at time t.
 
@@ -1444,37 +1711,56 @@ def mission_target(agent, t, poses, arena):
             here = poses.get(agent["id"]) or start
             return (here["x"], here["y"])
 
-        # THE FORMATION OFFSET, captured ONCE, from what this agent KNEW when
-        # the order took effect. Computed lazily rather than at assignment
-        # because that is the first moment the agent has a view of its peers.
+        # THE FORMATION SLOT: captured ONCE FOR THE WHOLE FLEET, and RIGID.
         #
-        # Note what it is computed from: `poses` here is the agent's own
-        # knowledge - its peers as THEY last reported themselves - not ground
-        # truth. So under jamming two vehicles can hold slightly different
-        # ideas of where the formation's centre was, and the shape they try to
-        # keep is the shape they each believe in. That is not a flaw to fix:
-        # it is the same disagreement a real formation suffers when its
-        # position reports go stale.
-        if "_offset" not in m:
-            peers = [a for a in (_ALL_AGENTS or [agent])
-                     if (a.get("mission") or {}).get("type") == "advance"
-                     and (a.get("mission") or {}).get("to") == spec
-                     and a.get("network") == agent.get("network")]
-            known = []
-            for a in peers:
-                q = poses.get(a["id"])
-                if q is not None:
-                    known.append((_num(q.get("x")), _num(q.get("y"))))
-            if known:
-                cx = sum(q[0] for q in known) / len(known)
-                cy = sum(q[1] for q in known) / len(known)
-            else:
-                cx, cy = start["x"], start["y"]
-            mine = poses.get(agent["id"]) or start
-            m["_offset"] = (_num(mine.get("x", start["x"])) - cx,
-                            _num(mine.get("y", start["y"])) - cy)
+        # This used to be computed per vehicle, lazily, from whichever peers
+        # happened to share the same destination at that instant. That works
+        # exactly until the fleet desynchronises - and it always does, because
+        # vehicles reach a waypoint at different times and move on to
+        # different legs. From then on each one computes its offset against a
+        # DIFFERENT peer set, so the centroids disagree and the slots stop
+        # being a partition of a shape. Measured: on a three-point patrol,
+        # car1 and car3 both ended up with offset (0, 0), drove to the same
+        # coordinate, and jammed against each other for the rest of the run
+        # while the mission sat at 33%.
+        #
+        # Captured for the whole group at once, so every vehicle's slot comes
+        # from the same centroid and the shape is a genuine partition.
+        _capture_slots(agent, poses, arena)
+        sx, sy = agent.get("_slot") or (0.0, 0.0)
 
-        ox, oy = m["_offset"]
+        # RIGID ROTATION, not translation. A formation that only translates
+        # keeps its wedge pointing north while the fleet drives east, which is
+        # not a formation, it is three vehicles holding a grid offset. Rotate
+        # the slot by the bearing the fleet is actually travelling on and the
+        # wedge points where it is going, a column stays nose-to-tail round a
+        # corner, and an echelon keeps its flank on the same side.
+        #
+        # The bearing is measured from the FLEET's centre to the goal, not
+        # from this vehicle's - so every member rotates by the same angle and
+        # the shape stays rigid. Each computes it from its own knowledge, so
+        # under jamming they can disagree slightly about where the centre is,
+        # which is the same disagreement a real formation suffers when its
+        # position reports go stale.
+        if m.get("rotate") is False:
+            ox, oy = sx, sy
+        else:
+            fx, fy = agent.get("_leg_from") or _fleet_centre(agent, poses)
+            if math.hypot(gx - fx, gy - fy) > 1e-6:
+                bearing = math.atan2(gy - fy, gx - fx)
+                agent["_leg_bearing"] = bearing
+            else:
+                # Degenerate leg (the fleet is already on the goal): keep the
+                # orientation it last had rather than snapping to east.
+                bearing = _num(agent.get("_leg_bearing"))
+            bearing -= _num(agent.get("_slot_ref"))
+            cb, sb = math.cos(bearing), math.sin(bearing)
+            ox, oy = sx * cb - sy * sb, sx * sb + sy * cb
+            # The room may not take the shape where the waypoint puts it.
+            # Move the whole shape until it fits - see _formation_fit.
+            dx, dy, k = _formation_fit(agent, arena, gx, gy, bearing)
+            agent["_formation_scale"] = round(k, 3)
+            ox, oy = ox * k + dx, oy * k + dy
         # THE SLOT MUST BE SOMEWHERE THE VEHICLE CAN ACTUALLY GET TO.
         #
         # A formation offset applied to a goal near a wall pushes that

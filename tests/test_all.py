@@ -33,6 +33,7 @@ import contextlib
 import io
 import math
 import os
+import random
 import sys
 import tempfile
 import time
@@ -2526,6 +2527,94 @@ def test_a_dual_band_vehicle_declares_two_radios_and_no_sensors():
           far < 1e-6, f"{far}")
 
 
+
+def test_a_formation_is_rigid_and_a_circuit_actually_loops():
+    """THE LAP BUG, AND THE THREE FAULTS UNDERNEATH IT.
+
+    Reported: "the cars went P1, P2, P1, and didn't make it to P3 or complete
+    the lap". The circuit arithmetic was never wrong - what was wrong was that
+    the fleet stopped being a fleet:
+
+      1. Each vehicle worked out its formation offset on its own, from
+         whichever peers shared its destination at that instant. Once they
+         desynchronised, two of three cars held offset (0, 0), drove at the
+         same coordinate and jammed.
+      2. Arrival was judged per vehicle against its own slot, so the member
+         at the back of the shape reported arriving seconds before the member
+         at the front and took the next leg alone.
+      3. A slot that fell outside the room was clamped, which put two slots
+         on nearly the same coordinate at a corner and froze the mission.
+
+    This is the whole chain in one run: a three-point, two-lap patrol has to
+    finish, every vehicle has to fly every leg, and the shape has to ROTATE
+    onto each leg rather than being carried round unturned.
+    """
+    print("\nA FORMATION IS RIGID, AND A CIRCUIT LOOPS")
+    arena, agents, links = st.load_scenario(str(REPO / "default_run.yaml"))
+    cars = [a for a in agents if a.get("platform") != "ground_station"
+            and not a.get("jammer")]
+    for a in cars:
+        st.install_plan(a, ["P1", "P2", "P3"], laps=2)
+        a["armed"] = True
+    poses = {a["id"]: dict(a["start"], speed=0.0) for a in agents}
+    rng = random.Random(1)
+    seen = {a["id"]: [] for a in cars}
+    for seq in range(900):
+        st.frame(seq * 0.1, 0.1, seq, arena, agents, links, poses, rng)
+        for a in cars:
+            to = (a.get("mission") or {}).get("to")
+            if to and (not seen[a["id"]] or seen[a["id"]][-1] != to):
+                seen[a["id"]].append(to)
+        if all(st.plan_state(a) == "complete" for a in cars):
+            break
+
+    score = st.mission_score(agents)
+    check("a three-point two-lap patrol completes for the WHOLE fleet",
+          score["complete"] == len(cars) and score["pass_frac"] == 1.0,
+          str(score))
+    check("...and the circuit loops P3 -> P1 rather than turning back",
+          all(v == ["P1", "P2", "P3", "P1", "P2", "P3"]
+              for v in seen.values()),
+          str(seen))
+    check("every vehicle holds a slot, and no two hold the same one",
+          len({tuple(a["_slot"]) for a in cars}) == len(cars),
+          str([a.get("_slot") for a in cars]))
+
+    # RIGID means the shape TURNS. Same fleet, two legs at right angles, both
+    # aimed well clear of the walls so nothing is clamped or shifted: the line
+    # the vehicles form must swing through the same right angle.
+    def _shape(goal):
+        for a in cars:
+            a["mission"] = {"type": "advance", "to": goal}
+            a["_leg_from"] = (0.0, 0.0)
+        return [st.mission_target(a, 0.0, poses, arena) for a in cars]
+
+    def _axis(tgts):
+        (ax, ay), (bx, by) = tgts[0], tgts[-1]
+        return math.degrees(math.atan2(by - ay, bx - ax))
+
+    arena["points"]["_E"] = {"x": 1.0, "y": 0.0, "z": 0.0}
+    arena["points"]["_N"] = {"x": 0.0, "y": 1.0, "z": 0.0}
+    east, north = _shape("_E"), _shape("_N")
+    turn = abs((_axis(north) - _axis(east) + 180) % 360 - 180)
+    check("the formation ROTATES onto the leg, it is not carried round flat",
+          abs(turn - 90.0) < 1.0, f"turned {turn:.1f} deg: {east} {north}")
+
+    # ...unless the mission says otherwise. Will's escape hatch: the shape is
+    # then merely translated, so every vehicle shifts by the SAME vector.
+    for a in cars:
+        a["mission"] = {"type": "advance", "to": "_E", "rotate": False}
+        a["_leg_from"] = (0.0, 0.0)
+    flat_e = [st.mission_target(a, 0.0, poses, arena) for a in cars]
+    for a in cars:
+        a["mission"] = {"type": "advance", "to": "_N", "rotate": False}
+    flat_n = [st.mission_target(a, 0.0, poses, arena) for a in cars]
+    shifts = {(round(e[0] - n[0], 6), round(e[1] - n[1], 6))
+              for e, n in zip(flat_e, flat_n)}
+    check("rotate: false keeps the old translated behaviour, on request",
+          shifts == {(1.0, -1.0)}, f"{shifts} {flat_e} {flat_n}")
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -2571,7 +2660,8 @@ if __name__ == "__main__":
                test_drift_that_makes_a_reported_arrival_untrue_is_a_failure,
                test_an_order_is_a_transmission_and_can_be_intercepted,
                test_setplan_is_the_mission_typed_and_is_gated_like_any_order,
-               test_a_mission_file_can_declare_a_plan):
+               test_a_mission_file_can_declare_a_plan,
+               test_a_formation_is_rigid_and_a_circuit_actually_loops):
         try:
             fn()
         except Exception:
