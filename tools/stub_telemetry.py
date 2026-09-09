@@ -1843,6 +1843,53 @@ def blocked(agent, nx, ny, poses, agents, arena):
 _ALL_AGENTS = []
 
 
+def formation_pace(agents, poses, t, arena):
+    """{agent id: speed scale in (0, 1]} - HOLD STATION, do not race.
+
+    Reported: "the cars need to maintain speed to stay in formation,
+    otherwise the formation breaks up". Exactly right, and it is a separate
+    thing from the shape being rigid. Each vehicle was driving at its own top
+    speed to its own slot, so the one with the shortest run arrived first and
+    stopped, and the shape only existed at the two instants when everybody
+    happened to be on station. Between waypoints it was three cars going the
+    same way.
+
+    A formation moves at the pace of its most distant member. Everyone is
+    given the speed that closes their own gap in the SAME time as the vehicle
+    with the furthest to go, so the shape is held all the way along the leg
+    rather than reassembled at the end of it. Capped by each vehicle's own
+    limit, never raised above it: this can only slow a vehicle down.
+
+    Nothing here is invented - it is the ratio of the distances the geometry
+    already produces, and the slowest vehicle's own performance figure.
+    """
+    groups = {}
+    for a in agents:
+        m = a.get("mission") or {}
+        if (m.get("type") != "advance" or not a.get("armed")
+                or a.get("_slot") is None):
+            continue
+        try:
+            tx, ty = mission_target(a, t, a.get("knowledge") or poses, arena)
+        except Exception:                                   # noqa: BLE001
+            continue
+        b = a.get("belief") or poses.get(a["id"]) or {}
+        d = math.hypot(tx - _num(b.get("x")), ty - _num(b.get("y")))
+        groups.setdefault((a.get("network"), m.get("to")), []).append(
+            (a["id"], d, max(_num(a.get("speed")), 0.05)))
+    pace = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue                      # one vehicle is not a formation
+        dmax = max(d for _i, d, _v in members)
+        vmin = min(v for _i, _d, v in members)
+        if dmax <= 1e-6:
+            continue
+        for aid, d, v in members:
+            pace[aid] = max(0.0, min(1.0, (vmin * d / dmax) / v))
+    return pace
+
+
 def step(agents, poses, t, dt, arena, unreachable=None,
          position_lost=None, drift_rates=None, rng=None):
     """Advance every agent one tick toward its mission target.
@@ -1878,6 +1925,9 @@ def step(agents, poses, t, dt, arena, unreachable=None,
         import random as _r
         rng = _r.Random()
     contacts = []
+    # STATION KEEPING, computed for the whole fleet before anyone moves - it
+    # is a property of the formation, not of one vehicle. See formation_pace.
+    pace = formation_pace(agents, poses, t + dt, arena)
     for a in agents:
         p = poses[a["id"]]
         px0, py0 = p["x"], p["y"]
@@ -1927,6 +1977,8 @@ def step(agents, poses, t, dt, arena, unreachable=None,
         accel = max(_num(a.get("max_accel"), 2.0), 0.05)
         # Slow down in time to stop at the target: v = sqrt(2*a*d).
         v_want = min(vmax, math.sqrt(max(2.0 * accel * dist, 0.0)))
+        # ...and never faster than the formation is travelling.
+        v_want = min(v_want, vmax * pace.get(a["id"], 1.0))
         v = _num(p.get("v"), 0.0)
         v += max(-accel * dt, min(accel * dt, v_want - v))
         v = max(0.0, min(v, vmax))
@@ -2339,8 +2391,57 @@ def publications_for(agent):
     return out
 
 
+def command_parents(networks, agents=None):
+    """WHO REPORTS TO WHOM, as one map, for every side at once.
+
+    Built once and consulted by BOTH routing and authority, because they used
+    to derive it separately and then disagree. Reported: a command tree of
+    car3 -> car2 -> car1 -> gcs drew a live comms link from car2 straight to
+    the ground station, contradicting the routing overlay drawn beside it.
+
+    The cause was an assumption that a hierarchy is exactly two levels deep.
+    Routing marked "every leader talks to the coordinator" - true of a flat
+    two-level tree, false the moment a leader reports to another leader. car2
+    was a member of car1's squad AND the leader of car3's, so it was given a
+    direct link to the hub and its link to car1 was marked spare, while the
+    authority code (which reads membership first) still had it commanded by
+    car1. Two subsystems, two different trees, one picture that cannot be
+    right.
+
+    One map fixes both. A member's parent is its leader; a leader's parent is
+    whoever claims IT, or the coordinator if nobody does. An explicit
+    `reports_to` on the agent wins over both, so a tree can be stated
+    directly. The coordinator has no parent - it is the root.
+    """
+    parents = {}
+    for _name, net in (networks or {}).items():
+        net = net or {}
+        coord = net.get("coordinator")
+        leaders = []
+        for _sq, spec in (net.get("squads") or {}).items():
+            spec = spec or {}
+            ldr = spec.get("leader")
+            if not ldr:
+                continue
+            leaders.append(ldr)
+            for m in (spec.get("members") or []):
+                if m and m != ldr:
+                    parents[m] = ldr
+        # A LEADER NOBODY ELSE CLAIMS answers to the coordinator. setdefault,
+        # not assignment: a leader that is also somebody's member keeps the
+        # parent it already has, which is the whole three-deep case.
+        for ldr in leaders:
+            parents.setdefault(ldr, coord)
+        if coord:
+            parents.pop(coord, None)
+    for a in (agents or []):
+        if a.get("reports_to"):
+            parents[a["id"]] = a["reports_to"]
+    return {k: v for k, v in parents.items() if v}
+
+
 def command_authority(agent, arena, links, poses, networks,
-                      link_states=None):
+                      link_states=None, _below=None):
     """Who decides for this agent right now, and can it be reached?
 
     ARCHITECTURE is not a label - it is the answer to "when the link to whoever
@@ -2442,21 +2543,37 @@ def command_authority(agent, arena, links, poses, networks,
         # Without this the hierarchy exists in the routing but not in the
         # authority, and every agent reports straight to the coordinator - a
         # hierarchy in name only.
-        leader = agent.get("reports_to")
-        if not leader:
-            for _sq, spec in (net.get("squads") or {}).items():
-                spec = spec or {}
-                if aid in (spec.get("members") or []):
-                    leader = spec.get("leader")
-                    break
-                if aid == spec.get("leader"):
-                    # A leader answers upward, not to itself.
-                    leader = net.get("coordinator")
-                    break
-        leader = leader or net.get("squad_leader") or net.get("coordinator")
+        parents = command_parents(networks, _ALL_AGENTS)
+        leader = (agent.get("reports_to") or parents.get(aid)
+                  or net.get("squad_leader") or net.get("coordinator"))
+        top = net.get("coordinator")
         if _reaches(leader):
-            tier = "coordinator" if leader == net.get("coordinator") else "leader"
-            return {"decider": leader, "reachable": True, "tier": tier}
+            # AND THE CHAIN ABOVE IT HAS TO HOLD. Reported: with a tiered
+            # hierarchy, car1 was held while car2 and car3 - which report
+            # THROUGH car1 - carried on as though commanded. They could still
+            # reach car1, and that was the whole test, so an orphaned relay
+            # went on handing down orders it no longer had.
+            #
+            # A subordinate is commanded when it can reach its leader AND its
+            # leader is itself commanded. The one exception is doctrinal
+            # rather than a fudge: a leader whose own link is gone but whose
+            # doctrine is `intent` is still executing the commander's intent
+            # and still commands its squad - centralized intent, decentralized
+            # execution (AJP-3 Ed D 3.8, 3.11). A `hold` leader has stopped,
+            # and a stopped relay commands nobody.
+            chain_ok = True
+            if leader != top and leader not in (_below or set()):
+                ldr = next((x for x in (_ALL_AGENTS or [])
+                            if x.get("id") == leader), None)
+                if ldr is not None:
+                    up = command_authority(ldr, arena, links, poses, networks,
+                                           link_states=link_states,
+                                           _below=(_below or set()) | {aid})
+                    chain_ok = (bool(up.get("reachable"))
+                                or keeps_going_on_link_loss(ldr))
+            if chain_ok:
+                tier = "coordinator" if leader == top else "leader"
+                return {"decider": leader, "reachable": True, "tier": tier}
         # Leader unreachable. DOCTRINE, declarable per network as `leader_loss`:
         #   fallback (default) - the squad reports up to the coordinator;
         #                        degraded, not decapitated.
@@ -2465,7 +2582,6 @@ def command_authority(agent, arena, links, poses, networks,
         # This is exactly the kind of command-resilience choice the framework
         # exists to let you compare - so it is a field, not a hard-coded rule.
         doctrine = (net.get("leader_loss") or "fallback").lower()
-        top = net.get("coordinator")
         if doctrine == "fallback" and top != leader and _reaches(top):
             return {"decider": top, "reachable": True, "tier": "coordinator"}
         return {"decider": leader, "reachable": False, "tier": "orphaned"}
@@ -2836,7 +2952,10 @@ def apply_routing(links, agents, networks, poses, world=None):
         for sq, spec in ((net or {}).get("squads") or {}).items():
             leader = (spec or {}).get("leader")
             for m in list((spec or {}).get("members") or []) + ([leader] if leader else []):
-                squads_of[m] = (sq, leader)
+                squads_of.setdefault(m, (sq, leader))
+    # THE COMMAND TREE ITSELF - the same map authority uses. See
+    # command_parents for why deriving it twice produced two different trees.
+    parents = command_parents(networks, agents)
 
     _rf = scene_rf(world)
     _jam = active_jammers(agents)
@@ -2852,11 +2971,12 @@ def apply_routing(links, agents, networks, poses, world=None):
         elif routing == "star":
             active = hub in (a, b)
         elif routing == "tiered":
-            sa, la = squads_of.get(a, (None, None))
-            sb, lb = squads_of.get(b, (None, None))
-            same_squad = sa is not None and sa == sb
-            leader_to_hub = hub in (a, b) and (a in (la, lb) or b in (la, lb))
-            active = bool(same_squad or leader_to_hub)
+            # TRAFFIC CLIMBS THE TREE. A tiered network carries exactly the
+            # reports-to edges: member to leader, leader to ITS leader, and
+            # only the top of the chain to the coordinator. Peers do not talk
+            # sideways and nobody skips a level - which is the point of
+            # tiering, and is what makes it partition contention.
+            active = (parents.get(a) == b) or (parents.get(b) == a)
         else:
             active = True
 

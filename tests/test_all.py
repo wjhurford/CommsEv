@@ -2580,6 +2580,45 @@ def test_a_formation_is_rigid_and_a_circuit_actually_loops():
           len({tuple(a["_slot"]) for a in cars}) == len(cars),
           str([a.get("_slot") for a in cars]))
 
+    # STATION KEEPING. Rigid is not only the shape - it is holding the shape
+    # WHILE MOVING. Each car driving at its own top speed to its own slot
+    # means the one with the shortest run arrives first and stops, so the
+    # formation exists only at the instants everybody happens to be on
+    # station. Measured as the spread of "how far is each car from its own
+    # commanded position" - averaged over a whole two-lap patrol, that spread
+    # should be small.
+    def _spread(paced):
+        saved = st.formation_pace
+        if not paced:
+            st.formation_pace = lambda *a_, **k_: {}
+        try:
+            ar, ag, lk = st.load_scenario(str(REPO / "default_run.yaml"))
+            cs = [a for a in ag if a.get("platform") != "ground_station"
+                  and not a.get("jammer")]
+            for a in cs:
+                st.install_plan(a, ["P1", "P2", "P3"], laps=2)
+                a["armed"] = True
+            ps = {a["id"]: dict(a["start"], speed=0.0) for a in ag}
+            rg = random.Random(1)
+            seen_ = []
+            for q in range(400):
+                st.frame(q * 0.1, 0.1, q, ar, ag, lk, ps, rg)
+                ds = [math.dist(st.mission_target(a, q * 0.1, ps, ar),
+                                (ps[a["id"]]["x"], ps[a["id"]]["y"]))
+                      for a in cs
+                      if (a.get("mission") or {}).get("type") == "advance"]
+                if len(ds) == len(cs):
+                    seen_.append(max(ds) - min(ds))
+                if all(st.plan_state(a) == "complete" for a in cs):
+                    break
+            return sum(seen_) / max(len(seen_), 1)
+        finally:
+            st.formation_pace = saved
+    held, raced = _spread(True), _spread(False)
+    check("the fleet holds station instead of racing to its own slots",
+          held < raced * 0.8,
+          f"mean spread {held:.2f} m held vs {raced:.2f} m racing")
+
     # RIGID means the shape TURNS. Same fleet, two legs at right angles, both
     # aimed well clear of the walls so nothing is clamped or shifted: the line
     # the vehicles form must swing through the same right angle.
@@ -2613,6 +2652,76 @@ def test_a_formation_is_rigid_and_a_circuit_actually_loops():
               for e, n in zip(flat_e, flat_n)}
     check("rotate: false keeps the old translated behaviour, on request",
           shifts == {(1.0, -1.0)}, f"{shifts} {flat_e} {flat_n}")
+
+
+
+def test_one_command_tree_serves_both_routing_and_authority():
+    """A THREE-DEEP CHAIN, and the two bugs it exposed.
+
+    Reported, with a screenshot: "I have car3 to car2 to car1 to gcs as the
+    route, yet there is still a comms link between car2 and gcs disagreeing
+    with the comms overlay" - and separately, "car1 was held before cars 2
+    and 3 despite them supposedly talking to gcs through car1, why is that?"
+
+    Both came from the same assumption: that a hierarchy is exactly two levels
+    deep. Routing marked "every leader talks to the coordinator", which is
+    true of a flat tree and false the moment a leader reports to another
+    leader. Authority tested only "can I reach my leader", which is true of an
+    orphaned relay too.
+    """
+    print("\nONE COMMAND TREE, FOR ROUTING AND FOR AUTHORITY")
+    ids = ["gcs", "car1", "car2", "car3"]
+    poses = {"gcs": {"x": 0, "y": -3, "z": 0, "yaw": 0},
+             "car1": {"x": -1, "y": 2, "z": 0, "yaw": 0},
+             "car2": {"x": -2, "y": 2, "z": 0, "yaw": 0},
+             "car3": {"x": -3, "y": 0.5, "z": 0, "yaw": 0}}
+    agents = [{"id": n, "network": "blue"} for n in ids]
+    st._ALL_AGENTS = agents
+    links = [{"a": ids[i], "b": ids[j], "network": "blue"}
+             for i in range(len(ids)) for j in range(i + 1, len(ids))]
+    net = {"routing": "tiered", "authority": "hierarchical", "coordinator": "gcs",
+           "squads": {"alpha": {"leader": "car1", "members": ["car2"]},
+                      "bravo": {"leader": "car2", "members": ["car3"]}}}
+
+    check("the tree is read the same way whoever asks",
+          st.command_parents({"blue": net}, agents)
+          == {"car2": "car1", "car3": "car2", "car1": "gcs"},
+          str(st.command_parents({"blue": net}, agents)))
+
+    out = st.apply_routing(links, agents, {"blue": net}, poses)
+    active = {frozenset((l["a"], l["b"])) for l in out if l["active"]}
+    check("tiered routing carries the chain and only the chain",
+          active == {frozenset(("gcs", "car1")), frozenset(("car1", "car2")),
+                     frozenset(("car2", "car3"))},
+          str(sorted(tuple(sorted(x)) for x in active)))
+    check("a mid-tier leader gets NO direct link to the coordinator",
+          frozenset(("gcs", "car2")) not in active)
+
+    # Cut the top link. The whole branch below it loses command in the SAME
+    # tick - an orphaned relay cannot hand down orders it never received.
+    states = {frozenset((l["a"], l["b"])):
+              {"state": l["state"], "active": l.get("active", True)}
+              for l in out}
+    states[frozenset(("gcs", "car1"))] = {"state": "down", "active": True}
+    auth = {a["id"]: st.command_authority(a, {}, links, poses, {"blue": net},
+                                          link_states=states) for a in agents}
+    check("cutting the top of the chain orphans the relay",
+          not auth["car1"]["reachable"])
+    check("...and everyone below it, in the same tick",
+          not auth["car2"]["reachable"] and not auth["car3"]["reachable"],
+          f"car2 {auth['car2']} car3 {auth['car3']}")
+    check("the coordinator itself is never orphaned",
+          auth["gcs"]["reachable"])
+
+    # THE DOCTRINAL EXCEPTION, and it is not a fudge. A leader acting on the
+    # commander's INTENT is still commanding its squad (AJP-3 3.8, 3.11).
+    for a in agents:
+        a["on_link_loss"] = "intent"
+    auth2 = {a["id"]: st.command_authority(a, {}, links, poses, {"blue": net},
+                                           link_states=states) for a in agents}
+    check("a leader executing INTENT still commands its squad",
+          auth2["car2"]["reachable"] and auth2["car3"]["reachable"],
+          f"car2 {auth2['car2']} car3 {auth2['car3']}")
 
 
 if __name__ == "__main__":
@@ -2661,7 +2770,8 @@ if __name__ == "__main__":
                test_an_order_is_a_transmission_and_can_be_intercepted,
                test_setplan_is_the_mission_typed_and_is_gated_like_any_order,
                test_a_mission_file_can_declare_a_plan,
-               test_a_formation_is_rigid_and_a_circuit_actually_loops):
+               test_a_formation_is_rigid_and_a_circuit_actually_loops,
+               test_one_command_tree_serves_both_routing_and_authority):
         try:
             fn()
         except Exception:
