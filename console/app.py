@@ -3192,7 +3192,14 @@ class CustomFleetDialog(QDialog):
                  "colour": network_colour(self.side),
                  "pose": {"x": num(2), "y": num(3), "z": num(4),
                           "yaw": num(5)}}
-            for key in ("dimensions", "performance", "sensors", "ghost"):
+            # EVERY HARDWARE KEY THE AGENT FILE CARRIES. `radio` and `radios`
+            # were missing, so a fleet built in the Console had no radios at
+            # all and the Comms tab correctly reported "no radio - cannot be
+            # commanded" for every vehicle in it. The list is now the whole
+            # set that appears in agents/*.yaml, so adding a hardware key to
+            # an agent file cannot silently fail to reach a built fleet.
+            for key in ("dimensions", "performance", "sensors", "ghost",
+                        "radio", "radios"):
                 if spec_doc.get(key) is not None:
                     a[key] = copy.deepcopy(spec_doc[key])
             # EMITTERS. The agent file says how many radios are fitted and
@@ -4008,6 +4015,10 @@ class ExperimentWindow(QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.cellDoubleClicked.connect(self.replay_row)
+        # ONE CLICK LIGHTS THE CURVE, two runs it. The table and the chart are
+        # the same nine configurations twice over, and until they were linked
+        # you had to find your row's line by eye among nine.
+        self.table.cellClicked.connect(self._light_row)
         lay.addWidget(self.table, 3)
 
         hint = QLabel("Double-click a row to re-run that exact cell and watch "
@@ -4264,6 +4275,20 @@ class ExperimentWindow(QDialog):
             if self.console is not None:
                 self.console.say(f"summary chart: {exc}")
 
+    def _light_row(self, row, _col=0):
+        """Light this row's configuration on the summary chart."""
+        shown = getattr(self, "_table_rows", None) or self.rows
+        if row < 0 or row >= len(shown) or self.console is None:
+            return
+        varying = getattr(self.console, "_sweep_varying", [])
+        metric = (self.metric_combo.currentData()
+                  if hasattr(self, "metric_combo") else "penetration_m")
+        path = (f"agents."
+                f"{self.console._series_id(shown[row], varying)}.{metric}")
+        self.summary.selected = (None if self.summary.selected == path
+                                 else path)
+        self.summary.refresh()
+
     def open_svg(self):
         """Render the current results to SVG and open it."""
         import webbrowser
@@ -4297,6 +4322,41 @@ class ExperimentWindow(QDialog):
             self.console.say(f"chart written to {out}")
 
     # -- playback ----------------------------------------------------------
+    @staticmethod
+    def _compose_from_file(cfg):
+        """The composition a saved experiment describes: scene, fleets,
+        points, spawns and doctrine, in the shape the Console runs.
+
+        Deliberately the same fields sweep.build() reads, so a replay cannot
+        drift away from the cell it is replaying.
+        """
+        if not cfg.get("scene"):
+            return None
+        fleets = [cfg["blue_fleet"]] if cfg.get("blue_fleet") else []
+        if cfg.get("red_fleet"):
+            fleets.append(cfg["red_fleet"])
+        compose = {"scene": cfg["scene"], "fleets": fleets}
+        if cfg.get("points"):
+            compose["points"] = copy.deepcopy(cfg["points"])
+        agents = []
+        for aid, xy in (cfg.get("spawns") or {}).items():
+            pose = {k: float(v) for k, v in (xy or {}).items()}
+            pose.setdefault("z", 0.0)
+            pose.setdefault("yaw", 0.0)
+            agents.append({"id": aid, "pose": pose})
+        # DOCTRINE IS PER VEHICLE and the file states it for all of them.
+        # Written per agent rather than as a network default because that is
+        # where the model reads it, and because a later experiment will want
+        # to vary it per squad.
+        doct = cfg.get("doctrine")
+        if doct:
+            by = {a["id"]: a for a in agents}
+            for aid in (cfg.get("spawns") or {}):
+                by[aid]["on_link_loss"] = doct
+        if agents:
+            compose["agents"] = agents
+        return compose
+
     def replay_row(self, row, _col):
         """Open this cell AS A LIVE RUN, not as a recording.
 
@@ -4321,10 +4381,24 @@ class ExperimentWindow(QDialog):
         try:
             compose = copy.deepcopy(cfg.get("compose") or {})
             if not compose:
-                self.bar.setFormat(
-                    "this experiment came from a file, so there is no "
-                    "composition to replay live - run it from the Setup tab")
-                return
+                # A FILE EXPERIMENT COMPOSES LIKE ANY OTHER. It used to refuse
+                # here - "run it from the Setup tab" - which made a saved
+                # experiment a table of numbers with nothing behind it:
+                # reported as "if I run an experiment from a set file I want
+                # it to operate the same as if I had run it at a setup level;
+                # right now I can't select a series or watch a run, so the
+                # results almost mean nothing".
+                #
+                # There is nothing special about a file. It names a scene, a
+                # blue fleet, a red fleet, its own points and its own spawns,
+                # which is exactly the composition the Setup tab produces -
+                # and it is exactly what sweep.build() assembles to run the
+                # cell in the first place. Built the same way here, so the
+                # replay is the same run by the same path.
+                compose = self._compose_from_file(cfg)
+                if compose is None:
+                    self.bar.setFormat("this experiment names no scene to run")
+                    return
             nets = compose.setdefault("networks", {})
             blue = nets.setdefault("blue", {})
             blue["authority"] = blue["topology"] = r.get("authority")
@@ -4962,6 +5036,16 @@ class Console(QMainWindow):
         elay = QVBoxLayout(self.exp_box)
         elay.setContentsMargins(0, 6, 0, 0)
         elay.setSpacing(4)
+        # THE BUTTON FIRST. It was at the bottom of a panel long enough to
+        # scroll, so the one control everything else exists to feed was the
+        # one you had to go looking for. The run COUNT stays down there with
+        # the axes, because that is arithmetic about the axes and it belongs
+        # beside them.
+        expb = QPushButton("Run the experiment...")
+        expb.setToolTip("Sweep, then double-click any result to watch that "
+                        "exact run play out.")
+        expb.clicked.connect(self.open_experiment)
+        elay.addWidget(expb)
         elay.addWidget(QLabel("Jammer advantage P_j/P_t (dB)"))
         self.exp_power_axis = AxisRange(
             0.0, 30.0, 7, unit="dB", decimals=1, lo_min=-60.0, hi_max=120.0,
@@ -5021,11 +5105,6 @@ class Console(QMainWindow):
         self.lbl_runs.setMinimumHeight(
             3 * self.lbl_runs.fontMetrics().height() + 4)
         elay.addWidget(self.lbl_runs)
-        expb = QPushButton("Run the experiment...")
-        expb.setToolTip("Sweep, then double-click any result to watch that "
-                        "exact run play out.")
-        expb.clicked.connect(self.open_experiment)
-        elay.addWidget(expb)
         slay.addWidget(self.exp_box)
         self.exp_box.setVisible(False)
 
@@ -5146,11 +5225,11 @@ class Console(QMainWindow):
 
         self.tabs = QTabWidget()
         # The sidebar renders in the order added, top to bottom: Setup
-        # (compose the run: scene, fleet, spawns), Overview (what things
+        # (compose the run: scene, fleet, spawns), System (what each side
         # are), Mission (what they are doing), then the analysis tabs
         # Comms, Contested, Results.
         self.tabs.addTab(setup, "Setup")
-        self.tabs.addTab(self.tab_scn, "Overview")
+        self.tabs.addTab(self.tab_scn, "System")
         self.tabs.addTab(self.tab_msn, "Mission")
         self.tabs.addTab(network, "Network")
         self.tabs.addTab(comms, "Comms")
@@ -5924,6 +6003,9 @@ class Console(QMainWindow):
                    if c != xkey
                    and len({r.get(c) for r in rows if r.get(c) not in
                             (None, "")}) > 1]
+        # Kept, so a row in the results table can work out which series on the
+        # chart is its own - see ExperimentDialog._light_row.
+        self._sweep_varying = list(varying)
         frames = []
         for x in xs:
             agents = []
@@ -7022,10 +7104,11 @@ class Console(QMainWindow):
                 n.setDisabled(True)
         self.tab_env.expandAll()
 
-        # OVERVIEW and MISSION share one hierarchy - system > network > agents -
-        # and differ only in what hangs off each agent. Overview shows the
-        # agent's EQUIPMENT (its sensors); Mission shows its OBJECTIVE. Building
-        # both from one helper keeps them from drifting apart.
+        # SYSTEM and MISSION share one hierarchy - system > network > agents -
+        # and differ only in what hangs off each agent. System shows what each
+        # side IS MADE OF (sensors, radios, and a slot for algorithms); Mission
+        # shows what it is DOING. Building both from one helper keeps them from
+        # drifting apart.
         self._build_agent_tree(self.tab_scn, leaf="equipment")
         self._build_agent_tree(self.tab_msn, leaf="objective")
         self._build_contested_baseline()
@@ -7049,11 +7132,11 @@ class Console(QMainWindow):
     def _build_agent_tree(self, tree, leaf):
         """Fill one tree with Mission > system > network > agents > <leaf>.
 
-        leaf = 'equipment' hangs each agent's sensors under it (the Overview
-        answer: what the agent IS). leaf = 'objective' hangs the agent's current
-        objective under it (the Mission answer: what the agent is DOING). Nothing
-        about hardware appears in the objective tree, and no objective appears in
-        the equipment tree."""
+        leaf = 'equipment' hangs each agent's sensors, radios and algorithms
+        under it (the System answer: what the agent IS). leaf = 'objective'
+        hangs the agent's current objective under it (the Mission answer: what
+        it is DOING). Nothing about hardware appears in the objective tree, and
+        no objective appears in the equipment tree."""
         view = self.resolved or self.doc
         if leaf == "objective":
             self._objective_rows = {}
@@ -7069,10 +7152,12 @@ class Console(QMainWindow):
             root = QTreeWidgetItem(tree, [f"Mission: {self._mission_name or 'UNASSIGNED'}"])
             self._mission_root_item = root
         else:
-            # Overview is equipment - what's in this scenario, not what it's
-            # tasked to do. Was headed "Mission: X" too, which is backwards:
-            # tasking has no business labelling the equipment view.
-            root = QTreeWidgetItem(tree, [f"Scenario: {mission_name or 'Custom'}"])
+            # THE SYSTEM VIEW, and it has no root above the systems. It was
+            # headed "Scenario: <name>", which put a run-level word at the top
+            # of a hardware tree and pushed everything down a level for
+            # nothing. What this tree is FOR is: here are the sides, here is
+            # what each of them is made of. So the systems are the top level.
+            root = tree
         agents = view.get("agents") or []
         networks = view.get("networks") or {}
         placed = set()
@@ -7113,12 +7198,63 @@ class Console(QMainWindow):
                         first = QTreeWidgetItem(
                             h, [f"t=0.0  {_objective_label(obj)}   (initial)"])
                         first.setDisabled(True)
-                    else:  # equipment
-                        for j, sen in enumerate(agent.get("sensors") or []):
+                    else:  # equipment - WHAT THIS AGENT IS MADE OF
+                        sens = agent.get("sensors") or []
+                        sfold = QTreeWidgetItem(
+                            a, [f"sensors ({len(sens)})" if sens
+                                else "sensors   (none fitted)"])
+                        if not sens:
+                            sfold.setDisabled(True)
+                        for j, sen in enumerate(sens):
                             it = QTreeWidgetItem(
-                                a, [f"{sen.get('id')}  ({sen.get('type')})"])
+                                sfold, [f"{sen.get('id')}  ({sen.get('type')})"])
                             it.setData(0, Qt.UserRole,
                                        ("node", ["agents", i, "sensors", j]))
+                        # RADIOS BY NAME, on the agent that carries them.
+                        # They were listed once at the bottom of the tree,
+                        # detached from whoever was fitted with them, which
+                        # is how a fleet with no radios at all went unnoticed
+                        # until the Comms tab said "no radio" four times.
+                        rfold = QTreeWidgetItem(a, ["radios"])
+                        rad = agent.get("radio")
+                        names = list(agent.get("radios") or [])
+                        if rad:
+                            tx = (rad.get("tx_power") or {})
+                            txv = tx.get("value") if isinstance(tx, dict) \
+                                else tx
+                            bd = (rad.get("band") or {})
+                            bdv = bd.get("value") if isinstance(bd, dict) \
+                                else bd
+                            lab = "radio"
+                            if bdv:
+                                lab += f"  {_num(bdv):.0f} MHz"
+                            if txv is not None:
+                                lab += f"  {_num(txv):.0f} dBm"
+                            ri = QTreeWidgetItem(rfold, [lab])
+                            ri.setData(0, Qt.UserRole,
+                                       ("node", ["agents", i, "radio"]))
+                        for rn in names:
+                            QTreeWidgetItem(rfold, [str(rn)])
+                        if agent.get("jammer"):
+                            j_ = agent["jammer"]
+                            jb = (j_.get("band") or {})
+                            jbv = jb.get("value") if isinstance(jb, dict) \
+                                else jb
+                            QTreeWidgetItem(
+                                rfold, [f"emitter  {_num(jbv):.0f} MHz"])
+                        if not (rad or names or agent.get("jammer")):
+                            rfold.setText(0, "radios   (NONE - cannot be "
+                                             "commanded)")
+                            rfold.setDisabled(True)
+                        # ALGORITHMS. Empty on purpose and named on purpose:
+                        # what a vehicle RUNS is the third thing it is made
+                        # of, alongside what it can sense and what it can
+                        # say, and leaving the slot visible is how it gets
+                        # filled rather than forgotten. Nothing is invented
+                        # here - when a planner, a SLAM front end or a
+                        # consensus rule exists in the model it hangs here.
+                        alg = QTreeWidgetItem(a, ["algorithms   (none yet)"])
+                        alg.setDisabled(True)
 
         loose = [i for i in range(len(agents)) if i not in placed]
         if loose:
@@ -7127,15 +7263,24 @@ class Console(QMainWindow):
                 a = QTreeWidgetItem(orphan, [agents[i].get("id", "?")])
                 a.setData(0, Qt.UserRole, ("agent", ["agents", i]))
 
-        # Radios belong to the equipment view only - they are hardware, not
-        # tasking.
-        if leaf == "equipment":
-            radios = QTreeWidgetItem(tree, ["Radios"])
+        # A scene-level radios block, if one is declared. Per-agent radios now
+        # hang off the agent that carries them, which is where they belong;
+        # this is only the shared catalogue some older scenes define.
+        if leaf == "equipment" and (view.get("radios") or {}):
+            radios = QTreeWidgetItem(tree, ["Radio types declared by the scene"])
             for name in (view.get("radios") or {}):
                 r = QTreeWidgetItem(radios, [name])
                 r.setData(0, Qt.UserRole, ("node", ["radios", name]))
 
         tree.expandAll()
+        if leaf == "equipment":
+            # Opened to the systems and their networks; the agents' own
+            # equipment is one click away rather than thirty rows of it.
+            for i_ in range(tree.topLevelItemCount()):
+                top_ = tree.topLevelItem(i_)
+                for j_ in range(top_.childCount()):
+                    for k_ in range(top_.child(j_).childCount()):
+                        top_.child(j_).child(k_).setExpanded(False)
 
     def show_static_scene(self):
         """The scene as the file defines it, before any run.
