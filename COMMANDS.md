@@ -117,37 +117,74 @@ do, and only then set it going.
 **Cell: BLUE only.** Missions are a blue-side action; the red cell is refused.
 
 ```
-SETMISSION test             load missions/test.yaml and distribute it
-SETMISSION <name>           any file in missions/<name>.yaml
-SETMISSION <name> to <PT>   the same file, aimed at a point THIS scene defines
+SETMISSION <name>                  any file in missions/<name>.yaml
+SETMISSION <name> to <P1>          one goal
+SETMISSION <name> to <P1> <P2>     as many as the mission asks for
 ```
 
-### `to <POINT>` — why a mission is not welded to one scene
+### A mission says how many goals it needs, not where they are
 
-A mission names a point; a **scene** defines the points. `missions/advance.yaml`
-says `to: FAR`, and `FAR` exists only in the corridor — so that one mission,
-which the whole experiment programme is built on, could only ever run on one
-scene. Pointed at any other, it did not fail loudly: it tasked **nobody**, and
-produced a table of vehicles that had not moved.
+This is the important one, and it replaces the old behaviour completely.
 
-`to <POINT>` re-points every `advance` objective in the file at a point the
-current scene actually declares, so one one-line mission runs anywhere:
+`missions/advance.yaml` used to say `to: FAR`. `FAR` existed only in the
+corridor, so the one mission the whole experiment programme is built on could
+run on exactly one scene — and pointed at any other it did not fail loudly, it
+tasked **nobody** and produced a table of vehicles that had not moved. Worse,
+it let whoever wrote the *scene* decide the *objective*.
+
+A mission now declares a **count**:
+
+```yaml
+plan: {who: all, goals: 2, laps: 4}    # a shuttle needs two ends
+```
+
+and the run says where they are — from the Setup tab's goal pickers, which
+grow and shrink to match the mission you chose, or from the terminal:
 
 ```
-SETMISSION advance to FAR   corridor_200m
-SETMISSION advance to B     open_field - same file, no edit
+SETMISSION advance to P1        corridor
+SETMISSION advance to B         open_field — same file, no edit
+SETMISSION shuttle to P1 P2     two goals, because shuttle asks for two
 ```
 
-A goal the scene does not define is refused, and the refusal lists the points
-it does have. An `advance` with **no** destination is left alone by `to`,
-because that form means "go forward until a wall or until you lose command"
-and has no goal to overwrite.
+Giving too few is refused, naming what was needed: a two-goal shuttle handed
+one point is not a shorter shuttle, it is a vehicle sitting on a waypoint. A
+point the scene does not have is refused, and the refusal lists the ones it
+does. `forward` asks for none and is left alone by any goal offered to it.
 
-In an **experiment** the goal is a dropdown on the Setup tab, populated from
-the chosen scene's own points. Penetration is then measured along the line
-from where the fleet started to that point — the same number as before on the
-corridor, and a meaningful one on a scene that does not happen to run
-east-west.
+### Where points come from now
+
+**Scenes no longer ship objectives.** `corridor_200m` declares no points at
+all. `HOME`, `FAR`, `APEX`, `WINGL` and `WINGR` were every one of them an
+objective in disguise — `APEX`/`WINGL`/`WINGR` were a wedge's formation slots
+hardcoded into the room it happened to be standing in, which is exactly what
+formations-as-functions removed.
+
+Points are created where they are decided: **Setup → Add point**, typed as
+coordinates and then draggable on the map. They are named `P1`, `P2`, … and
+they ride with the composed run, so what a result was measured against is
+recorded alongside it.
+
+A scene *may* still declare points — `lab_box` and `open_field` keep `A`–`F`,
+because those lanes are the fixed geometry of a benchmark that has to be
+identical every time. That is a scene making a claim about itself. A corridor
+claiming to know where you want to go is not the same thing.
+
+Penetration is measured along the line from where the fleet started to the
+**first** goal, so it means the same thing on any scene rather than only on an
+east-west corridor.
+
+### Everything placed by hand lands on whole metres
+
+Drags, formations and typed points all snap to the nearest metre. A drag
+produces whatever fraction the mouse happened to be on — `2.6371` — and those
+numbers propagate into the composed run, the CSV and every figure downstream,
+where they read as precision that was never measured. A formation set up by
+eye is not accurate to a tenth of a millimetre and should not claim to be.
+
+The model is untouched: `formation_offsets` still returns exact geometry, so a
+circle is still a circle. Only the coordinates a human put there are rounded,
+at the moment they are written.
 
 Applies that mission file's per-agent objectives to the running fleet and
 titles the run with its name, so results come out as

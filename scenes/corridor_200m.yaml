@@ -44,13 +44,23 @@ background:
   wind:
     speed: {value: 0.0, unit: "m/s", source: ""}
 
-points:
-  # The corridor runs -100 -> +100 in scene coordinates; HOME and FAR are the
-  # two ends. Penetration depth is measured from HOME, so "reached FAR" is a
-  # complete success at 195 m advanced.
-  HOME: {x: -95.0, y: 0.0}
-  FAR:  {x:  95.0, y: 0.0}
-  # Formation slots for the wedge: apex forward, two abreast behind.
-  APEX:  {x: -89.0, y:  0.0}
-  WINGL: {x: -93.0, y:  3.0}
-  WINGR: {x: -93.0, y: -3.0}
+# NO POINTS. Deliberately.
+#
+# A scene is the WORLD - its geometry, its walls, its radio background. Where
+# you decide to send a fleet inside it is a decision about THIS RUN, and it
+# belongs to whoever is running it, not to whoever wrote the scene.
+#
+# This file used to name HOME, FAR, APEX, WINGL and WINGR, and every one of
+# them was really an objective in disguise. APEX/WINGL/WINGR were a wedge's
+# formation slots - a fleet's shape, hardcoded into the room it happens to be
+# standing in, which is exactly what formations-as-functions removed. HOME and
+# FAR were the ends of one particular mission.
+#
+# Points are now created where they are decided: Setup -> Add point, typed or
+# dragged, named P1, P2, ... They ride with the composed run, so what a result
+# was measured against is recorded with it.
+#
+# A scene MAY still declare points - lab_box and open_field keep A..F, because
+# those lanes are the fixed geometry of a benchmark that has to be identical
+# every time. That is a scene making a claim about itself, which is fine. A
+# corridor claiming to know where you want to go is not.

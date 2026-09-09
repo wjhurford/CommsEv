@@ -830,19 +830,64 @@ def arrival_tolerance_m(agent):
 def plan_from_mission(doc):
     """The plan a mission file declares, normalised, or None.
 
-        plan: {waypoints: [A, B], laps: 4}
+        plan: {goals: 2, laps: 4}          <- how MANY points it needs
+        plan: {waypoints: [A, B], laps: 4} <- or exactly which ones
 
-    An `advance` objective with a destination is ALSO a plan - one waypoint,
-    one lap - so that every terminating mission has an end that can be scored
-    the same way, rather than penetration being a special case with its own
-    private notion of arrival.
+    A MISSION SAYS HOW MANY GOALS IT NEEDS. IT DOES NOT SAY WHERE THEY ARE.
+
+    That is the whole correction. `advance to FAR` welded one mission to one
+    scene - the only one with a point by that name - and, worse, it made the
+    scene author decide the objective. A scene is the world; where you choose
+    to send a fleet inside it is a decision about this run, and it belongs to
+    whoever is running it.
+
+    So `goals: 2` means "a shuttle needs two ends, you say which" and the
+    points are bound at assignment time, from the Console's goal pickers or
+    from `SETMISSION <name> to P1 P2`. The same shuttle then runs on any scene
+    with any two points, and there is nothing to edit to move it.
+
+    `waypoints:` is still accepted for a mission deliberately welded to named
+    points - a saved benchmark whose whole purpose is to be identical every
+    time.
     """
     plan = doc.get("plan")
-    if isinstance(plan, dict) and plan.get("waypoints"):
+    if not isinstance(plan, dict):
+        return None
+    who = str(plan.get("who", "all"))
+    laps = max(int(plan.get("laps", 1)), 1)
+    if plan.get("waypoints"):
         return {"waypoints": [str(w) for w in plan["waypoints"]],
-                "laps": max(int(plan.get("laps", 1)), 1),
-                "who": str(plan.get("who", "all"))}
+                "goals": len(plan["waypoints"]), "laps": laps, "who": who}
+    try:
+        n = int(plan.get("goals", 0))
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0:
+        return {"waypoints": None, "goals": n, "laps": laps, "who": who}
     return None
+
+
+def mission_goal_count(path):
+    """How many points this mission file needs, for the Console's pickers.
+
+    0 means it names its own (or has no plan at all), so nothing has to be
+    chosen. Read from the file rather than inferred, so adding a mission needs
+    no code.
+    """
+    try:
+        doc = _load_yaml(path) or {}
+    except OSError:
+        return 0
+    plan = plan_from_mission(doc)
+    if not plan:
+        # An `advance` objective with a destination still needs somewhere to
+        # go, and the goal picker is where that is now chosen.
+        for obj in (doc.get("objectives") or {}).values():
+            if isinstance(obj, dict) and obj.get("do") == "advance" \
+                    and "to" in obj:
+                return 1
+        return 0
+    return 0 if plan["waypoints"] else int(plan["goals"])
 
 
 def install_plan(agent, waypoints, laps=1):
@@ -2963,7 +3008,7 @@ def _is_taskable(agent, networks):
 
 
 def apply_mission_file(path, agents_by_id, points, arena,
-                       links=None, poses=None, goal=None):
+                       links=None, poses=None, goal=None, goals=None):
     """SETMISSION: distribute a mission file's per-agent objectives onto the
     currently running agent set, gated by command authority.
 
@@ -3027,10 +3072,16 @@ def apply_mission_file(path, agents_by_id, points, arena,
                     and _mobile(body)]
         return None
 
-    if goal and goal not in (points or {}):
-        return [], [f"SETMISSION: goal '{goal}' is not a point in this scene; "
-                    f"it defines {', '.join(sorted(points or {})) or 'none'}"], \
-               None
+    # THE GOALS THIS RUN CHOSE. `goal=` is the one-point form kept for the
+    # penetration path; `goals=` is the list, one per slot the mission asked
+    # for. A mission says how many it needs; this says where they are.
+    picked = [g for g in (list(goals) if goals else ([goal] if goal else []))
+              if g]
+    bad = [g for g in picked if g not in (points or {})]
+    if bad:
+        return [], [f"SETMISSION: {'point' if len(bad) == 1 else 'points'} "
+                    f"{', '.join(bad)} not on this map; it defines "
+                    f"{', '.join(sorted(points or {})) or 'none'}"], None
 
     # A PLAN, IF THE MISSION DECLARES ONE. The plan is the mission: waypoints
     # and how many times round. The objective each vehicle is actually handed
@@ -3038,11 +3089,26 @@ def apply_mission_file(path, agents_by_id, points, arena,
     # advance_plans. A mission file that declares a plan does not need to write
     # objectives at all.
     plan = plan_from_mission(doc)
-    if plan and goal:
-        # The goal re-points a single-waypoint plan the same way it re-points
-        # an advance; a multi-leg circuit has no single destination to move.
-        if len(plan["waypoints"]) == 1:
-            plan["waypoints"] = [goal]
+    if plan:
+        want = int(plan["goals"])
+        if plan["waypoints"] is None:
+            # THE MISSION ASKED FOR N POINTS AND THIS RUN SUPPLIES THEM. Too
+            # few is a loud refusal rather than a mission quietly flown with
+            # half a circuit - a two-point shuttle given one point is not a
+            # shorter shuttle, it is a vehicle sitting on a waypoint.
+            if len(picked) < want:
+                return [], [
+                    f"SETMISSION: '{mission_name}' needs {want} "
+                    f"point{'s' if want != 1 else ''} and {len(picked)} "
+                    f"{'was' if len(picked) == 1 else 'were'} given. "
+                    f"Choose them in Setup, or type "
+                    f"'SETMISSION {mission_name} to "
+                    f"{' '.join(f'P{i + 1}' for i in range(want))}'."], None
+            plan["waypoints"] = picked[:want]
+        elif picked and len(plan["waypoints"]) == 1:
+            # A one-waypoint plan is re-pointed by a chosen goal, which is how
+            # penetration moves between scenes.
+            plan["waypoints"] = picked[:1]
 
     raw = dict(doc.get("objectives") or {})
     if plan and not raw:
@@ -3067,9 +3133,9 @@ def apply_mission_file(path, agents_by_id, points, arena,
         # RE-POINT THE DESTINATION AT THIS SCENE. See the docstring: a mission
         # names a point, a scene defines them, and welding the two together is
         # what confined every experiment to the one corridor.
-        if goal and block.get("type") == "advance" \
+        if picked and block.get("type") == "advance" \
                 and block.get("to") is not None:
-            block["to"] = goal
+            block["to"] = picked[0]
         if aid not in agents_by_id:
             messages.append(f"SETMISSION: '{aid}' is not in the running "
                             f"scene - it will not appear")
@@ -3182,7 +3248,10 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                                     at a time as each is reached, so the
                                     mission can be PASSED or FAILED and a run
                                     scores what fraction of the fleet passed
-        SETMISSION <name-or-path>   set the run's mission: apply the file's
+        SETMISSION <name-or-path> [to <P1> <P2> ...]
+                                    set the run's mission. A mission declares
+                                    how many goals it needs; `to` says where
+                                    they are, so one file runs on any scene
                                     objectives, gated by command authority
                                     (an unreachable agent is not retasked),
                                     and title the run with its name
@@ -3389,22 +3458,24 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
             continue
 
         if verb0 == "SETMISSION" and len(head) == 2:
-            # SETMISSION <name>             the mission as written
-            # SETMISSION <name> to <POINT>  the same mission, re-pointed at a
-            #                               point THIS scene defines
-            # The second form is what makes one mission file portable across
-            # scenes without anybody opening a YAML to change a destination.
+            # SETMISSION <name>                    the mission as written
+            # SETMISSION <name> to <P>             one goal
+            # SETMISSION <name> to <P1> <P2> ...   as many as it asks for
             #
-            # Split from the RIGHT, not the left: a mission may be given as a
-            # path, and a path may contain spaces. Only a trailing "to <word>"
-            # is a goal; everything before it is the reference, whatever is
-            # in it.
+            # A mission says HOW MANY goals it needs; this says where they
+            # are. That is what makes one mission file run on any scene with
+            # no destination written into it anywhere.
+            #
+            # Everything after the LAST bare "to" is the goal list, so a
+            # mission given as a path with spaces in it still parses.
             rest = head[1].strip()
-            goal_pt = None
+            goal_pts = []
             parts = rest.split()
-            if len(parts) >= 3 and parts[-2].upper() == "TO":
-                goal_pt = parts[-1]
-                rest = " ".join(parts[:-2])
+            idx = max((i for i, tk in enumerate(parts)
+                       if tk.upper() == "TO" and i > 0), default=None)
+            if idx is not None and idx + 1 < len(parts):
+                goal_pts = parts[idx + 1:]
+                rest = " ".join(parts[:idx])
             ref = rest
             mpath = Path(ref)
             if mpath.parent == Path(".") and not mpath.suffix:
@@ -3413,7 +3484,7 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                 mpath = REPO_ROOT / mpath
             file_changed, messages, mission_name = apply_mission_file(
                 mpath, agents_by_id, points, arena, links=links, poses=poses,
-                goal=goal_pt)
+                goals=goal_pts)
             for msg in messages:
                 print(msg, file=sys.stderr)
             if mission_name and file_changed:

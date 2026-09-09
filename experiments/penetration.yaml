@@ -87,4 +87,13 @@ squads:
 coordinator: gcs
 leader_loss: fallback
 
+# THE POINTS THIS EXPERIMENT USES. They live here, not in the scene: a scene is
+# the world, and where you send a fleet inside it is a decision about this run.
+# An experiment file is a complete run configuration, so declaring its own
+# geometry is exactly what it is for - and it means this file still reproduces
+# the headline result on its own, months later, with nothing else to set up.
+points:
+  START: {x: -95.0, y: 0.0}     # the ground station end
+  FAR:   {x:  95.0, y: 0.0}     # the far end of the corridor
+
 goal: FAR                       # complete success = every vehicle reaches it

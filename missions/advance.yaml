@@ -1,31 +1,23 @@
 # =============================================================================
 # Deadband MISSION — advance
 # =============================================================================
-# ONE LINE. NO AGENT NAMES. NO FLEET SIZE.
+# ONE GOAL. THE MISSION DOES NOT SAY WHERE IT IS.
 #
-# `all` is every mobile vehicle, whatever the fleet calls them and however
-# many there are. `advance` moves THE FLEET so its centre lands on FAR, with
-# each vehicle holding its offset from the formation's centre - so a wedge
-# stays a wedge, a column stays a column, and the shape you spawned is the
-# shape that advances.
+# `goals: 1` means "this mission needs one point; you say which". It used to
+# say `to: FAR`, which welded it to the one scene that had a point by that
+# name and, worse, let the scene author decide the objective.
 #
-# This replaces a mission that wrote a lane per vehicle. That version only
-# ever fitted a fleet of exactly three, in exactly that arrangement; change
-# the fleet and it tasked nobody. Nothing here is hardcoded to a fleet.
+# `advance` moves THE FLEET so its centre lands on the goal, with each vehicle
+# holding its offset from the formation's centre - so a wedge stays a wedge, a
+# column stays a column, and the shape you spawned is the shape that advances.
+# Nothing here is hardcoded to a fleet size, a fleet's names, or a scene.
 #
-# Drop the `to:` and it becomes "go forward until something stops you" - a
-# wall, or losing your commander. Both forms are in COMMANDS.md.
+# It is a MISSION, not an objective: one lap of one point, so it has an end
+# and can be passed or failed. The penetration experiment is this file.
 #
-# `FAR` IS A DEFAULT, NOT A COMMITMENT. FAR is a point in the corridor scene;
-# another scene will not have one. Aim this same file anywhere:
-#
-#     SETMISSION advance to B          (a point open_field defines)
-#
-# and in an experiment the goal is a dropdown on the Setup tab, filled from
-# whichever scene you chose. Nothing here has to be edited to move scenes.
-#
-#     SETMISSION advance
-#     blue launch
+#   Setup      choose the mission, then pick its goal from your points
+#   terminal   SETMISSION advance to P1
+#              blue launch
 # =============================================================================
 
 spec_version: 0.1
@@ -33,9 +25,11 @@ name: advance
 kind: mission
 
 description: >
-  The fleet advances to FAR in whatever formation it is in. The penetration
-  command: how far can this fleet get into contested spectrum before it loses
-  command? Fits any fleet, any size, any shape.
+  The fleet advances to one chosen point in whatever formation it is in. The
+  penetration command: how far can this fleet get into contested spectrum
+  before it loses command? Fits any fleet, any size, any shape, any scene.
 
-objectives:
-  all: {do: advance, to: FAR}
+plan:
+  who: all
+  goals: 1
+  laps: 1

@@ -1510,6 +1510,22 @@ def test_formations_are_functions_not_coordinate_lists():
           and after["y"] == before["y"], f"{moved}")
 
 
+# The corridor declares no points of its own any more - a scene is the world,
+# and where you send a fleet inside it is a decision about the run. Tests that
+# need somewhere to go supply it, exactly as the Console does.
+CORRIDOR_POINTS = {"P1": {"x": -95.0, "y": 0.0, "z": 0.0},
+                   "P2": {"x": 95.0, "y": 0.0, "z": 0.0},
+                   "P3": {"x": 0.0, "y": 0.0, "z": 0.0}}
+
+
+def _corridor(*fleets, points=None):
+    """A composed corridor run with points supplied by the operator."""
+    return {"scene": "corridor_200m",
+            "fleets": [str(FIXTURE_FLEETS / f) for f in
+                       (fleets or ("3_roboracer_no_lidar.yaml",))],
+            "points": dict(points or CORRIDOR_POINTS)}
+
+
 def _sweep_mod():
     """tools/sweep.py as a module, without running its CLI."""
     import importlib.util
@@ -1521,54 +1537,117 @@ def _sweep_mod():
 
 
 def test_a_mission_is_portable_across_scenes():
-    """A mission names a point; a scene defines the points.
+    """A mission says HOW MANY goals it needs. It does not say where they are.
 
-    missions/advance.yaml says `to: FAR`, and FAR exists only in the corridor.
-    So the ONE mission the whole experiment programme is built on could only
-    ever run on ONE scene - and an experiment pointed at any other scene did
-    not fail loudly, it tasked nobody and produced a table of vehicles that
-    had not moved. The goal is now a decision made beside the scene and the
-    mission is re-pointed at it. This is that rewrite, and its refusal.
+    `advance` used to say `to: FAR`, and FAR existed only in the corridor - so
+    the one mission the whole experiment programme is built on could run on
+    exactly one scene, and pointed anywhere else it tasked NOBODY rather than
+    failing loudly. Worse, it let whoever wrote the SCENE decide the
+    objective. A scene is the world; where you send a fleet inside it belongs
+    to whoever is running it.
     """
-    print("\nA MISSION RUNS ON ANY SCENE, RE-POINTED AT ITS OWN GOAL")
+    print("\nA MISSION ASKS FOR N GOALS AND THE RUN SUPPLIES THEM")
+    check("advance asks for one goal",
+          st.mission_goal_count(REPO / "missions" / "advance.yaml") == 1)
+    check("shuttle asks for two",
+          st.mission_goal_count(REPO / "missions" / "shuttle.yaml") == 2)
+    check("forward asks for none - it has no destination at all",
+          st.mission_goal_count(REPO / "missions" / "forward.yaml") == 0)
+
     arena, agents, links = st.load_scenario({
         "scene": "open_field",
         "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
     by = {a["id"]: a for a in agents}
     points = arena.get("points") or {}
-    check("open_field has no point called FAR", "FAR" not in points)
 
-    # Without a goal: the corridor's mission is refused on this scene, loudly.
+    # NO GOAL GIVEN: refused, loudly, naming what it needed.
     changed, msgs, _ = st.apply_mission_file(
         str(REPO / "missions" / "advance.yaml"), by, points, arena)
-    check("unre-pointed, the corridor mission tasks nobody here",
-          not changed and any("FAR" in m for m in msgs), f"{msgs[:1]}")
+    check("a mission with no goal chosen tasks nobody, and says why",
+          not changed and any("needs 1 point" in m for m in msgs),
+          f"{msgs[:1]}")
 
-    # With a goal this scene defines: the same file tasks the whole fleet.
-    changed, msgs, name = st.apply_mission_file(
-        str(REPO / "missions" / "advance.yaml"), by, points, arena, goal="B")
-    check("re-pointed at B, the same mission file tasks the fleet",
-          len(changed) >= 3, f"{len(changed)} tasked: {msgs[:1]}")
-    check("every advance objective now points at B",
-          all((by[a].get("mission") or {}).get("to") == "B"
-              for a, _ in changed),
-          str({a: by[a].get("mission") for a, _ in changed}))
-
-    # A goal the scene does not define is refused, and says what it does have.
+    # A GOAL FROM THIS SCENE: the same file tasks the whole fleet.
     changed, msgs, _ = st.apply_mission_file(
         str(REPO / "missions" / "advance.yaml"), by, points, arena,
-        goal="NOWHERE")
+        goals=["B"])
+    check("given a point, the same file tasks the fleet",
+          len(changed) >= 3, f"{len(changed)} tasked: {msgs[:1]}")
+    check("every advance objective points at the goal that was chosen",
+          all((by[a].get("mission") or {}).get("to") == "B"
+              for a, _ in changed))
+
+    # TOO FEW FOR A TWO-GOAL MISSION is refused rather than half-flown: a
+    # shuttle given one end is not a shorter shuttle, it is a vehicle sitting
+    # on a waypoint.
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "shuttle.yaml"), by, points, arena,
+        goals=["A"])
+    check("a two-goal mission given one goal is refused, not half-flown",
+          not changed and any("needs 2 points" in m for m in msgs), str(msgs))
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "shuttle.yaml"), by, points, arena,
+        goals=["A", "B"])
+    check("given both, it flies the circuit",
+          changed and by["car1"]["_plan"]["waypoints"] == ["A", "B"]
+          and by["car1"]["_plan"]["laps"] == 4,
+          str(by["car1"].get("_plan")))
+
+    # A point the scene does not have is refused, and says what it does have.
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "advance.yaml"), by, points, arena,
+        goals=["NOWHERE"])
     check("a goal this scene lacks is refused, not silently ignored",
           not changed and any("NOWHERE" in m for m in msgs), f"{msgs}")
 
-    # `advance` with NO destination means "until a wall or until you lose
-    # command". A goal must not invent one for it.
+    # `forward` needs nothing and must not acquire a destination.
     changed, _msgs, _ = st.apply_mission_file(
-        str(REPO / "missions" / "forward.yaml"), by, points, arena, goal="B")
-    check("an advance with no destination is left alone by a goal",
+        str(REPO / "missions" / "forward.yaml"), by, points, arena,
+        goals=["B"])
+    check("a mission with no goals is left alone by one being offered",
           all((by[a].get("mission") or {}).get("to") is None
               for a, _ in changed), str([by[a].get("mission")
                                          for a, _ in changed][:1]))
+
+
+def test_a_scene_no_longer_ships_objectives_of_its_own():
+    """The corridor declares no points. That is the contract, not an omission.
+
+    HOME, FAR, APEX, WINGL and WINGR were every one of them an objective in
+    disguise. APEX/WINGL/WINGR were a wedge's formation slots hardcoded into
+    the room it happened to be standing in - the exact thing
+    formations-as-functions removed - and HOME/FAR were the ends of one
+    particular mission, chosen by whoever wrote the scene.
+    """
+    print("\nA SCENE IS THE WORLD, NOT THE OBJECTIVE")
+    arena, _a, _l = st.load_scenario({
+        "scene": "corridor_200m",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    check("the corridor ships no points at all",
+          not (arena.get("points") or {}), str(arena.get("points")))
+    check("...and its geometry is untouched by that",
+          float(arena["extent"]["x"]) == 200.0, str(arena["extent"]))
+
+    # Points supplied by the run appear, and are usable immediately.
+    arena2, agents2, _l2 = st.load_scenario(_corridor())
+    pts = arena2.get("points") or {}
+    check("points supplied with the run are the ones it has",
+          sorted(pts) == ["P1", "P2", "P3"], str(sorted(pts)))
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "shuttle.yaml"),
+        {a["id"]: a for a in agents2}, pts, arena2, goals=["P1", "P2"])
+    check("a mission flies against points that never touched a scene file",
+          len(changed) == 3, f"{len(changed)}: {msgs[:1]}")
+
+    # A scene MAY still declare points - the benchmark lanes are the fixed
+    # geometry of a scene that has to be identical every time. That is a scene
+    # making a claim about itself, which is a different thing.
+    lab, _a3, _l3 = st.load_scenario({
+        "scene": "lab_box",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer.yaml")]})
+    check("a benchmark scene may still name its own lanes",
+          {"A", "B", "E", "F"} <= set(lab.get("points") or {}),
+          str(sorted(lab.get("points") or {})))
 
 
 def test_setmission_grammar_takes_a_goal():
@@ -1669,7 +1748,7 @@ def test_formation_and_spacing_are_swept_axes_that_reach_the_model():
     cfg = {
         "name": "form-test", "scene": "corridor_200m",
         "blue_fleet": str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml"),
-        "mission": "advance", "goal": "FAR",
+        "mission": "advance", "goal": "P2", "points": dict(CORRIDOR_POINTS),
         "duration_s": 5.0, "warmup_s": 0.0, "rate_hz": 10.0,
         "stop_when_stalled": False, "coordinator": "gcs",
         "spawns": {"gcs": {"x": -95.0, "y": 0.0},
@@ -1846,63 +1925,63 @@ def test_the_map_cannot_place_what_the_model_will_refuse():
 
 
 def test_a_moved_point_overrides_the_scene_without_editing_it():
-    """A scene says where FAR is; where you decide to send a fleet inside it
-    is a decision about THIS run.
+    """Points ride with the RUN, and a dragged one changes only itself.
 
-    So a point dragged on the map is an override on the composition, merged
-    over the scene's own value - which is the same mechanism the architecture
-    override uses, and it has to leave the scene's OTHER points alone. A
-    shallow merge here would delete every point you did not drag, and the
-    missions that named them would start failing for no visible reason.
+    A point created or moved in the Console is an override on the composition,
+    merged over whatever the scene declares - the same mechanism the
+    architecture override uses. It has to leave every other point alone: a
+    shallow merge here would delete the points you did not touch, and the
+    missions naming them would start failing for no visible reason.
     """
-    print("\nA DRAGGED POINT OVERRIDES ONE POINT, NOT ALL OF THEM")
-    base = {"scene": "corridor_200m",
-            "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]}
-    arena0, _a, _l = st.load_scenario(dict(base))
+    print("\nA POINT RIDES WITH THE RUN, AND OVERRIDES ONLY ITSELF")
+    arena0, _a, _l = st.load_scenario(_corridor())
     before = dict(arena0.get("points") or {})
-    check("the corridor starts with its own points",
-          {"HOME", "FAR"} <= set(before), str(sorted(before)))
+    check("a composed run carries the points it was given",
+          sorted(before) == ["P1", "P2", "P3"], str(sorted(before)))
 
-    moved = dict(base, points={"FAR": {"x": 40.0, "y": 6.0, "z": 0.0}})
-    arena1, _a, _l = st.load_scenario(moved)
+    moved = _corridor()
+    moved["points"] = dict(moved["points"], P2={"x": 40.0, "y": 6.0, "z": 0.0})
+    arena1, _a1, _l1 = st.load_scenario(moved)
     after = arena1.get("points") or {}
     check("the dragged point takes its new position",
-          (after["FAR"]["x"], after["FAR"]["y"]) == (40.0, 6.0),
-          str(after.get("FAR")))
+          (after["P2"]["x"], after["P2"]["y"]) == (40.0, 6.0),
+          str(after.get("P2")))
     check("every other point is untouched",
-          all(after[k] == before[k] for k in before if k != "FAR"),
-          str(sorted(set(before) - set(after))))
+          all(after[k] == before[k] for k in before if k != "P2"),
+          str({k: (before[k], after[k]) for k in before if k != "P2"}))
 
-    # A point INVENTED in the Console, which no scene file has ever heard of.
-    added = dict(base, points={"RALLY": {"x": -20.0, "y": 0.0, "z": 0.0}})
-    arena2, _a, _l = st.load_scenario(added)
+    # A scene that DOES declare points keeps them when the run adds its own.
+    lab = {"scene": "lab_box",
+           "fleets": [str(FIXTURE_FLEETS / "3_roboracer.yaml")],
+           "points": {"P1": {"x": -2.0, "y": 0.0, "z": 0.0}}}
+    arena2, agents2, _l2 = st.load_scenario(lab)
     pts2 = arena2.get("points") or {}
-    check("a point added by hand joins the scene's own",
-          "RALLY" in pts2 and "FAR" in pts2, str(sorted(pts2)))
+    check("a point added by hand joins a scene's own rather than replacing "
+          "them", "P1" in pts2 and "A" in pts2, str(sorted(pts2)))
     changed, msgs, _ = st.apply_mission_file(
         str(REPO / "missions" / "advance.yaml"),
-        {a["id"]: a for a in _a}, pts2, arena2, goal="RALLY")
+        {a["id"]: a for a in agents2}, pts2, arena2, goals=["P1"])
     check("...and can immediately be used as a goal",
-          len(changed) >= 3 and all(mm.get("to") == "RALLY"
+          len(changed) >= 3 and all(mm.get("to") == "P1"
                                     for _i, mm in changed),
           f"{len(changed)} tasked: {msgs[:1]}")
 
 
 def _planned_run(routing="mesh", doctrine="hold", jam_dbm=None, gnss=False,
-                 laps=2, dur=400.0, waypoints=("MID", "HOME"),
+                 laps=2, dur=400.0, waypoints=("P3", "P1"),
                  jam_at=(30.0, 0.0)):
     """A corridor run with a PLANNED mission, stepped to its end.
 
     One helper, three attacks: it is the same fleet and the same plan every
-    time, so any difference in outcome is the spectrum and nothing else.
+    time, so any difference in outcome is the spectrum and nothing else. The
+    points are supplied WITH the run, because the corridor declares none of
+    its own - P1 is the ground station end, P2 the far end, P3 the middle.
     """
     import random as _rand
-    fleets = [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]
+    fleets = ["3_roboracer_no_lidar.yaml"]
     if jam_dbm is not None:
-        fleets.append(str(FIXTURE_FLEETS
-                          / ("red_gnss.yaml" if gnss else "red_comms.yaml")))
-    arena, agents, links = st.load_scenario(
-        {"scene": "corridor_200m", "fleets": fleets})
+        fleets.append("red_gnss.yaml" if gnss else "red_comms.yaml")
+    arena, agents, links = st.load_scenario(_corridor(*fleets))
     by = {a["id"]: a for a in agents}
     for aid, (x, y) in (("gcs", (-95, 0)), ("car1", (-89, 0)),
                         ("car2", (-93, 3)), ("car3", (-93, -3)),
@@ -1923,7 +2002,6 @@ def _planned_run(routing="mesh", doctrine="hold", jam_dbm=None, gnss=False,
     poses = {a["id"]: {"x": a["start"]["x"], "y": a["start"]["y"],
                        "z": a["start"]["z"], "yaw": a["start"]["yaw"],
                        "speed": 0.0} for a in agents}
-    arena["points"]["MID"] = {"x": 0.0, "y": 0.0, "z": 0.0}
     for aid in ("car1", "car2", "car3"):
         st.install_plan(by[aid], list(waypoints), laps)
         by[aid]["armed"] = True
@@ -2079,13 +2157,11 @@ def test_an_order_is_a_transmission_and_can_be_intercepted():
 def test_setplan_is_the_mission_typed_and_is_gated_like_any_order():
     """SETPLAN <who> <points...> laps <n>, from a terminal or a button."""
     print("\nSETPLAN")
-    arena, agents, links = st.load_scenario({
-        "scene": "corridor_200m",
-        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    arena, agents, links = st.load_scenario(_corridor())
     by = {a["id"]: a for a in agents}
     poses = _poses_for(agents)
     qdir = Path(tempfile.mkdtemp())
-    _queue_with(qdir, "SETPLAN all HOME FAR laps 3\n")
+    _queue_with(qdir, "SETPLAN all P1 P2 laps 3\n")
     changed = st.drain_retasks(qdir, by, arena, links, poses)
     check("SETPLAN tasks every mobile vehicle", len(changed) == 3,
           str(changed))
@@ -2093,9 +2169,9 @@ def test_setplan_is_the_mission_typed_and_is_gated_like_any_order():
           by["gcs"].get("_plan") is None)
     pl = by["car1"]["_plan"]
     check("the circuit and the lap count are what was typed",
-          pl["waypoints"] == ["HOME", "FAR"] and pl["laps"] == 3, str(pl))
+          pl["waypoints"] == ["P1", "P2"] and pl["laps"] == 3, str(pl))
     check("the vehicle is only told the FIRST leg",
-          by["car1"]["mission"] == {"type": "advance", "to": "HOME"},
+          by["car1"]["mission"] == {"type": "advance", "to": "P1"},
           str(by["car1"]["mission"]))
 
     qdir2 = Path(tempfile.mkdtemp())
@@ -2106,11 +2182,11 @@ def test_setplan_is_the_mission_typed_and_is_gated_like_any_order():
           by["car1"]["_plan"] == before, str(by["car1"]["_plan"]))
 
     qdir3 = Path(tempfile.mkdtemp())
-    _queue_with(qdir3, "SETPLAN car2 FAR laps 1\n")
+    _queue_with(qdir3, "SETPLAN car2 P2 laps 1\n")
     st.drain_retasks(qdir3, by, arena, links, poses)
     check("one agent can be given its own plan",
-          by["car2"]["_plan"]["waypoints"] == ["FAR"]
-          and by["car1"]["_plan"]["waypoints"] == ["HOME", "FAR"],
+          by["car2"]["_plan"]["waypoints"] == ["P2"]
+          and by["car1"]["_plan"]["waypoints"] == ["P1", "P2"],
           str(by["car2"]["_plan"]))
 
 
@@ -2123,32 +2199,30 @@ def test_a_mission_file_can_declare_a_plan():
     with its own private notion of arrival.
     """
     print("\nA MISSION FILE DECLARES ITS OWN END")
-    arena, agents, links = st.load_scenario({
-        "scene": "corridor_200m",
-        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    arena, agents, links = st.load_scenario(_corridor())
     by = {a["id"]: a for a in agents}
     changed, msgs, _n = st.apply_mission_file(
         str(REPO / "missions" / "advance.yaml"), by,
-        arena.get("points") or {}, arena)
+        arena.get("points") or {}, arena, goals=["P2"])
     check("advance to a point is itself a one-lap plan",
-          all((by[a].get("_plan") or {}).get("waypoints") == ["FAR"]
+          all((by[a].get("_plan") or {}).get("waypoints") == ["P2"]
               and by[a]["_plan"]["laps"] == 1 for a, _m in changed),
           str([by[a].get("_plan") for a, _m in changed][:1]))
 
     mpath = Path(tempfile.mkdtemp()) / "circuit.yaml"
     mpath.write_text(yaml.safe_dump({
         "spec_version": 0.1, "name": "circuit", "kind": "mission",
-        "plan": {"who": "all", "waypoints": ["HOME", "APEX", "FAR"],
+        "plan": {"who": "all", "waypoints": ["P1", "P3", "P2"],
                  "laps": 2}}), encoding="utf-8")
     changed2, msgs2, name2 = st.apply_mission_file(
         str(mpath), by, arena.get("points") or {}, arena)
     check("a declared plan needs no objectives block at all",
           len(changed2) == 3, f"{len(changed2)}: {msgs2[:1]}")
     check("every vehicle gets the circuit and the laps",
-          all(by[a]["_plan"]["waypoints"] == ["HOME", "APEX", "FAR"]
+          all(by[a]["_plan"]["waypoints"] == ["P1", "P3", "P2"]
               and by[a]["_plan"]["laps"] == 2 for a, _m in changed2))
     check("...and is started on the first leg only",
-          all(by[a]["mission"]["to"] == "HOME" for a, _m in changed2))
+          all(by[a]["mission"]["to"] == "P1" for a, _m in changed2))
 
     # An open-ended objective must NOT acquire a plan: `pursue` has no end,
     # and putting it in the pass/fail column would leave it failing forever.
@@ -2188,6 +2262,7 @@ if __name__ == "__main__":
                test_routing_gates_authority_not_just_geometry,
                test_formations_are_functions_not_coordinate_lists,
                test_a_mission_is_portable_across_scenes,
+               test_a_scene_no_longer_ships_objectives_of_its_own,
                test_setmission_grammar_takes_a_goal,
                test_penetration_is_measured_along_the_axis_of_advance,
                test_formation_and_spacing_are_swept_axes_that_reach_the_model,

@@ -1,13 +1,19 @@
 # =============================================================================
 # Deadband MISSION — forward
 # =============================================================================
-# The simplest order there is: go, and keep going until something stops you.
-# No destination, no agent names, no fleet size. What stops you is the world -
-# a wall, or losing the commander who was telling you to go.
+# NO GOALS AT ALL, and that is the point of it.
 #
-# Useful as a control: whatever distance a fleet covers under `forward` with a
-# clean spectrum is the distance the arena allows, so anything less under
-# jamming is the jamming, not the geometry.
+# `advance` with no destination means "hold this heading and keep going until
+# something stops you" — a wall, or losing your commander. There is nothing to
+# choose and nothing to arrive at, so it is the one mission with no end and no
+# pass/fail: it is a probe, not a task.
+#
+# Use it to FIND the limit rather than assume one. Where a fleet stops under a
+# given jammer is a measurement; picking a distance and asking whether it got
+# there is a guess you then have to defend.
+#
+#     SETMISSION forward
+#     blue launch
 # =============================================================================
 
 spec_version: 0.1
@@ -15,8 +21,9 @@ name: forward
 kind: mission
 
 description: >
-  Every vehicle drives on its current heading until a wall, a jammer or its
-  own link-loss doctrine stops it. No destination and no agent names.
+  Every vehicle drives forward until a wall or until it loses command. No
+  destination, so no arrival and no score - the probe that measures where the
+  limit actually is.
 
 objectives:
   all: {do: advance}

@@ -85,6 +85,7 @@ try:
     from stub_telemetry import FORMATIONS, formation_offsets
     from stub_telemetry import custom_formations, save_formation
     from stub_telemetry import clamp_to_arena as _clamp_to_arena
+    from stub_telemetry import mission_goal_count as _mission_goal_count
 except Exception:
     _resolve_mission = None
     _jammer_range_m = None
@@ -95,6 +96,27 @@ except Exception:
     custom_formations = lambda: []          # noqa: E731
     save_formation = None
     _clamp_to_arena = None
+    _mission_goal_count = None
+
+def snap(v, step=1.0):
+    """The nearest whole metre.
+
+    EVERYTHING PLACED BY HAND LANDS ON THE GRID. A drag produces whatever
+    fraction of a metre the mouse happened to be on - 2.6371 - and those
+    numbers then propagate into the composed run, the results CSV and every
+    figure downstream, where they read as precision that was never measured.
+    A formation you set up by eye is not accurate to a tenth of a millimetre
+    and should not claim to be.
+
+    The MODEL is untouched: formation_offsets still returns exact geometry, so
+    a circle is still a circle. Only the coordinates a human put there are
+    rounded, at the moment they are written.
+    """
+    try:
+        return round(float(v) / step) * step
+    except (TypeError, ValueError):
+        return v
+
 
 # The entry that means "leave every vehicle exactly where it was put". Used in
 # the spawn dialog and as a value on the swept formation axis, so "no
@@ -425,9 +447,17 @@ class Viewport(QWidget):
         function that would reject it means the map cannot express a setup the
         model will not accept.
         """
+        # SNAP FIRST, CLAMP SECOND. The other order lets a snap push a
+        # position back out through the wall it was just pulled inside.
+        x, y, z = snap(x), snap(y), snap(z)
         if _clamp_to_arena is None or not self.arena:
             return (x, y, z)
-        return _clamp_to_arena(x, y, z, self.arena)
+        cx, cy, cz = _clamp_to_arena(x, y, z, self.arena)
+        # The clamp lands on the wall margin, which is not a whole metre;
+        # step inward to the last integer that is still inside.
+        return (math.copysign(math.floor(abs(cx)), cx) if cx != x else x,
+                math.copysign(math.floor(abs(cy)), cy) if cy != y else y,
+                math.floor(cz) if cz != z else z)
 
     def point_at(self, pt, radius_px=16.0):
         """The NAME of the scene point under this screen position."""
@@ -2701,6 +2731,61 @@ class AxisRange(QWidget):
         return [round(lo + (hi - lo) * i / (n - 1), 3) for i in range(n)]
 
 
+class PointDialog(QDialog):
+    """Where a new point goes. Three numbers, typed, on whole metres.
+
+    A point is created by COORDINATE rather than by clicking the map, because
+    the first thing you usually know is the number - "the far end is at x=95"
+    - and dragging to find 95 exactly is worse than typing it. Once it exists
+    it can be dragged like anything else.
+    """
+
+    def __init__(self, arena=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add point")
+        lay = QVBoxLayout(self)
+        lab = QLabel("Where is it? Metres, from the centre of the arena. "
+                     "You can drag it afterwards.")
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        e = ((arena or {}).get("extent") or {})
+        hx, hy = _num(e.get("x"), 20) / 2, _num(e.get("y"), 20) / 2
+        hz = _num(e.get("z"), 5)
+        row = QHBoxLayout()
+        self.boxes = []
+        for axis, lo, hi in (("x", -hx, hx), ("y", -hy, hy), ("z", 0.0, hz)):
+            b = QDoubleSpinBox()
+            b.setDecimals(0)                 # whole metres, like everything
+            b.setRange(lo, hi)
+            b.setValue(0.0)
+            b.setPrefix(f"{axis} ")
+            b.setFixedWidth(92)
+            row.addWidget(b)
+            self.boxes.append(b)
+        row.addStretch(1)
+        lay.addLayout(row)
+        hint = QLabel(f"This arena is {2 * hx:.0f} x {2 * hy:.0f} m, so x runs "
+                      f"{-hx:.0f} to {hx:.0f} and y runs {-hy:.0f} to {hy:.0f}.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Add point")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        lay.addLayout(btns)
+
+    def point(self):
+        return {"x": snap(self.boxes[0].value()),
+                "y": snap(self.boxes[1].value()),
+                "z": snap(self.boxes[2].value())}
+
+
 class SpawnDialog(QDialog):
     """Asked the moment a fleet is chosen, with the scene already in view.
 
@@ -2959,9 +3044,14 @@ class SpawnDialog(QDialog):
         rows = [r for r, aid in enumerate(self._ids) if aid in self._movable]
 
         def put(r, x, y, z):
-            self.table.item(r, 1).setText(f"{x:.3f}")
-            self.table.item(r, 2).setText(f"{y:.3f}")
-            self.table.item(r, 3).setText(f"{z:.3f}")
+            # WHOLE METRES. The formation function itself is exact - a circle
+            # is still a circle - but the coordinates a fleet is actually
+            # placed at are rounded here, so the composed run and every result
+            # downstream carry numbers that read as what they are: a setup
+            # somebody chose, not a measurement.
+            self.table.item(r, 1).setText(f"{snap(x):.0f}")
+            self.table.item(r, 2).setText(f"{snap(y):.0f}")
+            self.table.item(r, 3).setText(f"{snap(z):.0f}")
 
         # Rigid translation for everything the formation does not govern -
         # the ground station, a jammer, a ghost.
@@ -3729,7 +3819,9 @@ class ExperimentWindow(QDialog):
                 compose, mission=cfg.get("mission") or "advance",
                 title=r.get("cell", ""), seed=int(r.get("seed") or 1),
                 warmup_s=float(cfg.get("warmup_s") or 0.0),
-                jam_dbm=dbm, goal=cfg.get("goal"))
+                jam_dbm=dbm,
+                goal=(list(cfg.get("goals") or [])
+                      or ([cfg["goal"]] if cfg.get("goal") else [])))
         self.bar.setFormat(f"running {r.get('cell')} live in the Console")
 
 
@@ -4089,6 +4181,9 @@ class Console(QMainWindow):
         mlay.setSpacing(4)
         mlay.addWidget(QLabel("Mission"))
         self.exp_mission = QComboBox()
+        # A different mission needs a different number of goals, so the
+        # pickers below are rebuilt the moment it changes.
+        self.exp_mission.activated.connect(lambda _i: self._refresh_goals())
         self.exp_mission.setToolTip(
             "The order the fleet is given. In an experiment it is issued to "
             "every vehicle when each run starts, because there is nobody to "
@@ -4101,26 +4196,36 @@ class Console(QMainWindow):
         # corridor - the only scene that has a point by that name - so the
         # goal is chosen here, from the points the CHOSEN SCENE actually
         # declares, and the mission is re-pointed at it.
-        mlay.addWidget(QLabel("Goal (from this scene's points)"))
-        self.exp_goal = QComboBox()
-        self.exp_goal.activated.connect(self._on_goal_chosen)
-        self.exp_goal.setToolTip(
-            "Where 'advance' is advancing TO. Penetration is measured along "
-            "the line from where the fleet starts to this point, so it means "
-            "the same thing on any scene, not just an east-west corridor.\n"
-            "Drag the point itself on the map to move it.\n"
-            "(none) leaves the mission's own destination alone - use it for "
-            "'advance until a wall or until you lose command'.")
-        mlay.addWidget(self.exp_goal)
+        # THE GOALS THIS MISSION NEEDS, one picker each.
+        #
+        # A mission declares HOW MANY points it needs and not where they are -
+        # `advance` wants one, `shuttle` wants two, `forward` wants none. So
+        # this row is built from the chosen mission rather than being a fixed
+        # single dropdown, and choosing a two-goal mission grows a second
+        # picker in front of you. That is the whole correction: a scene is the
+        # world, a mission is the shape of the task, and WHERE is a decision
+        # about this run that belongs to whoever is running it.
+        self.lbl_goals = QLabel("Goals")
+        mlay.addWidget(self.lbl_goals)
+        self.goal_box = QWidget()
+        self.goal_lay = QVBoxLayout(self.goal_box)
+        self.goal_lay.setContentsMargins(0, 0, 0, 0)
+        self.goal_lay.setSpacing(3)
+        self.goal_combos = []
+        mlay.addWidget(self.goal_box)
         prow2 = QHBoxLayout()
         addpt = QPushButton("Add point...")
         addpt.setToolTip(
-            "Put a new named point on the map, then drag it where you want "
-            "it. A mission is written against points, so this is how you "
-            "invent a destination without opening a scene file.")
+            "Put a point on the map at coordinates you type, then drag it to "
+            "adjust. Points are named P1, P2, ... and are what a mission's "
+            "goals are chosen from.\n"
+            "Scenes no longer carry objectives of their own: a scene is the "
+            "world, and where you send a fleet inside it is yours to decide.")
         addpt.clicked.connect(self.add_point)
         prow2.addWidget(addpt)
-        prow2.addStretch(1)
+        self.lbl_points = QLabel("")
+        self.lbl_points.setObjectName("hint")
+        prow2.addWidget(self.lbl_points, 1)
         mlay.addLayout(prow2)
         slay.addWidget(self.mission_box)
         self.mission_box.setVisible(False)
@@ -4408,7 +4513,11 @@ class Console(QMainWindow):
 
         clay.addWidget(QLabel("  Emitters"))
         self.emitters = QTableWidget(0, 4)
-        self.emitters.setHorizontalHeaderLabels(["Agent", "Band", "Tx", "Link type"])
+        self.emitters.setHorizontalHeaderLabels(["Agent", "Band", "Tx", "Role"])
+        self.emitters.setToolTip(
+            "Everything that transmits, both sides. The ground station's "
+            "30 dBm is why a star reaches as far as it does; a jammer's power "
+            "is the attack. Both belong in the same table.")
         self.emitters.horizontalHeader().setStretchLastSection(True)
         self.emitters.verticalHeader().setVisible(False)
         clay.addWidget(self.emitters, 1)
@@ -4526,14 +4635,17 @@ class Console(QMainWindow):
         a.triggered.connect(self.close)
         m.addAction(a)
 
-        # EXPERIMENT is its own window, not another tab: many runs, headless,
-        # nothing to interfere with, and it needs the whole canvas for the
-        # result. Ctrl+E from anywhere.
-        e = self.menuBar().addMenu("&Experiment")
-        a = QAction("&Run an experiment...", self)
+        # EXPERIMENT HAS NO MENU. It is opened from Setup, where you have just
+        # finished deciding what the experiment IS - a menu at the top of the
+        # window offered it from anywhere, including from three tabs where
+        # nothing is composed yet and pressing it can only produce a refusal.
+        # The shortcut stays, as an action on the window with no menu to
+        # appear in, because Ctrl+E costs nothing and skips the trip.
+        a = QAction("Run an experiment...", self)
         a.setShortcut("Ctrl+E")
+        a.setShortcutContext(Qt.ApplicationShortcut)
         a.triggered.connect(self.open_experiment)
-        e.addAction(a)
+        self.addAction(a)
 
     # -- setup: compose a run ----------------------------------------------
 
@@ -5236,8 +5348,10 @@ class Console(QMainWindow):
             # a scene whose points are not the corridor's would otherwise
             # issue `advance to FAR` into a world with no FAR in it, and the
             # fleet would sit still while the table said it had advanced.
+            gs = goal if isinstance(goal, (list, tuple)) else (
+                [goal] if goal else [])
             self._send_setup_orders(
-                f"{mission} to {goal}" if goal else mission, red=False)
+                f"{mission} to {' '.join(gs)}" if gs else mission, red=False)
         QTimer.singleShot(900, _order)
         # THE JAMMER ARMS AFTER THE WARM-UP, exactly as it does in the sweep.
         # Arming it at t=0 instead would have jammed the fleet before it had
@@ -5464,38 +5578,47 @@ class Console(QMainWindow):
         if not name:
             self.say("Choose a mission first.")
             return
-        goal = self._goal_name()
-        self._send_setup_orders(f"{name} to {goal}" if goal else name,
-                                red=False)
+        goals = self._goal_names()
+        self._send_setup_orders(
+            f"{name} to {' '.join(goals)}" if goals else name, red=False)
         self._mission_name = name
         self.lbl_mission.setText(
-            f"Mission: {name}" + (f" -> {goal}" if goal else ""))
+            f"Mission: {name}"
+            + (f" -> {' -> '.join(goals)}" if goals else ""))
 
     def add_point(self):
-        """Invent a named point and put it on the map to be dragged.
+        """Put a point on the map at coordinates you type, named P1, P2, ...
 
-        A mission is written against points, and until now the only way to get
-        a new one was to edit a scene file - which is the exact thing this
-        project says it does not do. The point is created at the arena's
-        centre because that is always inside it, and then you drag it.
+        THIS IS WHERE OBJECTIVES COME FROM NOW. A scene used to ship named
+        points - HOME, FAR, APEX - and every one of them was an objective in
+        disguise, decided by whoever wrote the scene rather than by whoever is
+        running it. A scene is the world; where you send a fleet inside it is
+        yours.
+
+        Numbered rather than named because naming six points is friction in
+        the way of the thing you actually wanted to do, and because a mission
+        no longer cares what they are called - it asks for N goals and you
+        point each slot at one of these.
         """
         if not self._setup_scene:
             self.say("Choose a scene first - a point has to be somewhere.")
             return
-        name, ok = QInputDialog.getText(self, "Add point", "Name this point:")
-        name = (name or "").strip().upper().replace(" ", "_")
-        if not ok or not name:
+        dlg = PointDialog(self.viewport.arena, self)
+        if dlg.exec() != QDialog.Accepted:
             return
-        if name in (self.viewport.points or {}):
-            self.say(f"'{name}' already exists - drag it instead.")
-            return
-        self._points_override[name] = {"x": 0.0, "y": 0.0, "z": 0.0}
+        used = set(self.viewport.points or {}) | set(self._points_override)
+        n = 1
+        while f"P{n}" in used:
+            n += 1
+        name = f"P{n}"
+        self._points_override[name] = dlg.point()
         self._compose_setup()
         self._refresh_goals()
         self.viewport.selected_points = {name}
         self.viewport.update()
-        self.say(f"Added point {name} at the centre of the arena - drag it "
-                 f"where you want it, then pick it as the goal.")
+        q = self._points_override[name]
+        self.say(f"Added {name} at ({q['x']:.0f}, {q['y']:.0f}, {q['z']:.0f}) "
+                 f"- drag it on the map to adjust, then pick it as a goal.")
 
     def _on_goal_chosen(self, _i):
         self._goal_touched = True
@@ -5524,59 +5647,98 @@ class Console(QMainWindow):
         self._refresh_goals()
 
     def _refresh_goals(self):
-        """List the CHOSEN SCENE's named points into the goal picker.
+        """Build one goal picker per goal THIS MISSION asks for, and fill them
+        with the points that exist.
 
-        Read from the scene file rather than from a hardcoded list, so adding
-        a scene with its own points needs no code at all - which is the whole
-        difference between "experiments run on the corridor" and "experiments
-        run on scenes".
+        The count comes from the mission file, so adding a mission that needs
+        three goals needs no code here. Zero goals (an `advance` with no
+        destination) hides the row entirely rather than showing a dropdown
+        that does nothing.
         """
-        if not hasattr(self, "exp_goal"):
+        if not hasattr(self, "goal_lay"):
             return
-        import yaml as _yaml
-        cur = self.exp_goal.currentText()
-        # THE RESOLVED COMPOSITION, not the scene file - so a point added or
-        # dragged in this session is offered as a goal like any other. The
-        # file is the fallback for before anything has been composed.
         pts = dict((self._view() or {}).get("points") or {})
-        if not pts and self._setup_scene:
+        want = 0
+        name = (self.exp_mission.currentText()
+                if hasattr(self, "exp_mission") else "")
+        if name and _mission_goal_count is not None:
             try:
-                doc = _yaml.safe_load(
-                    (REPO_ROOT / "scenes" / f"{self._setup_scene}.yaml")
-                    .read_text(encoding="utf-8")) or {}
-                pts = doc.get("points") or {}
-            except (OSError, ValueError) as exc:
-                self.say(f"cannot read the scene's points: {exc}")
-        self.exp_goal.blockSignals(True)
-        self.exp_goal.clear()
-        self.exp_goal.addItem("(none - advance until stopped)")
-        for name in sorted(pts):
-            q = pts[name] or {}
-            self.exp_goal.addItem(
-                f"{name}   ({_num(q.get('x')):.0f}, {_num(q.get('y')):.0f})")
-            self.exp_goal.setItemData(self.exp_goal.count() - 1, name)
-        # THE FAR END, by default. Not a name - a name only works on the one
-        # scene that happens to use it, which is the bug this replaces. The
-        # point furthest from the origin along x is what "advance" means on a
-        # corridor and is a defensible default anywhere else.
-        # Preserve the operator's choice - but "(none)" is what the picker
-        # shows before a scene is chosen, so treating THAT as a choice left
-        # every experiment goalless, which reads as "nothing arrives" rather
-        # than "nobody said where to go".
-        i = self.exp_goal.findText(cur) if getattr(self, "_goal_touched",
-                                                   False) else -1
-        if i < 0 and pts:
-            far = max(pts, key=lambda k: _num((pts[k] or {}).get("x")))
-            i = max(self.exp_goal.findData(far), 0)
-        self.exp_goal.setCurrentIndex(max(i, 0))
-        self.exp_goal.blockSignals(False)
+                want = int(_mission_goal_count(
+                    REPO_ROOT / "missions" / f"{name}.yaml"))
+            except Exception:                              # noqa: BLE001
+                want = 0
+
+        keep = [c.currentData() for c in self.goal_combos]
+        while len(self.goal_combos) > want:
+            c = self.goal_combos.pop()
+            c.setParent(None)
+        while len(self.goal_combos) < want:
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(4)
+            lab = QLabel(f"Goal {len(self.goal_combos) + 1}")
+            lab.setFixedWidth(52)
+            rl.addWidget(lab)
+            c = QComboBox()
+            c.activated.connect(self._on_goal_chosen)
+            c.setToolTip(
+                "One of the points on the map. Penetration is measured along "
+                "the line from where the fleet starts to the first goal, so "
+                "it means the same thing on any scene.\n"
+                "Drag the point itself on the map to move it.")
+            rl.addWidget(c, 1)
+            self.goal_lay.addWidget(row)
+            c._row = row
+            self.goal_combos.append(c)
+        for c in self.goal_combos:
+            if getattr(c, "_row", None) is not None:
+                c._row.setVisible(True)
+
+        names = sorted(pts, key=lambda k: (len(k), k))
+        for i, c in enumerate(self.goal_combos):
+            c.blockSignals(True)
+            c.clear()
+            for n in names:
+                q = pts[n] or {}
+                c.addItem(f"{n}   ({_num(q.get('x')):.0f}, "
+                          f"{_num(q.get('y')):.0f}, {_num(q.get('z')):.0f})")
+                c.setItemData(c.count() - 1, n)
+            # KEEP WHAT WAS CHOSEN, then fall back to a DIFFERENT point per
+            # slot: a shuttle whose two ends default to the same point is not
+            # a shuttle, it is a vehicle standing still, and it would look
+            # like the model failing rather than the defaults being lazy.
+            j = c.findData(keep[i]) if i < len(keep) else -1
+            if j < 0:
+                j = min(i, max(len(names) - 1, 0))
+            c.setCurrentIndex(max(j, 0))
+            c.blockSignals(False)
+
+        self.goal_box.setVisible(want > 0 and bool(names))
+        self.lbl_goals.setVisible(want > 0)
+        if not want:
+            self.lbl_goals.setText(
+                f"Goals - '{name}' needs none")
+        elif not names:
+            self.lbl_goals.setText(
+                f"Goals - this mission needs {want}. Add a point first.")
+        else:
+            self.lbl_goals.setText(f"Goals ({want} for '{name}')")
+        self.lbl_points.setText(
+            f"{len(names)} point{'s' if len(names) != 1 else ''} on the map"
+            if names else "no points yet")
         if hasattr(self, "obj_combo"):
             self._fill_objective_args()
 
+    def _goal_names(self):
+        """Every chosen goal, in slot order."""
+        return [c.currentData() for c in getattr(self, "goal_combos", [])
+                if c.currentData()]
+
     def _goal_name(self):
-        """The goal point's NAME, or None for '(none)'."""
-        return self.exp_goal.currentData() if hasattr(self, "exp_goal") \
-            else None
+        """The FIRST goal's name, or None. Penetration is measured to it."""
+        names = self._goal_names()
+        return names[0] if names else None
 
     def _sweep_axes(self):
         """Every swept axis and its values, in one place.
@@ -5673,6 +5835,10 @@ class Console(QMainWindow):
             # sweep re-points every `advance` objective at this, so the same
             # one-line mission file runs on any scene.
             "goal": self._goal_name(),
+            # EVERY goal, in slot order - a two-point shuttle needs both. The
+            # single `goal` above stays because penetration is measured along
+            # the line to the FIRST one, and the sweep reads it for that.
+            "goals": self._goal_names(),
             "duration_s": 400.0, "warmup_s": 5.0, "rate_hz": 10.0,
             "stop_when_stalled": True, "stall_grace_s": 5.0,
             "squads": squads, "coordinator": "gcs",
@@ -7060,24 +7226,76 @@ class Console(QMainWindow):
                     row.setForeground(0, QBrush(QColor(NETWORK_COLOURS["red"])))
 
     def fill_comms(self, links=None):
-        """Emitters from the scenario; link state from the run if there is one."""
-        radios = self._view().get("radios") or {} if self.doc else {}
+        """EVERY TRANSMITTER IN THE RUN, blue and red.
+
+        This listed only agents carrying a legacy `radios: [name]` reference
+        into the scene's radio block - which, once hardware moved onto the
+        agent as its own `radio:`, meant it listed almost nothing. The ground
+        station was missing from the emitter table while transmitting at
+        30 dBm and being the reason a star reaches as far as it does, and the
+        jammers were missing while being the entire adversary.
+
+        A thing that transmits is an emitter. The band comes from the agent's
+        own radio if it declares one and otherwise from the network it is on,
+        because that is where a fleet's channel is actually decided.
+        """
+        view = self._view() if self.doc else {}
+        radios = view.get("radios") or {}
+        nets = view.get("networks") or {}
         rows = []
-        for a in (self._view().get("agents") or []) if self.doc else []:
+        for a in (view.get("agents") or []):
+            aid = a.get("id")
+            net = nets.get(a.get("network")) or {}
+            net_band = _num((net.get("band") or {}).get("value")
+                            if isinstance(net.get("band"), dict)
+                            else net.get("band"))
+            # A JAMMER emits on its own terms - its band and its power are the
+            # attack, not a property of any network.
+            j = a.get("jammer")
+            if j:
+                jb = j.get("band")
+                jp = j.get("tx_power")
+                rows.append((
+                    aid,
+                    f"{_num(jb.get('value') if isinstance(jb, dict) else jb):.0f} MHz",
+                    (f"{_num(jp.get('value') if isinstance(jp, dict) else jp):.0f} dBm"),
+                    "jammer"))
+                continue
+            # The agent's OWN radio - hardware, which is where a transmit
+            # power belongs and where the ground station's 30 dBm lives.
+            r = a.get("radio") or {}
+            if r:
+                tx = r.get("tx_power")
+                txv = tx.get("value") if isinstance(tx, dict) else tx
+                rb = r.get("band")
+                band = _num(rb.get("value") if isinstance(rb, dict) else rb) \
+                    or net_band
+                role = ("ground station" if a.get("platform") == "ground_station"
+                        else f"{a.get('network', '-')} net")
+                rows.append((aid, f"{band:.0f} MHz" if band else "-",
+                             f"{_num(txv):.0f} dBm" if txv is not None
+                             else "unsourced", role))
+            # Legacy: a named radio from the scene's radios block.
             for rname in a.get("radios") or []:
-                r = radios.get(rname) or {}
-                band = _num((r.get("band") or {}).get("value"))
-                tx = (r.get("tx_power") or {}).get("value")
-                rows.append((a.get("id"), f"{band:.0f} MHz" if band else "-",
+                rr = radios.get(rname) or {}
+                band = _num((rr.get("band") or {}).get("value")) or net_band
+                tx = (rr.get("tx_power") or {}).get("value")
+                rows.append((aid, f"{band:.0f} MHz" if band else "-",
                              f"{tx} dBm" if tx is not None else "unsourced",
-                             r.get("link_type", "-")))
+                             rr.get("link_type", "-")))
+            if not r and not (a.get("radios") or []):
+                # SAID, NOT OMITTED. An agent with no radio at all cannot be
+                # commanded, and a blank row is how that goes unnoticed.
+                rows.append((aid, "-", "no radio", "cannot be commanded"))
         self.emitters.setRowCount(len(rows))
         for i, row in enumerate(rows):
             for c, text in enumerate(row):
                 it = QTableWidgetItem(str(text))
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
-                if text == "unsourced":
+                if text in ("unsourced", "no radio", "cannot be commanded"):
                     it.setForeground(QBrush(QColor(C_WARN)))
+                if text == "jammer":
+                    it.setForeground(QBrush(QColor("#C4685A")))
                 self.emitters.setItem(i, c, it)
         self.emitters.resizeColumnsToContents()
 

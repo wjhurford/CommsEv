@@ -112,6 +112,14 @@ def build(cfg, cell):
         if cfg.get("red_fleet"):
             fleets.append(cfg["red_fleet"])
         base = {"scene": cfg["scene"], "fleets": fleets}
+    # POINTS THE EXPERIMENT DECLARES. A scene is the world; where you send a
+    # fleet inside it is a decision about this run, so an experiment file may
+    # carry its own geometry and a Console-composed run carries whatever was
+    # placed on the map. Merged one level, so naming one point leaves any the
+    # scene does declare alone.
+    if cfg.get("points"):
+        base.setdefault("points", {})
+        base["points"] = {**cfg["points"], **(base.get("points") or {})}
     arena, agents, links = st.load_scenario(base)
     by = {a["id"]: a for a in agents}
 
@@ -210,9 +218,13 @@ def build(cfg, cell):
     # scene at all. The rewrite lives in apply_mission_file, so the sweep, the
     # sandbox and `SETMISSION <name> to <POINT>` all obey ONE rule rather than
     # three that can drift.
+    # THE GOALS THIS SWEEP CHOSE. A mission says how many points it needs;
+    # `goals` (or the single `goal`, for the penetration path) says where they
+    # are. One mission file, any scene.
     changed, messages, _ = st.apply_mission_file(
         str(mpath), by, arena.get("points") or {}, arena,
-        goal=cfg.get("goal") or None)
+        goals=(list(cfg.get("goals") or [])
+               or ([cfg["goal"]] if cfg.get("goal") else [])))
     if not changed:
         raise RuntimeError("mission tasked no agents: "
                            + ("; ".join(messages) or str(mpath)))
