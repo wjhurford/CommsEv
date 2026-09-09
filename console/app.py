@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
     QComboBox, QDialog, QInputDialog, QLineEdit, QMenu, QSizePolicy,
     QSlider, QSplitter, QProgressBar, QCheckBox, QSpinBox, QDoubleSpinBox,
-    QScrollArea, QFrame,
+    QScrollArea, QFrame, QAbstractSpinBox,
     QVBoxLayout, QWidget,
 )
 
@@ -348,7 +348,11 @@ class Viewport(QWidget):
         # questions - the links say what CAN carry traffic, this says what
         # actually is, and for whom.
         self.authority = {}       # {agent_id: {decider, tier, reachable}}
-        self.show_c2 = True
+        # OFF UNTIL ASKED FOR. It is a diagnostic layer - arrows, rank marks
+        # and per-link counts over the top of the world - and having it on at
+        # startup means the first thing anyone sees is the busiest possible
+        # picture. The button is one click away.
+        self.show_c2 = False
         self.selected_points = set()
         self._band = None         # rubber-band rectangle, screen coords
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
@@ -1975,6 +1979,24 @@ class SensorView(QWidget):
         lay.addWidget(self.tabs, 1)
         self._views, self._stacked = {}, []
 
+    @staticmethod
+    def _scrolled(inner, min_h):
+        """Put a plot in a scroll area with a real minimum height.
+
+        Two sensors stacked in a dock that is 500 px tall gives each of them
+        250 px, and a polar plot with a header and a depth strip does not fit
+        in 250 px - it gets cut off at the bottom, which is exactly what was
+        reported. Give each plot the height it actually needs and let the
+        panel scroll instead of squeezing.
+        """
+        inner.setMinimumHeight(min_h)
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sa.setWidget(inner)
+        return sa
+
     # -- data ---------------------------------------------------------------
 
     def set_scan(self, agent_id, scan, state=None):
@@ -2009,14 +2031,15 @@ class SensorView(QWidget):
             col.setSpacing(2)
             for sc in scans:
                 v = ScanView()
+                v.setMinimumHeight(300)
                 col.addWidget(v, 1)
                 self._stacked.append((sc.get("frame"), v))
-            self.tabs.addTab(page, "All")
+            self.tabs.addTab(self._scrolled(page, 300 * len(scans)), "All")
         for sc in scans:
             v = ScanView()
             self._views[sc.get("frame")] = v
             name = (sc.get("frame") or "?").split("/")[-1]
-            self.tabs.addTab(v, name)
+            self.tabs.addTab(self._scrolled(v, 340), name)
 
     # -- the agent's own state, above the tabs ------------------------------
 
@@ -2245,6 +2268,7 @@ class PlotPane(QWidget):
         self.series = []
         self.setAcceptDrops(True)
         self.setMinimumSize(160, 90)
+        self._key = []          # (number, colour, path, lo, hi) per series
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     # -- drag and drop ------------------------------------------------------
@@ -2264,6 +2288,9 @@ class PlotPane(QWidget):
 
     def contextMenuEvent(self, ev):
         menu = QMenu(self)
+        a = menu.addAction("Legend...")
+        a.triggered.connect(self.show_legend)
+        menu.addSeparator()
         a = menu.addAction("Split horizontally")
         a.triggered.connect(lambda: self.area.split(self, Qt.Horizontal))
         a = menu.addAction("Split vertically")
@@ -2284,6 +2311,38 @@ class PlotPane(QWidget):
             self.series.remove(path)
             self.update()
 
+    def show_legend(self):
+        """The names behind the numbers, in a window with room for them."""
+        if not self._key:
+            QMessageBox.information(self, "Legend",
+                                    "Nothing plotted here yet.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Legend")
+        lay = QVBoxLayout(dlg)
+        tbl = QTableWidget(len(self._key), 4)
+        tbl.setHorizontalHeaderLabels(["#", "Series", "Min", "Max"])
+        tbl.verticalHeader().setVisible(False)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        for r, (num, col, path, lo, hi) in enumerate(self._key):
+            cells = [str(num), self.series_label(path),
+                     f"{lo:.4g}", f"{hi:.4g}"]
+            for c, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                if c == 0:
+                    it.setForeground(QBrush(QColor(col)))
+                it.setToolTip(path)
+                tbl.setItem(r, c, it)
+        tbl.resizeColumnsToContents()
+        tbl.setMinimumWidth(460)
+        lay.addWidget(tbl, 1)
+        close = QPushButton("Close")
+        close.clicked.connect(dlg.accept)
+        lay.addWidget(close)
+        dlg.resize(520, min(120 + 24 * len(self._key), 640))
+        dlg.exec()
+
     # -- painting -----------------------------------------------------------
 
     def paintEvent(self, _):
@@ -2298,7 +2357,22 @@ class PlotPane(QWidget):
         finally:
             p.end()
 
+    @staticmethod
+    def series_label(path):
+        """The readable name of a series - what the legend calls it.
+
+        `agents.` is how a series is ADDRESSED, not what it is called, and on
+        a swept chart the id is a configuration whose parts are joined with
+        underscores. Both get unpicked; the metric is kept, because on a live
+        run it is the half that distinguishes two series of the same car.
+        """
+        label = path[7:] if path.startswith("agents.") else path
+        who, _, metric = label.partition(".")
+        who = who.replace("_", " / ")
+        return f"{who}  {metric}" if metric else who
+
     def _draw(self, p):
+        self._key = []
         frames = self.area.frames
         if self.area.live:
             p.setPen(QPen(QColor(C_WARN)))
@@ -2369,15 +2443,19 @@ class PlotPane(QWidget):
             # addressed, not what it is called: on a swept chart every entry
             # began "agents." and ended with the same metric, so the nine
             # names differed only in the middle and the legend was a wall.
-            label = path
-            if label.startswith("agents."):
-                label = label[7:]
-            if "." in label:
-                who, metric = label.rsplit(".", 1)
-                label = who.replace("_", " / ")
-            p.setPen(QPen(colour))
-            p.drawText(left + 6, top + 14 + idx * 13,
-                       f"{label}   {own_lo:.3g} .. {own_hi:.3g}")
+            # A KEY, NOT A LEGEND. Nine configurations printed as nine full
+            # names across the top of the plot is a wall of text lying on top
+            # of the very lines it describes - unreadable, and it hides the
+            # data. Reported twice. What goes on the plot now is a numbered
+            # swatch; the names, ranges and colours live in the Legend window
+            # (the Legend button, or right-click here), where there is room
+            # for them.
+            sw = QRectF(left + 6, top + 6 + idx * 12, 8, 8)
+            p.fillRect(sw, QBrush(colour))
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(QPointF(left + 19, top + 14 + idx * 12), str(idx + 1))
+            self._key.append((idx + 1, colour.name(), path,
+                              own_lo, own_hi))
 
         cursor = self.area.cursor
         if cursor is not None and 0 <= cursor < len(t):
@@ -2391,11 +2469,16 @@ class PlotPane(QWidget):
         unit = getattr(self.area, "xlabel", "s")
         p.setPen(QPen(QColor(C_DIM)))
         p.setFont(QFont("Consolas", 7))
+        # The axis NAME sits at the right-hand end, and any tick label that
+        # would run into it is dropped rather than overprinted - "30" and
+        # "dB P_j/P_t" on top of each other was neither.
+        unit_x = self.width() - right - 8 - len(unit) * 5
         for tt in sorted(set(t)):
             cx = left + w * (tt - t0) / (t1 - t0)
             p.drawLine(QPointF(cx, top + h), QPointF(cx, top + h + 3))
-            p.drawText(QPointF(cx - 12, self.height() - 6), f"{tt:g}")
-        p.drawText(QPointF(self.width() - right - 52, self.height() - 6), unit)
+            if cx + 14 < unit_x:
+                p.drawText(QPointF(cx - 12, self.height() - 6), f"{tt:g}")
+        p.drawText(QPointF(unit_x, self.height() - 6), unit)
         if shared:
             # The shared scale is a number you can read off, not an implied
             # one - otherwise "they share a scale" is a claim, not a fact.
@@ -2498,6 +2581,14 @@ class PlotArea(QWidget):
                 parent.setParent(None)
                 parent.deleteLater()
         self.refresh()
+
+    def first_plot(self):
+        """The plot the Legend button speaks for: the first with anything on
+        it, or simply the first."""
+        panes = self.panes()
+        if not panes:
+            return None
+        return next((q for q in panes if q.series), panes[0])
 
     def add_to_first_empty(self, path):
         """Double-click fallback: fill the first empty plot, else the first."""
@@ -2881,6 +2972,19 @@ class CustomFleetDialog(QDialog):
         top.addWidget(QLabel("Fleet name"))
         self.name = QLineEdit(f"custom_{side}")
         top.addWidget(self.name, 1)
+        # THE NAME AND THE SAVE ARE ONE CONTROL. The file is called whatever
+        # the box says, so the button belongs against the box - a fleet named
+        # here and saved under a different name in a file dialog two steps
+        # later is a trap. Reported: "when we give the fleet a fleet_name
+        # should this not be the same as the save as? maybe we make the save
+        # button next to the fleet name input as a small icon".
+        save = QPushButton("\u2913")
+        save.setFixedWidth(28)
+        save.setToolTip("Save this fleet as fleets/<name>.yaml, using the "
+                        "name in the box.\nNothing is written unless you "
+                        "press this.")
+        save.clicked.connect(self.save_as)
+        top.addWidget(save)
         lay.addLayout(top)
         hint = QLabel("Add agents, set platform and spawn pose. Saved to "
                       "fleets/<name>.yaml and selected in Setup.")
@@ -2905,16 +3009,6 @@ class CustomFleetDialog(QDialog):
         lay.addLayout(rowbtns)
 
         row = QHBoxLayout()
-        # SAVE LIVES HERE, next to the thing being built. It used to be a pair
-        # of buttons out in the Setup tab, which is the wrong place twice
-        # over: they were nowhere near the builder, and they were visible for
-        # a side whose fleet you had never built.
-        save = QPushButton("Save as...")
-        save.setToolTip("Write this fleet to fleets/<name>.yaml so it can be "
-                        "chosen again, and diffed, like a shipped one.\n"
-                        "Nothing is written unless you press this.")
-        save.clicked.connect(self.save_as)
-        row.addWidget(save)
         row.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
@@ -2946,14 +3040,17 @@ class CustomFleetDialog(QDialog):
                                     "Add at least one agent first.")
             return
         import yaml as _yaml
-        suggested = str(REPO_ROOT / "fleets"
-                        / f"{doc.get('name') or self.side}.yaml")
-        path, _ = QFileDialog.getSaveFileName(
-            self, f"Save {self.side} fleet", suggested, "Fleet (*.yaml)")
-        if not path:
+        stem = (self.name.text() or f"custom_{self.side}").strip()
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("_") or self.side
+        path = REPO_ROOT / "fleets" / f"{stem}.yaml"
+        if path.exists() and QMessageBox.question(
+                self, "Save fleet",
+                f"fleets/{path.name} already exists. Overwrite it?"
+                ) != QMessageBox.Yes:
             return
+        path = str(path)
         doc = dict(doc)
-        doc["name"] = Path(path).stem
+        doc["name"] = stem
         try:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(
@@ -2966,7 +3063,6 @@ class CustomFleetDialog(QDialog):
         except OSError as exc:
             QMessageBox.warning(self, "Save fleet", f"cannot write: {exc}")
             return
-        self.name.setText(Path(path).stem)
         par = self.parent()
         if hasattr(par, "_refresh_setup_lists"):
             par._refresh_setup_lists()
@@ -3104,10 +3200,18 @@ class AxisRange(QWidget):
             b.setRange(lo_min, hi_max)
             b.setValue(v)
             b.setSuffix(f" {unit}" if unit else "")
+            # NO STEPPER ARROWS. They take about a third of the width of a
+            # short box and, with a unit suffix on top, the VALUE was what got
+            # clipped - "30.0 d" for 30.0 dB. Nobody dials a sweep range one
+            # click at a time anyway; it is typed. Reported: "we dont need
+            # these arrows when setting the experiment numbers, it just means
+            # the actual number gets cut off".
+            b.setButtonSymbols(QAbstractSpinBox.NoButtons)
             b.setFixedWidth(84)
         self.steps = QSpinBox()
         self.steps.setRange(1, 200)
         self.steps.setValue(steps)
+        self.steps.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.steps.setFixedWidth(56)
         self.steps.setToolTip("How many values between min and max, "
                               "inclusive. 1 pins the axis to the minimum.")
@@ -4303,6 +4407,8 @@ class Console(QMainWindow):
         self._spacing = {}             # {side: metres}
         self._blue_ids = set()
         self._red_ids = set()
+        self._played_once = False
+        self._focus_setup()             # nothing but Setup until Play
         self.statusBar().showMessage(
             "Setup: choose a scene, then a fleet")
 
@@ -4343,7 +4449,7 @@ class Console(QMainWindow):
                              "holds rank, and the number of vehicles whose "
                              "orders cross each link.", None)
         c2.setCheckable(True)
-        c2.setChecked(True)
+        c2.setChecked(False)
         c2.clicked.connect(
             lambda on: (setattr(self.viewport, "show_c2", on),
                         self.viewport.update()))
@@ -4933,6 +5039,26 @@ class Console(QMainWindow):
         hint.setWordWrap(True)
         rlay.addWidget(hint)
 
+        legend = QPushButton("Legend...")
+        legend.setToolTip("What the numbered swatches on each plot mean - "
+                          "series name, colour and range.\n"
+                          "Also on right-click in any plot.")
+        legend.clicked.connect(
+            lambda: (self.plots.first_plot() or QWidget()).show_legend()
+            if self.plots.first_plot() else
+            QMessageBox.information(self, "Legend", "No plots yet."))
+        rlay.addWidget(legend)
+
+        findings = QPushButton("Copy findings")
+        findings.setToolTip(
+            "A plain-text summary of what this run or sweep actually "
+            "measured - configuration, mission outcome, and every plotted "
+            "series with its range and where it crosses.\n"
+            "Copied to the clipboard AND written to the log, so it can be "
+            "pasted straight into a write-up.")
+        findings.clicked.connect(self.copy_findings)
+        rlay.addWidget(findings)
+
         export = QPushButton("Export run to CSV")
         export.clicked.connect(self.export_csv)
         rlay.addWidget(export)
@@ -5372,8 +5498,16 @@ class Console(QMainWindow):
         """
         if not hasattr(self, "tabs"):
             return
-        on_setup = self.tabs.tabText(self.tabs.currentIndex()) == "Setup"
-        composing = on_setup and not getattr(self, "_setup_locked", False)
+        # UNTIL PLAY, NOTHING BUT SETUP. Not "while the Setup tab happens to
+        # be showing" - that let a click on another tab escape into a world
+        # that does not exist yet. Reported: "until we press play we shouldn't
+        # be able to click on anything other than setup".
+        #
+        # It unlocks on the first Play of a composition and stays unlocked
+        # after Stop, so Results is readable; choosing a different scene or
+        # fleet is a new composition and locks it again.
+        composing = not (getattr(self, "_played_once", False)
+                         or getattr(self, "_setup_locked", False))
         for i in range(self.tabs.count()):
             if self.tabs.tabText(i) == "Setup":
                 continue
@@ -5422,6 +5556,10 @@ class Console(QMainWindow):
     def on_scene_chosen(self, index):
         if index <= 0:
             return
+        # A NEW COMPOSITION. Whatever was on the other tabs described the last
+        # world; lock them again until this one has been run - see
+        # _focus_setup.
+        self._played_once = False
         self._setup_scene = self.scene_combo.currentText()
         self._formation, self._spacing, self._spawn_point = {}, {}, {}
         # Points are coordinates in the OLD world. Carrying them would put
@@ -5448,6 +5586,7 @@ class Console(QMainWindow):
         combo = self.red_combo if side == "red" else self.fleet_combo
         if not self._setup_scene:
             return
+        self._played_once = False           # a new composition; see _focus_setup
         if index <= 0:                      # "(none)" - clear this side
             self._clear_side(side)
             self._compose_setup()
@@ -7721,6 +7860,110 @@ class Console(QMainWindow):
         self.series_tree.expandAll()
         self.series_tree.blockSignals(False)
 
+    def findings_text(self):
+        """WHAT THIS RUN ACTUALLY MEASURED, as text you can paste.
+
+        A chart is how you see a result; it is not how you report one. Reading
+        numbers back off a plot by eye is where write-ups acquire their
+        mistakes, and a screenshot of nine overlaid curves cannot be quoted at
+        all. This states the configuration, the outcome, and every plotted
+        series with its endpoints, its range and - for a sweep - where it
+        crosses zero, which for penetration is the point at which the fleet
+        stops making ground.
+
+        Deliberately just the measurements. It draws no conclusions, because
+        the conclusions are the researcher's job and a tool that writes them
+        is a tool that can be wrong in prose.
+        """
+        frames = self.frames or []
+        if not frames:
+            return "No run recorded. Press Play, then Stop."
+        sweep = getattr(self.plots, "xlabel", "s") != "s"
+        xlabel = getattr(self.plots, "xlabel", "s")
+        first, last = frames[0], frames[-1]
+        nets = ((self.viewport.arena or {}).get("networks")
+                or (self.doc or {}).get("networks") or {})
+        blue = nets.get("blue") or {}
+        movers = [a for a in (last.get("agents") or [])
+                  if a.get("platform") not in ("ground_station", "result")
+                  and not a.get("jammer")]
+        out = []
+        out.append("DEADBAND " + ("SWEEP" if sweep else "RUN")
+                   + f" - {time.strftime('%Y-%m-%d %H:%M')}")
+        out.append("")
+        out.append("CONFIGURATION")
+        out.append(f"  scene           {self._setup_scene or '?'}")
+        out.append(f"  blue fleet      {self._setup_fleet or '?'}"
+                   + (f"   red fleet {self._setup_red}"
+                      if getattr(self, "_setup_red", None) else ""))
+        out.append(f"  authority       "
+                   f"{blue.get('authority') or blue.get('topology') or '(not declared)'}")
+        out.append(f"  routing         {blue.get('routing') or '(not declared)'}")
+        out.append(f"  coordinator     {blue.get('coordinator') or '(none)'}")
+        if blue.get("squads"):
+            for sq, spec in (blue["squads"] or {}).items():
+                out.append(f"  squad {sq:<9} leader {(spec or {}).get('leader')}"
+                           f"  members {', '.join((spec or {}).get('members') or [])}")
+        out.append(f"  vehicles        {len(movers)}")
+        if sweep:
+            out.append(f"  swept axis      {xlabel}   "
+                       f"{_num(first.get('sim_time_s')):g} .. "
+                       f"{_num(last.get('sim_time_s')):g}"
+                       f"   ({len(frames)} values)")
+        else:
+            out.append(f"  duration        {_num(last.get('sim_time_s')):.1f} s"
+                       f"   ({len(frames)} frames)")
+            out.append(f"  mission         {self._mission_name or '(none set)'}"
+                       + (f"   {self._mission_line}"
+                          if getattr(self, "_mission_line", "") else ""))
+        out.append("")
+
+        plotted = []
+        for pane in self.plots.panes():
+            for path in pane.series:
+                if path not in plotted:
+                    plotted.append(path)
+        if not plotted:
+            out.append("NOTHING PLOTTED - drag a series onto a plot and press "
+                       "this again to have its numbers written out.")
+            return "\n".join(out)
+
+        xs = [_num(f.get("sim_time_s")) for f in frames]
+        out.append("MEASUREMENTS" + (f"   (x = {xlabel})" if sweep else ""))
+        for path in plotted:
+            vals = [series_value(frames, i, path) for i in range(len(frames))]
+            pairs = [(x, v) for x, v in zip(xs, vals)
+                     if isinstance(v, (int, float))]
+            name = PlotPane.series_label(path)
+            if not pairs:
+                out.append(f"  {name:<34} no data")
+                continue
+            ys = [v for _x, v in pairs]
+            mean = sum(ys) / len(ys)
+            out.append(f"  {name}")
+            out.append(f"      start {pairs[0][1]:.4g}   end {pairs[-1][1]:.4g}"
+                       f"   min {min(ys):.4g}   max {max(ys):.4g}"
+                       f"   mean {mean:.4g}")
+            # WHERE IT CROSSES ZERO. On a swept penetration this is the
+            # jammer advantage at which the fleet stops making ground, which
+            # is the number a write-up actually quotes.
+            for (x0, v0), (x1, v1) in (zip(pairs, pairs[1:]) if sweep else ()):
+                if (v0 > 0) != (v1 > 0) and v0 != v1:
+                    xc = x0 + (x1 - x0) * (v0 / (v0 - v1))
+                    out.append(f"      crosses zero at {xlabel} = {xc:.3g}")
+                    break
+        out.append("")
+        out.append("Numbers only - the interpretation is yours.")
+        return "\n".join(out)
+
+    def copy_findings(self):
+        text = self.findings_text()
+        QApplication.clipboard().setText(text)
+        self.say("")
+        self.say(text)
+        self.say("")
+        self.say("(the above is on the clipboard)")
+
     def export_csv(self):
         """Wide CSV: one row per frame, one column per discovered series."""
         if not self.frames:
@@ -8108,6 +8351,7 @@ class Console(QMainWindow):
             self.say("Nothing to run - use the Setup tab: choose a scene, "
                      "then a fleet.")
             return
+        self._played_once = True            # the rest of the window is live now
         self._lock_setup(True)
         # Anything left from a previous run holds the port and wins the race.
         self.say("Clearing any previous ROS processes...")
@@ -8214,6 +8458,9 @@ class Console(QMainWindow):
     def start_run(self):
         """Launch the telemetry source as a background process.
 
+        This is also the moment the rest of the window becomes meaningful -
+        there is now a world for the other tabs to describe. See _focus_setup.
+
         Today that is the stub. When the real simulator exists this function is
         the only thing that changes — the Console never learns what is behind
         the pipe, which is the whole point of the boundary.
@@ -8231,6 +8478,7 @@ class Console(QMainWindow):
         # A live run is a time series again, whatever the last sweep left set.
         self.plots.xlabel = "s"
         self.plots.shared_scale = False
+        self._played_once = True            # the rest of the window is live now
         self._lock_setup(True)
         self.proc = QProcess(self)
         self.proc.readyReadStandardOutput.connect(self.on_telemetry)
