@@ -2352,6 +2352,94 @@ def _position_aiding(agent, arena, pose=None):
     return best
 
 
+def command_path(agent, arena, links, poses, networks, link_states=None):
+    """The hops an order to this agent actually travels, decider first.
+
+    command_authority() answers "can it get through". This answers "which way
+    does it go", and the difference is the whole reason routing is an axis:
+    in a mesh an order to a far vehicle may cross two peers, and those two
+    peers are then CARRYING it - which is invisible if all you ever ask is
+    yes/no.
+
+    SHORTEST PATH, because that is what a routing protocol converges on and
+    counting hops is how the relay chain the corridor experiment depends on
+    becomes something you can point at. Returns [] when the order cannot get
+    through at all, and [aid] for an agent that decides for itself.
+    """
+    auth = command_authority(agent, arena, links, poses, networks,
+                             link_states=link_states)
+    aid = agent["id"]
+    dec = auth.get("decider")
+    if not auth.get("reachable") or dec is None:
+        return []
+    if dec == aid:
+        return [aid]
+
+    adj = {}
+    if link_states is not None:
+        for pair, meta in link_states.items():
+            if isinstance(meta, dict):
+                if not meta.get("active") or meta.get("state") == "down":
+                    continue
+            elif meta == "down":
+                continue
+            x, y = tuple(pair)
+            adj.setdefault(x, set()).add(y)
+            adj.setdefault(y, set()).add(x)
+    else:
+        for l in links:
+            if link_state(poses[l["a"]], poses[l["b"]])["state"] != "down":
+                adj.setdefault(l["a"], set()).add(l["b"])
+                adj.setdefault(l["b"], set()).add(l["a"])
+
+    # BREADTH first, so the path found is the shortest one - the same one a
+    # routing protocol would settle on, and the honest denominator for "how
+    # many hops is this vehicle behind".
+    prev, frontier, seen = {aid: None}, [aid], {aid}
+    while frontier:
+        nxt = []
+        for n in frontier:
+            if n == dec:
+                path, cur = [], n
+                while cur is not None:
+                    path.append(cur)
+                    cur = prev[cur]
+                return path[::-1]
+            for m in adj.get(n, ()):
+                if m not in seen:
+                    seen.add(m)
+                    prev[m] = n
+                    nxt.append(m)
+        frontier = nxt
+    return []
+
+
+def command_load(agents, arena, links, poses, networks, link_states=None):
+    """How many vehicles' orders cross each link, and how deep each one is.
+
+    Returns ({frozenset(pair): count}, {agent_id: hops}).
+
+    THE NUMBER, NOT A THICKNESS. If everything reaches the coordinator through
+    one vehicle, the link into that vehicle carries five and the links out of
+    it carry one each - and reading "5" is exact where reading a fatter line
+    is a guess. It also makes the relay visible as a QUANTITY: that vehicle is
+    not merely on the path, it is carrying four other people's command, and if
+    it drops they all go with it.
+    """
+    load, depth = {}, {}
+    for a in agents:
+        if a.get("ghost") or a.get("jammer") \
+                or a.get("platform") == "ground_station":
+            continue
+        path = command_path(a, arena, links, poses, networks,
+                            link_states=link_states)
+        depth[a["id"]] = max(len(path) - 1, 0) if path else None
+        for i in range(len(path) - 1):
+            load[frozenset((path[i], path[i + 1]))] = \
+                load.get(frozenset((path[i], path[i + 1])), 0) + 1
+    return load, depth
+
+
 def gnss_denied(agent, poses, jammers, plexp):
     """Is this agent's GNSS fix denied right now by a GNSS-band jammer?
 
@@ -3053,6 +3141,14 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     _jam = active_jammers(agents)
     _noise_mw = 10.0 ** (_rf["noise_dbm"] / 10.0)
     _nets = arena.get("networks") or {}
+    # WHOSE ORDERS CROSS WHICH LINK. Computed once here, on the links as they
+    # stand after movement, so the Console can print the count on the line
+    # instead of re-deriving the graph in the UI - two copies of a traversal
+    # is two chances for the picture to disagree with the model.
+    _load, _depth = command_load(agents, arena, links_out, poses, _nets,
+                                 link_states=_states)
+    for _l in links_out:
+        _l["carries"] = _load.get(frozenset((_l["a"], _l["b"])), 0)
 
     agents_out = []
     for a in agents:
@@ -3112,6 +3208,9 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # the outcome - running, complete, failed - and `mission_progress`
             # is how far round the circuit it has got. An objective has
             # neither, which is precisely why missions needed to exist.
+            # HOW MANY HOPS BEHIND ITS DECIDER. 1 is direct; 3 means two
+            # vehicles are relaying for it, and losing either cuts it off.
+            "command_hops": _depth.get(a["id"]),
             "mission_state": plan_state(a),
             "mission_progress": (
                 {k: (a.get("_plan") or {}).get(k)

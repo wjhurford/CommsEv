@@ -343,6 +343,12 @@ class Viewport(QWidget):
         # half of setting up a run and they were invisible: you could see the
         # vehicles and not the thing they were being sent to.
         self.points = {}          # {name: {x, y, z}}
+        # THE COMMAND LAYER: who answers to whom, and how much each link is
+        # carrying. Drawn on top of the RF picture because they are different
+        # questions - the links say what CAN carry traffic, this says what
+        # actually is, and for whom.
+        self.authority = {}       # {agent_id: {decider, tier, reachable}}
+        self.show_c2 = True
         self.selected_points = set()
         self._band = None         # rubber-band rectangle, screen coords
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
@@ -702,8 +708,13 @@ class Viewport(QWidget):
             self._belief_ghosts(p)
             self._link_lines(p)
             self._points(p)
+            if self.show_c2:
+                self._authority_arrows(p)
             for a in self.agents:
                 self._agent(p, a)
+            if self.show_c2:
+                self._rank_glyphs(p)
+                self._link_loads(p)
             if self.show_axes:
                 self._axes(p)
             self._overlay(p)
@@ -719,6 +730,135 @@ class Viewport(QWidget):
             p.drawText(16, 58, Viewport._paint_error or "")
         finally:
             p.end()
+
+    # -- the command layer --------------------------------------------------
+
+    C2_COL = "#C9A227"        # one colour, used by nothing else on the map
+
+    def _authority_arrows(self, p):
+        """An arrow from each vehicle to WHOEVER DECIDES FOR IT.
+
+        This is the authority axis drawn as what it is - a tree. Centralized
+        is a fan converging on the coordinator; hierarchical is two levels;
+        decentralized draws nothing at all, which is the honest picture of
+        every vehicle deciding for itself.
+
+        Drawn UNDER the vehicles and in a colour nothing else uses, so it
+        reads as a separate question from the RF links crossing the same
+        space. Dashed when the decider cannot currently be reached: the
+        vehicle still ANSWERS to them, it just cannot hear them, and those are
+        different failures.
+        """
+        by = {a.get("id"): a for a in self.agents}
+        for aid, auth in (self.authority or {}).items():
+            dec = (auth or {}).get("decider")
+            if not dec or dec == aid:
+                continue                    # decides for itself: no arrow
+            a, b = by.get(aid), by.get(dec)
+            if not a or not b:
+                continue
+            pa = a.get("pose", {})
+            pb = b.get("pose", {})
+            s0 = self.to_screen(_num(pa.get("x")), _num(pa.get("y")),
+                                _num(pa.get("z")))
+            s1 = self.to_screen(_num(pb.get("x")), _num(pb.get("y")),
+                                _num(pb.get("z")))
+            col = QColor(self.C2_COL)
+            if not auth.get("reachable", True):
+                col = QColor("#E08A3C")
+            pen = QPen(col, 2.2)
+            pen.setStyle(Qt.SolidLine if auth.get("reachable", True)
+                         else Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            # Stop short of the body so the arrowhead sits beside the vehicle
+            # rather than under it.
+            dx, dy = s1.x() - s0.x(), s1.y() - s0.y()
+            d = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / d, dy / d
+            gap = min(14.0, d * 0.25)
+            e = QPointF(s1.x() - ux * gap, s1.y() - uy * gap)
+            p.drawLine(QPointF(s0.x() + ux * gap, s0.y() + uy * gap), e)
+            # A chevron pointing AT the decider. Direction is the whole
+            # message: it says who answers to whom, not merely that they are
+            # associated.
+            ang = math.atan2(uy, ux)
+            for sgn in (+1, -1):
+                a2 = ang + math.pi + sgn * 0.42
+                p.drawLine(e, QPointF(e.x() + 11 * math.cos(a2),
+                                      e.y() + 11 * math.sin(a2)))
+
+    def _rank_glyphs(self, p):
+        """A mark above whoever holds rank. Coordinator, leader, or nothing.
+
+        The cheapest possible answer to "who is senior here", and it makes a
+        hierarchy over a star visibly absurd: a leader glyph with no arrows
+        pointing at it is a rank nothing routes through.
+        """
+        rank = {}
+        for aid, auth in (self.authority or {}).items():
+            dec = (auth or {}).get("decider")
+            tier = (auth or {}).get("tier")
+            if not dec or dec == aid:
+                continue
+            # The decider's rank is named by how the SUBORDINATE reaches it.
+            rank[dec] = ("coordinator" if tier == "coordinator"
+                         else rank.get(dec, "leader"))
+        if not rank:
+            return
+        p.setFont(QFont("Consolas", 11))
+        for a in self.agents:
+            r = rank.get(a.get("id"))
+            if not r:
+                continue
+            pose = a.get("pose", {})
+            c = self.to_screen(_num(pose.get("x")), _num(pose.get("y")),
+                               _num(pose.get("z")))
+            p.setPen(QPen(QColor(self.C2_COL)))
+            p.setBrush(Qt.NoBrush)
+            p.drawText(QPointF(c.x() - 5, c.y() - 16),
+                       "\u2605" if r == "coordinator" else "\u25b2")
+
+    def _link_loads(self, p):
+        """HOW MANY VEHICLES' ORDERS CROSS THIS LINK, as a number on the line.
+
+        A number rather than a thickness, deliberately. If everything reaches
+        the coordinator through one vehicle, the link into that vehicle reads
+        5 and the links out of it read 1 - and 5 is exact where a fatter line
+        is a guess the reader has to calibrate against the other lines. It
+        also names the stake: that vehicle is not merely ON the path, it is
+        carrying four other people's command, and if it drops they go with it.
+
+        Only carried links get a number. A spare link carries nothing by
+        definition, and printing 0 along every unused pair would bury the
+        ones that matter.
+        """
+        by = {a.get("id"): a for a in self.agents}
+        p.setFont(QFont("Consolas", 9))
+        for link in self.links:
+            n = int(link.get("carries") or 0)
+            if n <= 0 or not link.get("active", True):
+                continue
+            a, b = by.get(link.get("a")), by.get(link.get("b"))
+            if not a or not b:
+                continue
+            pa, pb = a.get("pose", {}), b.get("pose", {})
+            s0 = self.to_screen(_num(pa.get("x")), _num(pa.get("y")),
+                                _num(pa.get("z")))
+            s1 = self.to_screen(_num(pb.get("x")), _num(pb.get("y")),
+                                _num(pb.get("z")))
+            mid = QPointF((s0.x() + s1.x()) / 2, (s0.y() + s1.y()) / 2)
+            r = 8.0 if n < 10 else 11.0
+            # A disc behind it, so a number sitting on a line stays readable.
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(24, 28, 31, 235)))
+            p.drawEllipse(mid, r, r)
+            p.setPen(QPen(QColor(self.C2_COL), 1.2))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(mid, r, r)
+            p.setPen(QPen(QColor(self.C2_COL)))
+            p.drawText(QPointF(mid.x() - (4 if n < 10 else 7),
+                               mid.y() + 4), str(n))
 
     def _points(self, p):
         """The scene's named points - what a mission is written against.
@@ -1544,6 +1684,37 @@ class Viewport(QWidget):
             p.drawLine(QPointF(cxp, yy - 5), QPointF(cxp, yy + 5))
             p.drawEllipse(QPointF(cxp, yy), 5, 5)
         row("named point - drag it to move the objective", d_point)
+
+        if self.show_c2:
+            section("COMMAND   who decides, and who carries it")
+            def d_arrow(yy):
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(self.C2_COL), 2.0))
+                p.drawLine(x_sw, yy, x_sw + 22, yy)
+                p.drawLine(x_sw + 22, yy, x_sw + 16, yy - 4)
+                p.drawLine(x_sw + 22, yy, x_sw + 16, yy + 4)
+            row("answers to (dashed = cannot reach them)", d_arrow)
+            p.setPen(QPen(QColor(self.C2_COL)))
+            p.setFont(QFont("Consolas", 9))
+            p.drawText(x_sw + 6, y, "\u2605")
+            p.setPen(QPen(QColor(C_DIM)))
+            p.setFont(QFont("Consolas", 8))
+            p.drawText(x_tx, y, "coordinator")
+            y += LH
+            p.setPen(QPen(QColor(self.C2_COL)))
+            p.setFont(QFont("Consolas", 9))
+            p.drawText(x_sw + 6, y, "\u25b2")
+            p.setPen(QPen(QColor(C_DIM)))
+            p.setFont(QFont("Consolas", 8))
+            p.drawText(x_tx, y, "squad leader")
+            y += LH
+            def d_count(yy):
+                p.setPen(QPen(QColor(self.C2_COL), 1.2))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QPointF(x_sw + 11, yy), 7, 7)
+                p.setFont(QFont("Consolas", 8))
+                p.drawText(QPointF(x_sw + 8, yy + 3), "3")
+            row("vehicles whose orders cross this link", d_count)
 
         section("DOCTRINE, once cut off")
         p.setPen(QPen(QColor("#E08A3C")))
@@ -3932,6 +4103,15 @@ class Console(QMainWindow):
 
         row.addSpacing(10)
         tool("\u2b1a", "Fit the arena to the window", self.viewport.reset_view)
+        c2 = tool("\u2605", "Command layer: an arrow from each vehicle to "
+                             "whoever decides for it, a mark over whoever "
+                             "holds rank, and the number of vehicles whose "
+                             "orders cross each link.", None)
+        c2.setCheckable(True)
+        c2.setChecked(True)
+        c2.clicked.connect(
+            lambda on: (setattr(self.viewport, "show_c2", on),
+                        self.viewport.update()))
         axes_btn = tool("\u22a2", "Show measured axes with metre ticks", None)
         axes_btn.setCheckable(True)
         axes_btn.clicked.connect(
@@ -3945,6 +4125,15 @@ class Console(QMainWindow):
         row.addSpacing(16)
         tool("\u2913", "Save the scenario file, keeping its comments",
              self.save_scenario)
+        tool("\u21ba", "RELOAD the Console with the current code, keeping "
+                        "this setup.\n"
+                        "Scene, fleets, spawns, points, mission, goals, "
+                        "architecture and the command tree are written out, "
+                        "the app restarts, and they are put back.\n"
+                        "For picking up a change to the Console itself - the "
+                        "simulator is re-imported on every Play, so model "
+                        "changes need no restart at all.",
+             self.reload_console)
 
         # THE TWO OPERATORS, ONE BUTTON EACH. White stays below as the tab it
         # has always been - it is the umpire's working terminal. Blue and red
@@ -4856,6 +5045,176 @@ class Console(QMainWindow):
         if hasattr(self, "lbl_mission") and self._mission_name:
             self.lbl_mission.setText(
                 f"Mission: {self._mission_name}   {self._mission_line}")
+
+    # -- reload -------------------------------------------------------------
+
+    SESSION_FILE = "runs/console_session.json"
+
+    def _session_state(self):
+        """Everything the Setup tab is holding, as plain data."""
+        return {
+            "mode": self.mode_combo.currentIndex(),
+            "scene": self._setup_scene,
+            "blue": self._setup_fleet,
+            "red": self._setup_red,
+            "spawns": self._spawns,
+            "doctrines": self._doctrines,
+            "formation": self._formation,
+            "spacing": self._spacing,
+            "points": self._points_override,
+            "authority": self.auth_combo.currentText(),
+            "routing": self.route_combo.currentText(),
+            "coordinator": self._coordinator(),
+            "reports_to": {k: v.currentData()
+                           for k, v in (self.tier_combos or {}).items()},
+            "mission": self.exp_mission.currentText(),
+            "goals": self._goal_names(),
+            "want_goals": getattr(self, "_want_goals", 1),
+            "laps": (self.mission_laps.value()
+                     if hasattr(self, "mission_laps") else 1),
+            "blue_ids": sorted(self._blue_ids or []),
+            "red_ids": sorted(self._red_ids or []),
+            "fleet_docs": self._fleet_docs,
+        }
+
+    def reload_console(self):
+        """Restart the Console with the current code, keeping this setup.
+
+        THE POINT IS THE ITERATION LOOP. Changing the Console meant closing
+        it, restarting it, and rebuilding a scene, a fleet, four spawns, two
+        points and a command tree before you could look at the change - which
+        costs more than the change usually did, and quietly discourages small
+        fixes.
+
+        A restart rather than a hot reload, deliberately. Re-importing a
+        running Qt application leaves half the old widgets alive and connected
+        to functions that no longer exist, and the failures that produces are
+        far worse than the thirty seconds it saves. A fresh process is
+        honestly fresh.
+
+        The SIMULATOR needs none of this: it is re-imported every time you
+        press Play, so a change to the model is picked up without restarting
+        anything.
+        """
+        import json
+        import subprocess
+        if (self.proc and self.proc.state() != QProcess.NotRunning) \
+                or getattr(self, "ws", None) is not None:
+            self.say("Stop the run first - reloading under a live simulator "
+                     "would leave it talking to a Console that no longer "
+                     "exists.")
+            return
+        path = REPO_ROOT / self.SESSION_FILE
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self._session_state(), indent=2,
+                                       default=str), encoding="utf-8")
+        except (OSError, TypeError) as exc:
+            self.say(f"could not save the session: {exc} - reloading anyway, "
+                     f"you will have to set up again.")
+        try:
+            subprocess.Popen([sys.executable] + sys.argv,
+                             cwd=str(REPO_ROOT), close_fds=True)
+        except OSError as exc:
+            self.say(f"could not restart: {exc}")
+            return
+        self._reloading = True
+        QApplication.quit()
+
+    def restore_session(self):
+        """Put back what reload_console saved, if it is there.
+
+        Consumed on read - the file is deleted whether or not the restore
+        works. A stale session silently reapplying itself three days later
+        would be far more confusing than an empty Setup tab.
+        """
+        import json
+        path = REPO_ROOT / self.SESSION_FILE
+        if not path.exists():
+            return
+        try:
+            st_ = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self.say(f"could not read the saved session: {exc}")
+            st_ = None
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        if not st_ or not st_.get("scene"):
+            return
+        try:
+            self._restore(st_)
+        except Exception as exc:                           # noqa: BLE001
+            import traceback
+            self.say("could not restore the previous setup:\n"
+                     + traceback.format_exc())
+            return
+        self.say(f"Reloaded. {st_.get('scene')} restored with "
+                 f"{len(st_.get('spawns') or {})} agents, "
+                 f"{len(st_.get('points') or {})} points"
+                 + (f", mission {st_.get('mission')}"
+                    if st_.get("mission") else "") + ".")
+
+    def _restore(self, st_):
+        """Rebuild the Setup tab from saved state, without any dialogs."""
+        self.mode_combo.setCurrentIndex(int(st_.get("mode") or 1))
+        self._on_mode_chosen(self.mode_combo.currentIndex())
+        i = self.scene_combo.findText(st_["scene"])
+        if i < 0:
+            return
+        self.scene_combo.setCurrentIndex(i)
+        self.on_scene_chosen(i)
+        # Straight into the fields the spawn dialog would have written, so
+        # nothing pops up asking questions that were already answered.
+        self._setup_fleet = st_.get("blue")
+        self._setup_red = st_.get("red")
+        self._fleet_docs = st_.get("fleet_docs") or {}
+        self._spawns = {k: dict(v) for k, v in (st_.get("spawns") or {}).items()}
+        self._doctrines = dict(st_.get("doctrines") or {})
+        self._formation = dict(st_.get("formation") or {})
+        self._spacing = dict(st_.get("spacing") or {})
+        self._points_override = {k: dict(v)
+                                 for k, v in (st_.get("points") or {}).items()}
+        self._blue_ids = set(st_.get("blue_ids") or [])
+        self._red_ids = set(st_.get("red_ids") or [])
+        for combo, name in ((self.fleet_combo, self._setup_fleet),
+                            (self.red_combo, self._setup_red)):
+            combo.setEnabled(True)
+            j = combo.findText(name) if name else -1
+            combo.setCurrentIndex(j if j >= 0 else 0)
+        for combo, val in ((self.auth_combo, st_.get("authority")),
+                           (self.route_combo, st_.get("routing"))):
+            k = combo.findText(val or "")
+            if k >= 0:
+                combo.setCurrentIndex(k)
+        self._compose_setup()
+        self._refresh_command_structure()
+        c = self.coord_combo.findData(st_.get("coordinator"))
+        if c >= 0:
+            self.coord_combo.setCurrentIndex(c)
+        self._refresh_command_structure()
+        for aid, boss in (st_.get("reports_to") or {}).items():
+            w = (self.tier_combos or {}).get(aid)
+            if w is not None:
+                k = w.findData(boss)
+                if k >= 0:
+                    w.setCurrentIndex(k)
+        m = self.exp_mission.findText(st_.get("mission") or "")
+        if m >= 0:
+            self.exp_mission.setCurrentIndex(m)
+        self._want_goals = int(st_.get("want_goals") or 1)
+        if hasattr(self, "mission_laps"):
+            self.mission_laps.setValue(int(st_.get("laps") or 1))
+        self._refresh_goals()
+        for slot, name in zip(self.goal_combos, st_.get("goals") or []):
+            k = slot.findData(name)
+            if k >= 0:
+                slot.setCurrentIndex(k)
+        self._goal_touched = True
+        self._on_arch_chosen()
+        self._compose_mission()
+        self._update_placing()
 
     def _lock_setup(self, locked):
         """The Setup tab is how a run is COMPOSED; while one is actually
@@ -5939,6 +6298,33 @@ class Console(QMainWindow):
         if self._setup_scene:
             self._compose_setup()
 
+    def _declared_authority(self):
+        """{agent: {decider, tier, reachable}} from the Setup pickers.
+
+        Assumed reachable, because nothing has been jammed yet - this is the
+        structure as DECLARED, and the live frame replaces it with the
+        structure as it actually stands the moment a run starts.
+        """
+        auth = (self.auth_combo.currentText()
+                if hasattr(self, "auth_combo") else "")
+        if auth == "decentralized":
+            return {}
+        coord = self._coordinator()
+        out = {}
+        for aid in sorted(self._blue_ids or []):
+            if aid == coord:
+                continue
+            if auth == "hierarchical":
+                boss = (self.tier_combos[aid].currentData()
+                        if aid in (self.tier_combos or {}) else coord)
+            else:
+                boss = coord
+            if not boss or boss == aid:
+                continue
+            out[aid] = {"decider": boss, "reachable": True,
+                        "tier": "coordinator" if boss == coord else "leader"}
+        return out
+
     def _coordinator(self):
         return (self.coord_combo.currentData()
                 if hasattr(self, "coord_combo") else None)
@@ -6453,6 +6839,11 @@ class Console(QMainWindow):
             for a in (view.get("agents") or [])
         ]
         self._push_scene_rf()
+        # THE COMMAND LAYER BEFORE PLAY. Setup has just declared who
+        # coordinates and who reports to whom, so the arrows can be drawn from
+        # the declaration - you should be able to SEE the structure you chose
+        # without starting a run to find out what you picked.
+        self.viewport.authority = self._declared_authority()
         self.viewport.links = []
         self.viewport.update()
         self.fill_publications_from_scenario()
@@ -6928,6 +7319,8 @@ class Console(QMainWindow):
         # stays drawn while the fleet advances on it.
         self.viewport.points = ((f.get("arena") or {}).get("points")
                                 or self.viewport.points)
+        self.viewport.authority = {
+            a.get("id"): (a.get("authority") or {}) for a in f.get("agents", [])}
         self._print_intercepts(f)
         self._show_mission_score(f)
         self.viewport.update()
@@ -8054,6 +8447,9 @@ class Console(QMainWindow):
             self.viewport.arena = frame.get("arena") or self.viewport.arena
             self.viewport.points = ((frame.get("arena") or {}).get("points")
                                     or self.viewport.points)
+            self.viewport.authority = {
+                a.get("id"): (a.get("authority") or {})
+                for a in frame.get("agents", [])}
             self.viewport.update()
             self.refresh_sensor_view()
         if self.stack.currentIndex() == 1:
@@ -8189,6 +8585,10 @@ def main():
         app.setStyleSheet(STYLE)
         win = Console()
         win.show()
+        # AFTER show(), so the window is up before anything is put back into
+        # it - a restore that runs first leaves you looking at a blank frame
+        # for however long the compose takes, which reads as a failed reload.
+        win.restore_session()
         sys.exit(app.exec())
     except SystemExit:
         raise
