@@ -1805,113 +1805,101 @@ class Viewport(QWidget):
 # Sensor view
 # ---------------------------------------------------------------------------
 
-class SensorView(QWidget):
-    """What the selected agent's lidar sees, as a polar plot.
+class ScanView(QWidget):
+    """ONE sensor's returns, drawn in that sensor's own frame.
 
-    Drawn in the sensor's own frame — straight up is dead ahead — because that
-    is how you read a scan when you are debugging a controller. Rotating it into
-    the world frame makes it prettier and much less useful.
+    Straight up is dead ahead, because that is how you read a scan when you
+    are debugging a controller; rotating it into the world frame makes it
+    prettier and much less useful.
+
+    A lidar and a depth camera are drawn DIFFERENTLY on purpose. The lidar is
+    a 270 degree plane and its natural picture is a polar fan with range
+    rings. A D435i is an 87 x 58 degree pyramid, and the horizontal slice this
+    model produces is one row out of a depth image - so it gets the wedge it
+    actually sees, its vertical field stated rather than implied, and a DEPTH
+    STRIP underneath: range against bearing, left to right, which is what the
+    image itself gives you. Drawing a camera as a small lidar was the thing
+    that made the two look interchangeable when they are not.
     """
 
     def __init__(self):
         super().__init__()
         self.scan = None
-        self.agent_id = None
-        self.state = None
-        self.setMinimumHeight(240)
+        self.setMinimumHeight(200)
 
-    def set_scan(self, agent_id, scan, state=None):
-        self.agent_id, self.scan, self.state = agent_id, scan, state
+    def set_scan(self, scan):
+        self.scan = scan
         self.update()
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(C_BG))
-        p.setPen(QPen(QColor(C_DIM)))
         p.setFont(QFont("Consolas", 9))
-
-        # Position and speed first. Every moving agent has them whether or not
-        # it carries a lidar, so this block is the generic part of the panel.
-        top = 0
-        if self.state:
-            pose = self.state.get("pose") or {}
-            p.setPen(QPen(QColor(C_TEXT)))
-            p.drawText(10, 16, str(self.agent_id or ""))
+        sc = self.scan
+        if not sc or not sc.get("ranges"):
             p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(10, 32, f"x {_num(pose.get('x')):7.2f}  "
-                               f"y {_num(pose.get('y')):7.2f}  "
-                               f"z {_num(pose.get('z')):7.2f}  m")
-            p.drawText(10, 46, f"yaw {math.degrees(_num(pose.get('yaw'))):6.1f} deg   "
-                               f"speed {_num(pose.get('speed')):5.2f} m/s")
-            obj = self.state.get("objective")
-            if isinstance(obj, dict):
-                # The full objective - "pursue car3", not a bare "pursuit" -
-                # tagged with armed state, since assigned-but-not-launched is
-                # the whole point of the inspect step.
-                p.drawText(10, 60, "objective  " +
-                          _objective_label(obj, armed=self.state.get("armed")))
-            elif self.state.get("mission"):
-                p.drawText(10, 60, f"objective  {self.state.get('mission')}")
-            # POSITION KNOWLEDGE - the belief-vs-truth story, per agent.
-            # A GNSS-denied car is dead-reckoning; show how wrong its estimate
-            # has become. This is what makes jamming legible on one agent.
-            err = _num(self.state.get("position_error_m"))
-            denied = self.state.get("gnss_denied")
-            y = 74
-            if denied:
-                p.setPen(QPen(QColor("#E08A3C")))
-                p.drawText(10, y, f"GNSS DENIED - dead reckoning")
-                p.drawText(10, y + 14, f"est. position error  {err:5.2f} m")
-            else:
-                p.setPen(QPen(QColor(C_DIM)))
-                p.drawText(10, y, "GNSS ok" +
-                           (f"  (est. error {err:.2f} m)" if err > 0.05 else ""))
-                y -= 0
-            # The sensors this agent ACTUALLY carries - so the panel is the
-            # agent's, not a fixed lidar view.
-            sensors = self.state.get("sensors") or []
-            names = ", ".join(sen.get("type", "?") for sen in sensors) or "none"
-            p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(10, y + 28, f"sensors: {names}")
-            top = y + 34
-            p.setPen(QPen(QColor(C_LINE)))
-            p.drawLine(8, top, self.width() - 8, top)
-
-        if not self.scan or not self.scan.get("ranges"):
-            p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(12, top + 20, "No lidar on this agent - nothing to plot."
-                                     if self.agent_id else "Select an agent.")
+            p.drawText(12, 20, "no returns")
             return
 
-        ranges = self.scan["ranges"]
-        rmax = float(self.scan.get("range_max", 10.0))
-        a0 = float(self.scan.get("angle_min", -2.356))
-        a1 = float(self.scan.get("angle_max", 2.356))
+        ranges = sc["ranges"]
+        rmax = float(sc.get("range_max", 10.0))
+        a0 = float(sc.get("angle_min", -2.356))
+        a1 = float(sc.get("angle_max", 2.356))
+        cam = bool(sc.get("slice_of_depth_image"))
 
+        # The header line says WHICH instrument this is, so two tabs of
+        # coloured wedges cannot be confused for one another.
+        p.setPen(QPen(QColor(C_TEXT)))
+        p.drawText(10, 16, f"{sc.get('model', '?')}   "
+                           f"{math.degrees(a1 - a0):.0f}\u00b0 h"
+                           + (f" \u00d7 {sc['fov_v_deg']:.0f}\u00b0 v"
+                              if cam and sc.get("fov_v_deg") else "")
+                           + f"   {rmax:.1f} m")
+        hits = [r for r in ranges if r is not None]
+        misses = len(ranges) - len(hits)
+        p.setPen(QPen(QColor(C_DIM)))
+        p.drawText(10, 30, f"{len(ranges)} rays  "
+                           + (f"near {min(hits):.2f} m" if hits else "no return")
+                           + (f"  {misses} over range" if misses else ""))
+        if cam:
+            p.setPen(QPen(QColor(C_WARN)))
+            p.drawText(10, 44, "depth-image slice")
+        top = 52
+
+        strip_h = 46 if cam else 0
+        plot_h = self.height() - top - strip_h - 18
         cx = self.width() / 2
-        cy = top + (self.height() - top) * 0.62
-        radius = min(self.width() / 2, (self.height() - top) * 0.62) - 18
-        if radius < 20:
+        cy = top + plot_h * 0.78
+        radius = min(self.width() / 2, plot_h * 0.78) - 14
+        if radius < 18:
             return
         scale = radius / rmax
 
-        # Range rings, every 2 m.
+        # Range rings. A 3 m camera and a 10 m lidar need different spacing or
+        # the camera gets one ring and the lidar gets thirty.
+        step = 0.5 if rmax <= 4.0 else 2.0
         p.setPen(QPen(QColor(C_GRID)))
-        step = 2.0
         r = step
-        while r <= rmax:
+        while r <= rmax + 1e-9:
             p.drawEllipse(QPointF(cx, cy), r * scale, r * scale)
-            p.drawText(QPointF(cx + 3, cy - r * scale - 2), f"{r:.0f}m")
+            p.drawText(QPointF(cx + 3, cy - r * scale - 2), f"{r:g}m")
             r += step
 
-        # The scan itself. Straight up on screen is straight ahead.
+        # The field of view itself, as edges - for a narrow sensor this is
+        # most of the information.
+        p.setPen(QPen(QColor(C_LINE), 1.0, Qt.DashLine))
+        for ang in (a0, a1):
+            p.drawLine(QPointF(cx, cy),
+                       QPointF(cx + rmax * scale * math.sin(ang),
+                               cy - rmax * scale * math.cos(ang)))
+
         n = len(ranges)
         poly = QPolygonF([QPointF(cx, cy)])
         for i, rng in enumerate(ranges):
-            a = a0 + (a1 - a0) * i / (n - 1)
+            ang = a0 + (a1 - a0) * i / max(n - 1, 1)
             d = (rmax if rng is None else min(float(rng), rmax)) * scale
-            poly.append(QPointF(cx + d * math.sin(a), cy - d * math.cos(a)))
+            poly.append(QPointF(cx + d * math.sin(ang), cy - d * math.cos(ang)))
         poly.append(QPointF(cx, cy))
         p.setBrush(QBrush(QColor(62, 154, 168, 34)))
         p.setPen(Qt.NoPen)
@@ -1926,23 +1914,152 @@ class SensorView(QWidget):
                     p.drawPolyline(run)
                 run = QPolygonF()
                 continue
-            a = a0 + (a1 - a0) * i / (n - 1)
+            ang = a0 + (a1 - a0) * i / max(n - 1, 1)
             d = min(float(rng), rmax) * scale
-            run.append(QPointF(cx + d * math.sin(a), cy - d * math.cos(a)))
+            run.append(QPointF(cx + d * math.sin(ang), cy - d * math.cos(ang)))
         if run.size() > 1:
             p.drawPolyline(run)
 
-        hits = [r for r in ranges if r is not None]
-        misses = n - len(hits)
+        if cam:
+            # THE DEPTH STRIP. Bearing left-to-right, range as brightness:
+            # the row of the depth image this slice came from, laid out the
+            # way the image is.
+            y0 = self.height() - strip_h - 2
+            w = self.width() - 20
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(10, y0 - 2, "depth slice  L \u2192 R")
+            for i, rng in enumerate(ranges):
+                x = 10 + w * i / max(n - 1, 1)
+                if rng is None:
+                    p.setPen(QPen(QColor("#2A3338")))
+                else:
+                    f = max(0.0, min(1.0, 1.0 - float(rng) / rmax))
+                    p.setPen(QPen(QColor(int(40 + 150 * f), int(90 + 120 * f),
+                                         int(110 + 80 * f))))
+                p.drawLine(QPointF(x, y0 + 2), QPointF(x, y0 + 28))
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(10, self.height() - 2, "near = bright")
+        else:
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(10, self.height() - 6, "up = forward")
+
+
+class SensorView(QWidget):
+    """THE SELECTED AGENT'S SENSORS - the summary, then one tab per sensor.
+
+    A single fixed lidar plot was fine while every car carried exactly one
+    lidar. It stopped being fine the moment a car could carry a lidar AND a
+    depth camera: the second sensor was invisible, and the panel implied the
+    first one was the whole picture.
+
+    So: the agent's state on top (it is true whatever is fitted), then a tab
+    strip. `All` stacks every sensor one above the other - lidar first, camera
+    under it - which is the view for asking "do these two agree?". The
+    per-sensor tabs are for reading one instrument properly.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.agent_id = None
+        self.state = None
+        self._key = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.summary = QWidget()
+        self.summary.setFixedHeight(106)
+        self.summary.paintEvent = self._paint_summary
+        lay.addWidget(self.summary)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        lay.addWidget(self.tabs, 1)
+        self._views, self._stacked = {}, []
+
+    # -- data ---------------------------------------------------------------
+
+    def set_scan(self, agent_id, scan, state=None):
+        self.agent_id, self.state = agent_id, state
+        scans = [sc for sc in ([scan] + list((state or {}).get("scans") or []))
+                 if sc and sc.get("ranges")]
+        key = (agent_id, tuple(sc.get("frame") for sc in scans))
+        if key != self._key:
+            self._key = key
+            self._rebuild(scans)
+        by = {sc.get("frame"): sc for sc in scans}
+        for frame_id, v in list(self._views.items()) + list(self._stacked):
+            if by.get(frame_id) is not None:
+                v.set_scan(by[frame_id])
+        self.summary.update()
+
+    def _rebuild(self, scans):
+        while self.tabs.count():
+            self.tabs.removeTab(0)
+        self._views, self._stacked = {}, []
+        if not scans:
+            empty = QLabel("No ranging sensor on this agent."
+                           if self.agent_id else "Select an agent.")
+            empty.setObjectName("hint")
+            empty.setAlignment(Qt.AlignCenter)
+            self.tabs.addTab(empty, "Sensors")
+            return
+        if len(scans) > 1:
+            page = QWidget()
+            col = QVBoxLayout(page)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(2)
+            for sc in scans:
+                v = ScanView()
+                col.addWidget(v, 1)
+                self._stacked.append((sc.get("frame"), v))
+            self.tabs.addTab(page, "All")
+        for sc in scans:
+            v = ScanView()
+            self._views[sc.get("frame")] = v
+            name = (sc.get("frame") or "?").split("/")[-1]
+            self.tabs.addTab(v, name)
+
+    # -- the agent's own state, above the tabs ------------------------------
+
+    def _paint_summary(self, _):
+        p = QPainter(self.summary)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.summary.rect(), QColor(C_BG))
+        p.setFont(QFont("Consolas", 9))
+        if not self.state:
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(10, 20, "Select an agent.")
+            return
+        st = self.state
+        pose = st.get("pose") or {}
         p.setPen(QPen(QColor(C_TEXT)))
-        p.drawText(10, top + 16, f"{n} rays  ·  "
-                           f"min {min(hits):.2f} m" if hits else f"{self.agent_id}  ·  no returns")
-        if misses:
-            p.setPen(QPen(QColor(C_WARN)))
-            p.drawText(10, top + 30, f"{misses} beyond {rmax:.0f} m - no return")
+        p.drawText(10, 16, str(self.agent_id or ""))
         p.setPen(QPen(QColor(C_DIM)))
-        p.drawText(10, self.height() - 8,
-                   f"fan {math.degrees(a1 - a0):.0f}°   up = forward")
+        p.drawText(10, 32, f"x {_num(pose.get('x')):7.2f}  "
+                           f"y {_num(pose.get('y')):7.2f}  "
+                           f"z {_num(pose.get('z')):7.2f}  m")
+        p.drawText(10, 46, f"yaw {math.degrees(_num(pose.get('yaw'))):6.1f} deg"
+                           f"   speed {_num(pose.get('speed')):5.2f} m/s")
+        obj = st.get("objective")
+        if isinstance(obj, dict):
+            p.drawText(10, 60, "objective  "
+                       + _objective_label(obj, armed=st.get("armed")))
+        elif st.get("mission"):
+            p.drawText(10, 60, f"objective  {st.get('mission')}")
+        err = _num(st.get("position_error_m"))
+        if st.get("gnss_denied"):
+            p.setPen(QPen(QColor("#E08A3C")))
+            p.drawText(10, 74, "GNSS DENIED - dead reckoning, "
+                               f"est. error {err:5.2f} m")
+        else:
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(10, 74, "GNSS ok"
+                       + (f"  (est. error {err:.2f} m)" if err > 0.05 else ""))
+        sensors = st.get("sensors") or []
+        names = ", ".join(sen.get("type", "?") for sen in sensors) or "none"
+        p.setPen(QPen(QColor(C_DIM)))
+        p.drawText(10, 90, f"fitted: {names}")
+        p.setPen(QPen(QColor(C_LINE)))
+        p.drawLine(8, 100, self.summary.width() - 8, 100)
 
 
 # ---------------------------------------------------------------------------
@@ -2788,6 +2905,16 @@ class CustomFleetDialog(QDialog):
         lay.addLayout(rowbtns)
 
         row = QHBoxLayout()
+        # SAVE LIVES HERE, next to the thing being built. It used to be a pair
+        # of buttons out in the Setup tab, which is the wrong place twice
+        # over: they were nowhere near the builder, and they were visible for
+        # a side whose fleet you had never built.
+        save = QPushButton("Save as...")
+        save.setToolTip("Write this fleet to fleets/<name>.yaml so it can be "
+                        "chosen again, and diffed, like a shipped one.\n"
+                        "Nothing is written unless you press this.")
+        save.clicked.connect(self.save_as)
+        row.addWidget(save)
         row.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
@@ -2797,14 +2924,55 @@ class CustomFleetDialog(QDialog):
         row.addWidget(ok)
         lay.addLayout(row)
 
-        # Seed with something sensible for the side.
-        if side == "red":
-            self.add_row(("jam1", "jam_single", 0.0, 3.0, 0.0, 0.0))
-        else:
-            self.add_row(("gcs", "ground_station", 0.0, -3.4, 0.0, 0.0))
-            self.add_row(("car1", "roboracer", -3.0, 2.0, 0.0, 0.0))
-            self.add_row(("car2", "roboracer", -3.0, 0.0, 0.0, 0.0))
-            self.add_row(("car3", "roboracer", -3.0, -2.0, 0.0, 0.0))
+        # A CLEAN SLATE, deliberately empty. It used to seed a ground station
+        # and three cars, which is not "build a custom fleet" - it is "edit
+        # the standard fleet", and it meant deleting four rows before you
+        # could start. The one thing worth saying is what a fleet needs.
+        self._empty = QLabel(
+            "Empty. Add the agents you want.\n"
+            "A blue fleet normally needs a ground station if anything is to "
+            "be commanded centrally; a decentralized one does not."
+            if side == "blue" else
+            "Empty. Add the jammers or listeners you want.")
+        self._empty.setObjectName("hint")
+        self._empty.setWordWrap(True)
+        lay.insertWidget(lay.indexOf(self.table) + 1, self._empty)
+
+    def save_as(self):
+        """Write this fleet straight to fleets/<name>.yaml."""
+        _name, doc = self.fleet_doc()
+        if not doc.get("agents"):
+            QMessageBox.information(self, "Save fleet",
+                                    "Add at least one agent first.")
+            return
+        import yaml as _yaml
+        suggested = str(REPO_ROOT / "fleets"
+                        / f"{doc.get('name') or self.side}.yaml")
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save {self.side} fleet", suggested, "Fleet (*.yaml)")
+        if not path:
+            return
+        doc = dict(doc)
+        doc["name"] = Path(path).stem
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(
+                "# Saved from the Console's fleet builder.\n"
+                "# A COMPOSITION of agents/ hardware: which vehicles, their\n"
+                "# ids and where they start. It declares no authority, no\n"
+                "# routing and no doctrine - those are picked in Setup, every\n"
+                "# run, and are never baked in here.\n"
+                + _yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Save fleet", f"cannot write: {exc}")
+            return
+        self.name.setText(Path(path).stem)
+        par = self.parent()
+        if hasattr(par, "_refresh_setup_lists"):
+            par._refresh_setup_lists()
+        if hasattr(par, "say"):
+            par.say(f"Saved {Path(path).name} "
+                    f"({len(doc['agents'])} agents)")
 
     def add_row(self, preset=None):
         r = self.table.rowCount()
@@ -2821,11 +2989,17 @@ class CustomFleetDialog(QDialog):
         for c, v in ((2, vals[2]), (3, vals[3]), (4, vals[4]), (5, vals[5])):
             self.table.setItem(r, c, QTableWidgetItem(str(v)))
         self.table.resizeColumnsToContents()
+        self._sync_empty()
 
     def remove_row(self):
         r = self.table.currentRow()
         if r >= 0:
             self.table.removeRow(r)
+        self._sync_empty()
+
+    def _sync_empty(self):
+        if hasattr(self, "_empty"):
+            self._empty.setVisible(self.table.rowCount() == 0)
 
     def fleet_doc(self):
         """The fleet YAML this dialog describes.
@@ -4414,16 +4588,9 @@ class Console(QMainWindow):
         self.red_combo.activated.connect(
             lambda i: self.on_fleet_chosen(i, "red"))
         clay.addWidget(self.red_combo)
-        savrow = QHBoxLayout()
-        for _side, _lab in (("blue", "Save blue fleet as..."),
-                            ("red", "Save red fleet as...")):
-            b = QPushButton(_lab)
-            b.setToolTip("Write the fleet built this session to "
-                         "fleets/<name>.yaml. Nothing is saved until you "
-                         "press this.")
-            b.clicked.connect(lambda _c=False, sd=_side: self.save_fleet_as(sd))
-            savrow.addWidget(b)
-        clay.addLayout(savrow)
+        # Saving a fleet belongs to the fleet builder that made it - see
+        # CustomFleetDialog.save_as. It used to be two buttons here, offering
+        # to save a red fleet you had never built.
         savef = QPushButton("Save formation as...")
         savef.setToolTip(
             "Keep the arrangement now on the map as a named, reusable shape.\n"
@@ -4839,6 +5006,10 @@ class Console(QMainWindow):
         d_sensor.setWidget(self.sensor)
         self.addDockWidget(Qt.RightDockWidgetArea, d_sensor)
         self.splitDockWidget(d_props, d_sensor, Qt.Vertical)
+        # THE SENSOR PANEL RUNS TO THE BOTTOM OF THE WINDOW. Properties is a
+        # short table of fixed length; the sensor view now holds a tab per
+        # sensor and needs the height far more than the table does.
+        self.resizeDocks([d_props, d_sensor], [180, 900], Qt.Vertical)
 
         # Bottom: log and publications side by side.
         self.log = QPlainTextEdit()
@@ -5367,45 +5538,6 @@ class Console(QMainWindow):
         self.say(f"Built {name} in memory ({len(doc['agents'])} agents, "
                  f"{side}) - NOT saved. Use 'Save fleet as...' to keep it.")
         return name
-
-    def save_fleet_as(self, side="blue"):
-        """Write the in-memory fleet for this side to fleets/<name>.yaml.
-
-        The ONLY thing that creates a file in fleets/. Explicit, on purpose:
-        that folder should contain exactly the fleets you decided were worth
-        keeping and nothing else.
-        """
-        doc = (self._fleet_docs or {}).get(side)
-        if not doc:
-            self.say(f"No {side} fleet built in this session to save. "
-                     f"Build one first (Setup -> {side} fleet -> "
-                     f"{CUSTOM_FLEET_ENTRY}).")
-            return
-        import yaml as _yaml
-        suggested = str(REPO_ROOT / "fleets" / f"{doc.get('name', side)}.yaml")
-        path, _ = QFileDialog.getSaveFileName(
-            self, f"Save {side} fleet", suggested, "Fleet (*.yaml)")
-        if not path:
-            return
-        out = dict(doc)
-        out["name"] = Path(path).stem
-        try:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            Path(path).write_text(
-                "# Saved from the Console's fleet builder.\n"
-                "# A COMPOSITION of agents/ hardware: which vehicles, their\n"
-                "# ids and where they start. It declares no authority, no\n"
-                "# routing and no doctrine - those are picked in Setup, every\n"
-                "# run, and are never baked in here.\n"
-                "# Dimensions and performance come from agents/; anything\n"
-                "# marked nominal is still nominal.\n"
-                + _yaml.safe_dump(out, sort_keys=False), encoding="utf-8")
-        except OSError as exc:
-            self.say(f"cannot write fleet: {exc}")
-            return
-        self._refresh_setup_lists()
-        self.say(f"Saved {Path(path).name} ({len(out['agents'])} agents)")
-
 
     def save_formation_as(self):
         """Write the arrangement on the map as a named formation.
