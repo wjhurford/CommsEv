@@ -1139,7 +1139,7 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
             continue                    # failed in pass 1, or out of contact
         groups.setdefault(_cohort(a, pl), []).append(aid)
 
-    ready, turned = {}, {}
+    ready = {}
     for k, ids in groups.items():
         n = float(len(ids))
         cx = sum(_num((info[i][0].get("belief")
@@ -1217,7 +1217,6 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
 
         pl["holding_for_formation"] = False
         pl["awaiting_orders"] = False
-        turned.setdefault(_cohort(a, pl), []).append(a)
         pl["leg"] += 1
         if pl["leg"] >= len(pl["waypoints"]):
             pl["leg"] = 0
@@ -1238,6 +1237,8 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
         # the turn to the next waypoint, and the formation rotates onto that
         # line - once, here, rather than continuously all the way round.
         a["_leg_from"] = _fleet_centre(a, a.get("knowledge") or poses)
+        # `_bearing` is deliberately NOT reset: it is where the shape is
+        # pointing now, and the whole point is that it turns from there.
         a["phase_t0"] = t
         pl["reassignments"] += 1
         net = nets.get(a.get("network")) or {}
@@ -1255,11 +1256,6 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
                      f"({_num(pt.get('x')):.1f},{_num(pt.get('y')):.1f},"
                      f"{_num(pt.get('z')):.1f})"),
         })
-    # Every vehicle that took a new leg this tick now holds its new goal and
-    # its new `_leg_from`, so the rotated slots are known and can be dealt out
-    # by proximity - see _rematch_slots.
-    for members in turned.values():
-        _rematch_slots(members, arena, poses)
     TRANSMISSIONS.extend(out)
     return out
 
@@ -1526,66 +1522,6 @@ def _formation_fit(agent, arena, gx, gy, bearing):
     return (shift[0], shift[1], k)
 
 
-def _rematch_slots(members, arena, poses):
-    """At a corner, hand each vehicle the slot NEAREST to it.
-
-    The SHAPE is the formation; which vehicle stands in which place in it is
-    not. Insist on both and a column that turns back on itself has to drag its
-    rear vehicle the whole length of the shape and past everyone in it: they
-    meet head-on, block, and stop. Measured on a three-point patrol, the turn
-    at P3 left all three cars inside half a metre of each other, none able to
-    move, and the mission frozen at 0%.
-
-    Re-matched by distance the same shape is filled from where the fleet
-    already is - the column simply changes which end leads - and the crossing
-    disappears. The assignment is the one with the least total travel, found
-    exactly for the fleet sizes this runs at; minimising the sum of Euclidean
-    distances is also what makes it non-crossing, which is the property that
-    actually stops the collisions.
-    """
-    members = [a for a in members if a.get("_slot") is not None]
-    if len(members) < 2:
-        return
-    pts = arena.get("points") or {}
-    a0 = members[0]
-    ok, gx, gy, _gz, _e = resolve_waypoint((a0.get("mission") or {}).get("to"),
-                                           pts)
-    if not ok:
-        return
-    fx, fy = a0.get("_leg_from") or (gx, gy)
-    if math.hypot(gx - fx, gy - fy) <= 1e-6:
-        return
-    bearing = math.atan2(gy - fy, gx - fx) - _num(a0.get("_slot_ref"))
-    dx, dy, k = _formation_fit(a0, arena, gx, gy, bearing)
-    cb, sb = math.cos(bearing), math.sin(bearing)
-    slots = [a["_slot"] for a in members]
-    targets = [(gx + dx + k * (sx * cb - sy * sb),
-                gy + dy + k * (sx * sb + sy * cb))
-               for sx, sy in slots]
-    here = []
-    for a in members:
-        q = a.get("belief") or poses.get(a["id"]) or a.get("start") or {}
-        here.append((_num(q.get("x")), _num(q.get("y"))))
-    n = len(members)
-    cost = [[math.dist(here[i], targets[j]) for j in range(n)]
-            for i in range(n)]
-    if n <= 7:
-        best, best_c = None, None
-        for perm in itertools.permutations(range(n)):
-            c = sum(cost[i][perm[i]] for i in range(n))
-            if best_c is None or c < best_c - 1e-12:
-                best, best_c = perm, c
-    else:                       # big fleet: greedy, still far better than none
-        best = [None] * n
-        taken = set()
-        for _d, i, j in sorted((cost[i][j], i, j)
-                               for i in range(n) for j in range(n)):
-            if best[i] is None and j not in taken:
-                best[i], _ = j, taken.add(j)
-    for i, a in enumerate(members):
-        a["_slot"] = slots[best[i]]
-
-
 def mission_target(agent, t, poses, arena):
     """Where the mission WANTS this agent to be at time t.
 
@@ -1751,17 +1687,20 @@ def mission_target(agent, t, poses, arena):
         # under jamming they can disagree slightly about where the centre is,
         # which is the same disagreement a real formation suffers when its
         # position reports go stale.
-        if m.get("rotate") is False:
+        if m.get("rotate") is False or m.get("turn") == "none":
             ox, oy = sx, sy
         else:
-            fx, fy = agent.get("_leg_from") or _fleet_centre(agent, poses)
-            if math.hypot(gx - fx, gy - fy) > 1e-6:
-                bearing = math.atan2(gy - fy, gx - fx)
-                agent["_leg_bearing"] = bearing
-            else:
-                # Degenerate leg (the fleet is already on the goal): keep the
-                # orientation it last had rather than snapping to east.
-                bearing = _num(agent.get("_leg_bearing"))
+            # The orientation the formation is CURRENTLY holding - slewed
+            # toward the leg's bearing once per tick by slew_formation, so the
+            # shape pivots round the corner instead of teleporting round it.
+            bearing = agent.get("_bearing")
+            if bearing is None:
+                fx, fy = agent.get("_leg_from") or _fleet_centre(agent, poses)
+                if math.hypot(gx - fx, gy - fy) > 1e-6:
+                    bearing = math.atan2(gy - fy, gx - fx)
+                else:
+                    bearing = _num(agent.get("_leg_bearing"))
+            agent["_leg_bearing"] = bearing
             bearing -= _num(agent.get("_slot_ref"))
             cb, sb = math.cos(bearing), math.sin(bearing)
             ox, oy = sx * cb - sy * sb, sx * sb + sy * cb
@@ -1841,6 +1780,61 @@ def blocked(agent, nx, ny, poses, agents, arena):
 
 
 _ALL_AGENTS = []
+
+
+def slew_formation(agents, poses, arena, dt):
+    """Turn the formation onto the new leg at a rate the fleet can actually fly.
+
+    Snapping the reference bearing at the corner is geometrically correct and
+    looks wrong: the whole shape teleports round the waypoint and every
+    vehicle then drives at a station that has appeared behind it. Reported:
+    "if car1 starts on the left it needs to end on the left... right now they
+    get there as a line facing the wrong way. I almost want them to pivot
+    around the point to make the simulation look more organic."
+
+    Both halves of that are one change. Pivoting keeps every vehicle's place
+    in the shape - car1 stays on the left, because nothing is re-dealt - and
+    it removes the crossing that made keeping identity impossible before: the
+    formation swings about its centre, so the members arc round together
+    rather than driving through one another to swap ends.
+
+    THE TURN RATE IS NOT A TUNING KNOB. A formation can rotate no faster than
+    its outermost member can fly the arc: w = v / r, with v the slowest
+    vehicle's own top speed and r the largest slot radius. Both come from
+    figures already in the model, so a bigger or faster formation turns at the
+    rate its own geometry allows.
+
+    `turn:` on the mission chooses the style, for comparing them:
+        pivot (default)  slew, as described
+        snap             the old step change at the corner
+        none             no rotation at all - the shape is translated
+                         (`rotate: false` is the older spelling of this)
+    """
+    pts = (arena or {}).get("points") or {}
+    for a in agents:
+        m = a.get("mission") or {}
+        if m.get("type") != "advance" or a.get("_slot") is None:
+            continue
+        ok, gx, gy, _gz, _e = resolve_waypoint(m.get("to"), pts)
+        if not ok:
+            continue
+        fx, fy = a.get("_leg_from") or _fleet_centre(a, poses)
+        if math.hypot(gx - fx, gy - fy) <= 1e-6:
+            continue
+        want = math.atan2(gy - fy, gx - fx)
+        cur = a.get("_bearing")
+        style = (m.get("turn")
+                 or ("none" if m.get("rotate") is False else "pivot"))
+        if cur is None or style == "snap":
+            a["_bearing"] = want
+            continue
+        peers = [x for x in _fleet_peers(a) if x.get("_slot") is not None]
+        radius = max((math.hypot(*x["_slot"]) for x in peers), default=0.0)
+        vmin = min((max(_num(x.get("speed")), 0.05) for x in peers),
+                   default=1.0)
+        w_max = (vmin / radius) if radius > 1e-6 else math.pi
+        d = (want - cur + math.pi) % (2.0 * math.pi) - math.pi
+        a["_bearing"] = cur + max(-w_max * dt, min(w_max * dt, d))
 
 
 def formation_pace(agents, poses, t, arena):
@@ -1927,6 +1921,7 @@ def step(agents, poses, t, dt, arena, unreachable=None,
     contacts = []
     # STATION KEEPING, computed for the whole fleet before anyone moves - it
     # is a property of the formation, not of one vehicle. See formation_pace.
+    slew_formation(agents, poses, arena, dt)
     pace = formation_pace(agents, poses, t + dt, arena)
     for a in agents:
         p = poses[a["id"]]
@@ -2825,6 +2820,43 @@ def command_path(agent, arena, links, poses, networks, link_states=None):
     return []
 
 
+def command_chain(agent, arena, links, poses, networks, link_states=None,
+                  _below=None):
+    """THE WHOLE ROUTE an order to this agent travels, from where it starts.
+
+    command_path() answers "how do I reach whoever decides for me", which in a
+    hierarchy is the one hop up to a squad leader. That is the right answer to
+    that question and the WRONG denominator for command load, because an order
+    does not originate at the squad leader - it originates at the coordinator
+    and is relayed down.
+
+    Reported, with a screenshot of a car3 -> car2 -> car1 -> gcs chain: "is a 1
+    correct in the car1 to gcs link? considering it is sending messages to car3
+    and car2 and itself? and in the same strand car2 would have 2, as it has
+    car3 and itself?" Exactly right. Every link showed 1 because every vehicle
+    was only ever counted against its own last hop.
+
+    This walks the chain to its root, so the numbers come out 3 / 2 / 1 down
+    the strand - and then the number means what it looks like it means: how
+    many vehicles lose their orders if this link goes.
+    """
+    path = command_path(agent, arena, links, poses, networks,
+                        link_states=link_states)
+    if len(path) < 2:
+        return path
+    dec = path[-1]
+    net = (networks or {}).get(agent.get("network")) or {}
+    if dec == net.get("coordinator") or dec in (_below or set()):
+        return path
+    ldr = next((x for x in (_ALL_AGENTS or []) if x.get("id") == dec), None)
+    if ldr is None:
+        return path
+    up = command_chain(ldr, arena, links, poses, networks,
+                       link_states=link_states,
+                       _below=(_below or set()) | {agent["id"]})
+    return path[:-1] + up if up else path
+
+
 def command_load(agents, arena, links, poses, networks, link_states=None):
     """How many vehicles' orders cross each link, and how deep each one is.
 
@@ -2836,14 +2868,19 @@ def command_load(agents, arena, links, poses, networks, link_states=None):
     is a guess. It also makes the relay visible as a QUANTITY: that vehicle is
     not merely on the path, it is carrying four other people's command, and if
     it drops they all go with it.
+
+    Counted along the WHOLE chain (command_chain), not the last hop, so a
+    three-deep strand reads 3 / 2 / 1 from the coordinator down rather than
+    1 / 1 / 1. `depth` is likewise hops from the origin of the order, which
+    for a centralized network is unchanged.
     """
     load, depth = {}, {}
     for a in agents:
         if a.get("ghost") or a.get("jammer") \
                 or a.get("platform") == "ground_station":
             continue
-        path = command_path(a, arena, links, poses, networks,
-                            link_states=link_states)
+        path = command_chain(a, arena, links, poses, networks,
+                             link_states=link_states)
         depth[a["id"]] = max(len(path) - 1, 0) if path else None
         for i in range(len(path) - 1):
             load[frozenset((path[i], path[i + 1]))] = \

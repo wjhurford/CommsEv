@@ -2626,6 +2626,7 @@ def test_a_formation_is_rigid_and_a_circuit_actually_loops():
         for a in cars:
             a["mission"] = {"type": "advance", "to": goal}
             a["_leg_from"] = (0.0, 0.0)
+            a["_bearing"] = None        # ask for the leg's bearing directly
         return [st.mission_target(a, 0.0, poses, arena) for a in cars]
 
     def _axis(tgts):
@@ -2644,6 +2645,7 @@ def test_a_formation_is_rigid_and_a_circuit_actually_loops():
     for a in cars:
         a["mission"] = {"type": "advance", "to": "_E", "rotate": False}
         a["_leg_from"] = (0.0, 0.0)
+        a["_bearing"] = None
     flat_e = [st.mission_target(a, 0.0, poses, arena) for a in cars]
     for a in cars:
         a["mission"] = {"type": "advance", "to": "_N", "rotate": False}
@@ -2652,6 +2654,60 @@ def test_a_formation_is_rigid_and_a_circuit_actually_loops():
               for e, n in zip(flat_e, flat_n)}
     check("rotate: false keeps the old translated behaviour, on request",
           shifts == {(1.0, -1.0)}, f"{shifts} {flat_e} {flat_n}")
+
+    # AND IT PIVOTS RATHER THAN TELEPORTING. A ninety-degree corner must take
+    # a real amount of time to turn through, at a rate the geometry sets:
+    # w = v / r, the slowest vehicle's speed over the largest slot radius.
+    for a in cars:
+        a["mission"] = {"type": "advance", "to": "_E"}
+        a["_leg_from"] = (0.0, 0.0)
+        a["_bearing"] = None
+    st.slew_formation(cars, poses, arena, 0.1)
+    east0 = math.degrees(cars[0]["_bearing"])
+    for a in cars:                      # the corner: now go north instead
+        a["mission"] = {"type": "advance", "to": "_N"}
+    turns = []
+    for _ in range(3):
+        st.slew_formation(cars, poses, arena, 0.1)
+        turns.append(math.degrees(cars[0]["_bearing"]))
+    check("the formation PIVOTS onto the new leg, a bit at a time",
+          all(0.0 < (b - a_) < 45.0 for a_, b in zip([east0] + turns, turns)),
+          f"from {east0:.1f} deg: {[round(x, 1) for x in turns]}")
+    for a in cars:
+        a["mission"] = {"type": "advance", "to": "_N", "turn": "snap"}
+    st.slew_formation(cars, poses, arena, 0.1)
+    check("turn: snap goes straight to the leg's bearing",
+          abs(math.degrees(cars[0]["_bearing"]) - 90.0) < 1.0,
+          f"{math.degrees(cars[0]['_bearing']):.1f} deg")
+
+    # THE COMMAND LOAD ON A THREE-DEEP STRAND reads 3 / 2 / 1, not 1 / 1 / 1.
+    ids3 = ["gcs", "c1", "c2", "c3"]
+    ps3 = {"gcs": {"x": 0, "y": -3, "z": 0, "yaw": 0},
+           "c1": {"x": -1, "y": 2, "z": 0, "yaw": 0},
+           "c2": {"x": -2, "y": 2, "z": 0, "yaw": 0},
+           "c3": {"x": -3, "y": 0.5, "z": 0, "yaw": 0}}
+    ag3 = [{"id": n, "network": "blue"} for n in ids3]
+    ag3[0]["platform"] = "ground_station"
+    st._ALL_AGENTS = ag3
+    lk3 = [{"a": ids3[i], "b": ids3[j], "network": "blue"}
+           for i in range(4) for j in range(i + 1, 4)]
+    net3 = {"routing": "tiered", "authority": "hierarchical",
+            "coordinator": "gcs",
+            "squads": {"alpha": {"leader": "c1", "members": ["c2"]},
+                       "bravo": {"leader": "c2", "members": ["c3"]}}}
+    out3 = st.apply_routing(lk3, ag3, {"blue": net3}, ps3)
+    ls3 = {frozenset((l["a"], l["b"])):
+           {"state": l["state"], "active": l.get("active", True)}
+           for l in out3}
+    load, depth = st.command_load(ag3, {}, lk3, ps3, {"blue": net3},
+                                  link_states=ls3)
+    got = {tuple(sorted(k)): v for k, v in load.items()}
+    check("command load counts the whole chain, not the last hop",
+          got == {("c1", "gcs"): 3, ("c1", "c2"): 2, ("c2", "c3"): 1},
+          str(got))
+    check("...and depth is hops from where the order originates",
+          depth == {"c1": 1, "c2": 2, "c3": 3}, str(depth))
+
 
 
 
