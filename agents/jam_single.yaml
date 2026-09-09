@@ -28,7 +28,6 @@ description: >
   between the command band and GNSS.
 
 platform: jammer
-colour: "#C4685A"
 
 dimensions:
   length: {value: 0.3, unit: m, source: "Nominal - not measured"}

@@ -34,7 +34,6 @@ description: >
   6-DoF IMU from the camera. The build you would take into an unknown room.
 
 platform: roboracer
-colour: "#8E7CC3"
 
 dimensions:
   length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}

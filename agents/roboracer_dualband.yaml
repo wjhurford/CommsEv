@@ -45,7 +45,6 @@ description: >
   can do when the channel it is using is taken away from it.
 
 platform: roboracer
-colour: "#D08C4A"
 
 dimensions:
   length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}

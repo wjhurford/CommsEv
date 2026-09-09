@@ -414,6 +414,9 @@ def resolve_doc(doc):
     return _overlay(base, doc)
 
 
+# Colour identifies the NETWORK and nothing else - see load_scenario.
+NETWORK_COLOURS = {"blue": "#4FA3D1", "red": "#C4685A", "green": "#6FAE7E"}
+
 def load_scenario(path):
     """Accepts a path, or an already-composed dict (the Setup flow)."""
     doc = resolve_doc(dict(path)) if isinstance(path, dict) \
@@ -466,7 +469,13 @@ def load_scenario(path):
             "id": a.get("id"),
             "platform": a.get("platform", "unknown"),
             "network": a.get("network", "blue"),
-            "colour": a.get("colour") or "#2E6FB0",
+            # COLOUR IS THE SIDE. An agent FILE is hardware and says nothing
+            # about whose side it is on, so the network supplies the colour
+            # unless the composition has deliberately overridden it. Sensor fit
+            # is shown by the sensor glyphs, never by the paint.
+            "colour": (a.get("colour")
+                       or NETWORK_COLOURS.get(a.get("network", "blue"),
+                                              "#4FA3D1")),
             "dimensions": {
                 "length": _num(dims.get("length"), 0.4),
                 "width": _num(dims.get("width"), 0.4),

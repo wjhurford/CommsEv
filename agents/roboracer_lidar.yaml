@@ -29,7 +29,6 @@ description: >
   but only in a scene with features to match against.
 
 platform: roboracer
-colour: "#2E6FB0"
 
 dimensions:
   length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}

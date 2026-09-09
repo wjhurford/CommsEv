@@ -34,7 +34,6 @@ description: >
   where there is something within about three metres to look at.
 
 platform: roboracer
-colour: "#5FA98B"
 
 dimensions:
   length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}

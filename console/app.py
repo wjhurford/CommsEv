@@ -2858,7 +2858,14 @@ class CustomFleetDialog(QDialog):
                  # what hardware it is made of rather than only what shape.
                  "agent_type": tname,
                  "network": self.side,
-                 "colour": spec_doc.get("colour", "#2E6FB0"),
+                 # COLOUR IS THE SIDE, NOT THE HARDWARE. Every agent file used
+                 # to carry its own colour, so a fleet of one blue car, one
+                 # lidar car and one camera car came out blue, green and
+                 # purple - three colours that say nothing about who is on
+                 # whose side, which is the only thing colour is for on this
+                 # map. Sensor and radio fit are read from the sensor panel
+                 # and the glyphs; the side is read from the colour.
+                 "colour": network_colour(self.side),
                  "pose": {"x": num(2), "y": num(3), "z": num(4),
                           "yaw": num(5)}}
             for key in ("dimensions", "performance", "sensors", "ghost"):
@@ -4175,18 +4182,24 @@ class Console(QMainWindow):
         self.run_button = tool(
             "\u25b6", "Run. With the ROS 2 source this also starts the nodes "
             "and records a bag.", self.toggle_run)
-        tool("\u21bb", "Reset: clear the run and wait for play", self.restart_run)
+        tool("\u21bb", "RESTART the run. Clears the recorded frames and waits "
+                        "for Play.\n"
+                        "The Console itself is untouched - the setup, the "
+                        "points and the mission all stay exactly as they "
+                        "are. This is 'run that again', or 'run it with one "
+                        "thing changed'.",
+             self.restart_run)
         row.addSpacing(16)
         tool("\u2913", "Save the scenario file, keeping its comments",
              self.save_scenario)
-        tool("\u21ba", "RELOAD the Console with the current code, keeping "
-                        "this setup.\n"
-                        "Scene, fleets, spawns, points, mission, goals, "
-                        "architecture and the command tree are written out, "
-                        "the app restarts, and they are put back.\n"
-                        "For picking up a change to the Console itself - the "
-                        "simulator is re-imported on every Play, so model "
-                        "changes need no restart at all.",
+        tool("\u21ba", "REFRESH the Console: close it, reopen it on the "
+                        "current code, and start from a CLEAN SLATE.\n"
+                        "Nothing is carried over - no scene, no fleet, no "
+                        "points, no mission. This is the button for after a "
+                        "code change, when what you want is the new Console "
+                        "and none of the old state.\n"
+                        "To re-run what is already set up, use Restart "
+                        "instead - it does not close anything.",
              self.reload_console)
 
         # THE TWO OPERATORS, ONE BUTTON EACH. White stays below as the tab it
@@ -5100,57 +5113,56 @@ class Console(QMainWindow):
             self.lbl_mission.setText(
                 f"Mission: {self._mission_name}   {self._mission_line}")
 
+        # AND SAY IT WHERE THE OPERATOR IS LOOKING. The score was only ever
+        # written to a label at the top of the window, which is exactly where
+        # nobody is looking while a run is up - the whole point of the blue
+        # cell is that it is the blue commander's console. Every change to the
+        # tally is announced once, in the log and in the cell that owns the
+        # fleet, so "mission 100% (3/3)" is a line you can scroll back to
+        # rather than a number that was on screen for a moment.
+        key = (sc.get("complete"), sc.get("failed"), sc.get("tasked"),
+               sc.get("awaiting_orders"), sc.get("drifted"))
+        if key != getattr(self, "_mission_score_key", None):
+            self._mission_score_key = key
+            name = self._mission_name or "mission"
+            line = f"{name}: {self._mission_line}"
+            if sc.get("complete") == sc.get("tasked"):
+                line += "  - MISSION COMPLETE"
+            self.say(line)
+            self.cell_say("blue", line)
+
     # -- reload -------------------------------------------------------------
 
+    # Where a Console session USED to be parked across a reload. Refresh is
+    # now a clean slate by design (see reload_console), so nothing writes or
+    # reads this - the name is kept only so an old file is recognisable.
     SESSION_FILE = "runs/console_session.json"
 
-    def _session_state(self):
-        """Everything the Setup tab is holding, as plain data."""
-        return {
-            "mode": self.mode_combo.currentIndex(),
-            "scene": self._setup_scene,
-            "blue": self._setup_fleet,
-            "red": self._setup_red,
-            "spawns": self._spawns,
-            "doctrines": self._doctrines,
-            "formation": self._formation,
-            "spacing": self._spacing,
-            "points": self._points_override,
-            "authority": self.auth_combo.currentText(),
-            "routing": self.route_combo.currentText(),
-            "coordinator": self._coordinator(),
-            "reports_to": {k: v.currentData()
-                           for k, v in (self.tier_combos or {}).items()},
-            "mission": self.exp_mission.currentText(),
-            "goals": self._goal_names(),
-            "want_goals": getattr(self, "_want_goals", 1),
-            "laps": (self.mission_laps.value()
-                     if hasattr(self, "mission_laps") else 1),
-            "blue_ids": sorted(self._blue_ids or []),
-            "red_ids": sorted(self._red_ids or []),
-            "fleet_docs": self._fleet_docs,
-        }
-
     def reload_console(self):
-        """Restart the Console with the current code, keeping this setup.
+        """REFRESH: close the Console, reopen it on the current code, empty.
 
-        THE POINT IS THE ITERATION LOOP. Changing the Console meant closing
-        it, restarting it, and rebuilding a scene, a fleet, four spawns, two
-        points and a command tree before you could look at the change - which
-        costs more than the change usually did, and quietly discourages small
-        fixes.
+        Two buttons that were doing nearly the same thing now do two clearly
+        different things, which is what was asked for:
 
-        A restart rather than a hot reload, deliberately. Re-importing a
+          Refresh (this)  close and reopen, and FORGET the setup. Pressed
+                          after a change to the Console's own code, when what
+                          you want is the new code and a clean slate. It used
+                          to write the setup out and put it back, which made
+                          it indistinguishable from Restart and meant a stale
+                          half-composed run followed you across the reload.
+          Restart         re-run what is already set up, without closing
+                          anything. The Console is working; you just want the
+                          run again, or the run with one thing changed.
+
+        A fresh PROCESS rather than a hot reload, deliberately: re-importing a
         running Qt application leaves half the old widgets alive and connected
-        to functions that no longer exist, and the failures that produces are
-        far worse than the thirty seconds it saves. A fresh process is
-        honestly fresh.
+        to functions that no longer exist, and those failures are far worse
+        than the seconds it saves.
 
-        The SIMULATOR needs none of this: it is re-imported every time you
-        press Play, so a change to the model is picked up without restarting
-        anything.
+        The SIMULATOR needs none of this - it is re-imported every time you
+        press Play, so a change to the model is picked up with no restart at
+        all.
         """
-        import json
         import subprocess
         if (self.proc and self.proc.state() != QProcess.NotRunning) \
                 or getattr(self, "ws", None) is not None:
@@ -5158,14 +5170,13 @@ class Console(QMainWindow):
                      "would leave it talking to a Console that no longer "
                      "exists.")
             return
+        # CLEAN SLATE MEANS CLEAN SLATE. Drop any session an older build may
+        # have left behind, so the new process cannot restore one.
         path = REPO_ROOT / self.SESSION_FILE
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(self._session_state(), indent=2,
-                                       default=str), encoding="utf-8")
-        except (OSError, TypeError) as exc:
-            self.say(f"could not save the session: {exc} - reloading anyway, "
-                     f"you will have to set up again.")
+            path.unlink()
+        except OSError:
+            pass
         try:
             subprocess.Popen([sys.executable] + sys.argv,
                              cwd=str(REPO_ROOT), close_fds=True)
@@ -5175,100 +5186,30 @@ class Console(QMainWindow):
         self._reloading = True
         QApplication.quit()
 
-    def restore_session(self):
-        """Put back what reload_console saved, if it is there.
+    def _focus_setup(self):
+        """SETUP IS A MODAL STEP, so make the window say so.
 
-        Consumed on read - the file is deleted whether or not the restore
-        works. A stale session silently reapplying itself three days later
-        would be far more confusing than an empty Setup tab.
+        Reported: "every other tab needs to be greyed out when in setup view
+        to stop confusion". It is the right instinct - while a run is being
+        composed, every other tab is showing the LAST world, or nothing at
+        all, and reading a network diagram that does not correspond to the
+        fleet you are currently choosing is worse than having no diagram.
+
+        So: on Setup with no run up, the rest of the window is greyed. Press
+        Play and it inverts - Setup locks (see _lock_setup) and everything
+        else comes alive against a world that actually exists.
         """
-        import json
-        path = REPO_ROOT / self.SESSION_FILE
-        if not path.exists():
+        if not hasattr(self, "tabs"):
             return
-        try:
-            st_ = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            self.say(f"could not read the saved session: {exc}")
-            st_ = None
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        if not st_ or not st_.get("scene"):
-            return
-        try:
-            self._restore(st_)
-        except Exception as exc:                           # noqa: BLE001
-            import traceback
-            self.say("could not restore the previous setup:\n"
-                     + traceback.format_exc())
-            return
-        self.say(f"Reloaded. {st_.get('scene')} restored with "
-                 f"{len(st_.get('spawns') or {})} agents, "
-                 f"{len(st_.get('points') or {})} points"
-                 + (f", mission {st_.get('mission')}"
-                    if st_.get("mission") else "") + ".")
-
-    def _restore(self, st_):
-        """Rebuild the Setup tab from saved state, without any dialogs."""
-        self.mode_combo.setCurrentIndex(int(st_.get("mode") or 1))
-        self._on_mode_chosen(self.mode_combo.currentIndex())
-        i = self.scene_combo.findText(st_["scene"])
-        if i < 0:
-            return
-        self.scene_combo.setCurrentIndex(i)
-        self.on_scene_chosen(i)
-        # Straight into the fields the spawn dialog would have written, so
-        # nothing pops up asking questions that were already answered.
-        self._setup_fleet = st_.get("blue")
-        self._setup_red = st_.get("red")
-        self._fleet_docs = st_.get("fleet_docs") or {}
-        self._spawns = {k: dict(v) for k, v in (st_.get("spawns") or {}).items()}
-        self._doctrines = dict(st_.get("doctrines") or {})
-        self._formation = dict(st_.get("formation") or {})
-        self._spacing = dict(st_.get("spacing") or {})
-        self._points_override = {k: dict(v)
-                                 for k, v in (st_.get("points") or {}).items()}
-        self._blue_ids = set(st_.get("blue_ids") or [])
-        self._red_ids = set(st_.get("red_ids") or [])
-        for combo, name in ((self.fleet_combo, self._setup_fleet),
-                            (self.red_combo, self._setup_red)):
-            combo.setEnabled(True)
-            j = combo.findText(name) if name else -1
-            combo.setCurrentIndex(j if j >= 0 else 0)
-        for combo, val in ((self.auth_combo, st_.get("authority")),
-                           (self.route_combo, st_.get("routing"))):
-            k = combo.findText(val or "")
-            if k >= 0:
-                combo.setCurrentIndex(k)
-        self._compose_setup()
-        self._refresh_command_structure()
-        c = self.coord_combo.findData(st_.get("coordinator"))
-        if c >= 0:
-            self.coord_combo.setCurrentIndex(c)
-        self._refresh_command_structure()
-        for aid, boss in (st_.get("reports_to") or {}).items():
-            w = (self.tier_combos or {}).get(aid)
-            if w is not None:
-                k = w.findData(boss)
-                if k >= 0:
-                    w.setCurrentIndex(k)
-        m = self.exp_mission.findText(st_.get("mission") or "")
-        if m >= 0:
-            self.exp_mission.setCurrentIndex(m)
-        self._want_goals = int(st_.get("want_goals") or 1)
-        if hasattr(self, "mission_laps"):
-            self.mission_laps.setValue(int(st_.get("laps") or 1))
-        self._refresh_goals()
-        for slot, name in zip(self.goal_combos, st_.get("goals") or []):
-            k = slot.findData(name)
-            if k >= 0:
-                slot.setCurrentIndex(k)
-        self._goal_touched = True
-        self._on_arch_chosen()
-        self._compose_mission()
-        self._update_placing()
+        on_setup = self.tabs.tabText(self.tabs.currentIndex()) == "Setup"
+        composing = on_setup and not getattr(self, "_setup_locked", False)
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Setup":
+                continue
+            self.tabs.setTabEnabled(i, not composing)
+            self.tabs.setTabToolTip(
+                i, "Compose the run and press Play - this tab has no world "
+                   "to show yet" if composing else "")
 
     def _lock_setup(self, locked):
         """The Setup tab is how a run is COMPOSED; while one is actually
@@ -5285,6 +5226,7 @@ class Console(QMainWindow):
                     i, "Locked while a run is up - Stop to recompose"
                        if locked else "")
                 break
+        self._focus_setup()
         self._update_placing()
 
     def _refresh_setup_lists(self):
@@ -7590,6 +7532,7 @@ class Console(QMainWindow):
             tree.collapseAll()
         if self.tabs.tabText(index) == "Setup":
             self._refresh_setup_lists()
+        self._focus_setup()
         self._update_placing()
         self.stack.setCurrentIndex(1 if self.tabs.tabText(index) == "Results" else 0)
 
@@ -8548,6 +8491,18 @@ class Console(QMainWindow):
         if text:
             self.log.appendPlainText(text)
 
+    def cell_say(self, side, text):
+        """Write a line into a command cell's own window.
+
+        The cells are where the run is actually driven from, so anything the
+        operator has to react to belongs in them and not only in the log."""
+        if not text or not hasattr(self, "terminals"):
+            return
+        for i in range(self.terminals.count()):
+            w = self.terminals.widget(i)
+            if getattr(w, "cell", None) == side and hasattr(w, "out"):
+                w.out.appendPlainText(text)
+
     def closeEvent(self, ev):
         self.stop_run()
         if self.dirty:
@@ -8643,7 +8598,6 @@ def main():
         # AFTER show(), so the window is up before anything is put back into
         # it - a restore that runs first leaves you looking at a blank frame
         # for however long the compose takes, which reads as a failed reload.
-        win.restore_session()
         sys.exit(app.exec())
     except SystemExit:
         raise
