@@ -1,57 +1,20 @@
 # =============================================================================
-# Deadband MISSION — shuttle
+# REMOVED — shuttle is patrol with two points
 # =============================================================================
-# TWO GOALS, FOUR LAPS. THE MISSION DOES NOT SAY WHERE THE GOALS ARE.
+# Patrolling two points IS shuttling, so there is no reason for both to exist
+# and every reason for there not to be: two names for one behaviour is two
+# places to look and two things to keep in step.
 #
-# `goals: 2` means "a shuttle needs two ends; you say which". Pick them in
-# Setup, or type `SETMISSION shuttle to P1 P2`. The same file then runs on any
-# scene with any two points and there is nothing to edit to move it.
+# Use missions/patrol.yaml with two goals.
 #
-# A MISSION, NOT AN OBJECTIVE, AND THE DIFFERENCE IS THE POINT. A shuttle
-# objective shuttles until you stop it, so "did it work?" has no answer and
-# every metric it produces is a rate or a mean. A plan is a task with an END —
-# go round this circuit this many times — so it can be PASSED or FAILED, and a
-# run scores what FRACTION of the fleet passed. Two of three getting through is
-# a different result from none, rather than the same slightly-lower average.
-#
-# HOW IT IS FLOWN, and this matters more than the metric: the plan is held by
-# the COORDINATOR, not by the vehicle. Each vehicle is only ever told ONE LEG.
-# When it reports arriving, the coordinator sends the next. So:
-#
-#   * a vehicle its coordinator cannot reach never receives its next leg. It
-#     arrives, and it sits there. The mission STALLS — it has not failed and it
-#     cannot proceed. Nothing scripts that; it falls out of the link budget.
-#
-#   * every reassignment is a transmission on the command band, so it can be
-#     INTERCEPTED. From the red cell:  LISTEN 2400
-#     You will hear "car1 go P1 (-95.0,0.0,0.0)" as it is sent. That is the
-#     groundwork for deception: you cannot spoof an order you have never heard.
-#
-# FAILURE HAS TWO SHAPES. Not finishing is one. The other is finishing a lie:
-# a vehicle under GNSS denial reports reaching a waypoint it is not at, and a
-# reported arrival that is not true is a FAILED mission however confident the
-# telemetry sounds. The test uses the vehicle's own arrival tolerance — its
-# length — so no threshold is invented anywhere.
-#
-#   Setup      choose the mission, then pick its two goals
-#   terminal   SETMISSION shuttle to P1 P2
-#              blue launch
-#
-# or, without a mission file at all:
-#
-#              SETPLAN all P1 P2 laps 4
+# `shuttle` survives as an OBJECTIVE verb for a single vehicle - REOBJECTIVE
+# car3 shuttle A B - because that is open-ended tasking of one agent and has
+# nothing to do with a fleet mission that can be passed or failed.
 # =============================================================================
-
 spec_version: 0.1
 name: shuttle
 kind: mission
-
+deprecated: use patrol with two goals
 description: >
-  The fleet shuttles between two chosen points, four times. Passed by a vehicle
-  that completes every lap; failed by one that does not, or one that reports an
-  arrival it did not make. Fits any fleet, any size, any shape, any scene.
-
-plan:
-  who: all
-  goals: 2
-  laps: 4
+  Removed. Patrolling two points is shuttling - use missions/patrol.yaml.
+objectives: {}

@@ -224,7 +224,8 @@ def build(cfg, cell):
     changed, messages, _ = st.apply_mission_file(
         str(mpath), by, arena.get("points") or {}, arena,
         goals=(list(cfg.get("goals") or [])
-               or ([cfg["goal"]] if cfg.get("goal") else [])))
+               or ([cfg["goal"]] if cfg.get("goal") else [])),
+        laps=cfg.get("laps"))
     if not changed:
         raise RuntimeError("mission tasked no agents: "
                            + ("; ".join(messages) or str(mpath)))

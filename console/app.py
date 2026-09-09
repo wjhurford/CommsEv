@@ -86,6 +86,7 @@ try:
     from stub_telemetry import custom_formations, save_formation
     from stub_telemetry import clamp_to_arena as _clamp_to_arena
     from stub_telemetry import mission_goal_count as _mission_goal_count
+    from stub_telemetry import mission_spec as _mission_spec
 except Exception:
     _resolve_mission = None
     _jammer_range_m = None
@@ -97,6 +98,7 @@ except Exception:
     save_formation = None
     _clamp_to_arena = None
     _mission_goal_count = None
+    _mission_spec = None
 
 def snap(v, step=1.0):
     """The nearest whole metre.
@@ -3349,6 +3351,10 @@ class ExperimentWindow(QDialog):
         # how far did it get, was it commanded, did it stop, did it know where
         # it was, and what was the radio doing. Everything else is in Results.
         for key, lab in (
+                ("mission_pass_frac", "mission passed (fraction of the fleet)"),
+                ("mission_awaiting_orders",
+                 "stalled - arrived, awaiting an order that cannot reach"),
+                ("mission_drifted", "failed on drift (reported a false arrival)"),
                 ("penetration_m", "penetration (m advanced)"),
                 ("penetration_frac", "penetration (fraction of the corridor)"),
                 ("commanded_fraction", "commanded fraction"),
@@ -3642,6 +3648,12 @@ class ExperimentWindow(QDialog):
         # is not a result you can read.
         cols = [c for c in ("authority", "routing", "jam_rel_db",
                             "formation", "spacing",
+                            # THE OUTCOME FIRST. Penetration says how far they
+                            # got; the pass rate says whether the job was done,
+                            # and "awaiting orders" says whether the fleet is
+                            # stuck rather than beaten.
+                            "mission_pass_frac", "mission_awaiting_orders",
+                            "mission_drifted",
                             "penetration_m", "penetration_frac", "arrived",
                             "commanded_fraction", "ended_s")
                 if rows and c in rows[0]]
@@ -4213,6 +4225,35 @@ class Console(QMainWindow):
         self.goal_lay.setSpacing(3)
         self.goal_combos = []
         mlay.addWidget(self.goal_box)
+        grow = QHBoxLayout()
+        addg = QPushButton("+ goal")
+        addg.setFixedWidth(72)
+        addg.setToolTip(
+            "Another leg. The fleet visits the goals in order, so three goals "
+            "is a route and one is the penetration command - the same mission "
+            "file either way.")
+        addg.clicked.connect(lambda: self._change_goals(+1))
+        delg = QPushButton("- goal")
+        delg.setFixedWidth(72)
+        delg.clicked.connect(lambda: self._change_goals(-1))
+        grow.addWidget(addg)
+        grow.addWidget(delg)
+        grow.addSpacing(12)
+        self.lbl_lapcap = QLabel("Laps")
+        grow.addWidget(self.lbl_lapcap)
+        self.mission_laps = QSpinBox()
+        self.mission_laps.setRange(1, 999)
+        self.mission_laps.setValue(2)
+        self.mission_laps.setFixedWidth(64)
+        self.mission_laps.valueChanged.connect(
+            lambda _v: self._compose_mission())
+        self.mission_laps.setToolTip(
+            "How many times round the circuit before the mission is PASSED.\n"
+            "Only patrol has this: advance visits each point once, by\n"
+            "definition, and a patrol of two points is a shuttle.")
+        grow.addWidget(self.mission_laps)
+        grow.addStretch(1)
+        mlay.addLayout(grow)
         prow2 = QHBoxLayout()
         addpt = QPushButton("Add point...")
         addpt.setToolTip(
@@ -4274,83 +4315,25 @@ class Console(QMainWindow):
             "    SETMISSION <name>\n"
             "then `blue launch`. Results are titled by this name.")
         sblay.addWidget(self.lbl_mission)
-        issue = QPushButton("Issue mission + launch blue")
+        issue = QPushButton("Issue mission")
         issue.setToolTip(
-            "Sends the mission above to the running fleet and arms it - the "
-            "same two lines you would type:\n"
-            "    SETMISSION <name> to <POINT>\n"
-            "    blue launch\n"
-            "It goes down the same command channel, so it is gated by command "
-            "authority exactly as a typed order is: a vehicle its commander "
-            "cannot reach is skipped, and the skip is printed. That refusal is "
-            "a RESULT, not an error.")
+            "Give the fleet the mission above.\n"
+            "Before Play it is written into the composed run, so the trees "
+            "and the map show what the fleet has been told without a sim "
+            "having to be running to be told it.\n"
+            "During a run it goes down the command channel as SETMISSION, "
+            "gated by command authority - a vehicle its commander cannot "
+            "reach is skipped, and the skip is printed. That refusal is a "
+            "RESULT, not an error.\n\n"
+            "ARMING IS SEPARATE, and stays at the terminal: type "
+            "`blue launch`. Tasking a fleet and setting it going are two "
+            "decisions, and being able to inspect what it intends to do "
+            "between them is the point of the split.")
         issue.clicked.connect(self.issue_sandbox_mission)
         sblay.addWidget(issue)
 
-        # ---- OBJECTIVES: the sandbox's own tasking, per agent --------------
-        # A mission file is one order for the whole fleet. This is the other
-        # half - retasking one vehicle, or a few, mid-run - and it is where a
-        # sandbox earns its name: a scout pushed ahead of a wedge, one car
-        # left behind as a deliberate relay, a pursuer chasing whoever is
-        # furthest forward. All of it was typeable and none of it was
-        # discoverable, so the verbs are listed with what they do and their
-        # arguments are pre-filled from THIS scene's points, which means the
-        # suggestion is always one that will validate.
-        sblay.addWidget(QLabel("Objective (sandbox tasking)"))
-        self.obj_combo = QComboBox()
-        for verb, lab, tip in self.OBJECTIVE_MENU:
-            self.obj_combo.addItem(lab, verb)
-            self.obj_combo.setItemData(self.obj_combo.count() - 1, tip,
-                                       Qt.ToolTipRole)
-        self.obj_combo.activated.connect(lambda _i: self._fill_objective_args())
-        sblay.addWidget(self.obj_combo)
-        self.obj_args = QLineEdit()
-        self.obj_args.setToolTip(
-            "Arguments for the verb. Named points come from this scene, so "
-            "the same objective runs on any scene that names them; a literal "
-            "(x,y,z) welds it to these coordinates.\n"
-            "Drag the points on the map to move them.")
-        sblay.addWidget(self.obj_args)
-
-        # LAPS - what turns an objective into a MISSION.
-        # A shuttle objective shuttles forever, so "did it work" has no
-        # answer. Saying how many times round makes it a task with an END,
-        # which can be passed or failed, and a run then scores what fraction
-        # of the fleet passed. The vehicles are still only ever told one leg
-        # at a time: the coordinator sends the next when they report arriving,
-        # over the network, where it can be blocked or overheard.
-        lrow = QHBoxLayout()
-        lrow.addWidget(QLabel("Laps"))
-        self.obj_laps = QSpinBox()
-        self.obj_laps.setRange(1, 999)
-        self.obj_laps.setValue(1)
-        self.obj_laps.setFixedWidth(72)
-        self.obj_laps.setToolTip(
-            "How many times round the circuit before the mission is PASSED.\n"
-            "This is what makes it a mission rather than an objective: an "
-            "objective has no notion of enough.\n"
-            "Only meaningful for verbs that visit points - advance, shuttle, "
-            "patrol.")
-        lrow.addWidget(self.obj_laps)
-        self.lbl_laps = QLabel("")
-        self.lbl_laps.setObjectName("hint")
-        self.lbl_laps.setWordWrap(True)
-        lrow.addWidget(self.lbl_laps, 1)
-        sblay.addLayout(lrow)
-
-        orow = QHBoxLayout()
-        assign = QPushButton("Assign to selection")
-        assign.setToolTip(
-            "Sends this objective to every vehicle currently selected on the "
-            "map - sweep a box round them first. With nothing selected it "
-            "goes to the whole blue fleet.\n"
-            "Gated by command authority like any other order.")
-        assign.clicked.connect(self.assign_objective)
-        orow.addWidget(assign)
-        orow.addStretch(1)
-        sblay.addLayout(orow)
-
         hint = QLabel(
+            "Then, in the BLUE terminal:   blue launch\n\n"
             "Drag a vehicle to move it. Sweep a box to select several and "
             "drag any one of them to move the formation as one. Drag a named "
             "point to move the objective itself. Middle-drag pans.")
@@ -5186,7 +5169,9 @@ class Console(QMainWindow):
 
     # Metrics a swept result offers as plottable series. Ordered so the ones
     # people actually ask for come first in the tree.
-    SWEEP_METRICS = ("penetration_m", "penetration_frac", "commanded_fraction",
+    SWEEP_METRICS = ("mission_pass_frac", "mission_complete", "mission_failed",
+                     "mission_awaiting_orders", "mission_drifted",
+                     "penetration_m", "penetration_frac", "commanded_fraction",
                      "held_fraction", "belief_err_m", "track_err_m",
                      "worst_sinr_db", "worst_pdr", "arrived", "distance_m",
                      "ended_s")
@@ -5427,164 +5412,107 @@ class Console(QMainWindow):
     # want it - so each carries the situation it was written for. These are
     # the verbs _parse_objective_verb already understands; nothing here is a
     # new capability, it is the existing grammar made findable.
-    OBJECTIVE_MENU = (
-        ("advance", "advance to a point  (formation preserved)",
-         "The fleet moves so its CENTRE lands on the point, every vehicle\n"
-         "holding its offset - a wedge stays a wedge. The penetration\n"
-         "objective. Args: a point name, or (x,y,z)."),
-        ("advance", "advance  (until a wall or until command is lost)",
-         "No destination: go forward until something stops you. Use it to\n"
-         "find where the fleet's command actually fails rather than\n"
-         "assuming a distance. Args: none."),
-        ("shuttle", "shuttle between two points  (back and forth, forever)",
-         "Drives between two points until retasked. The steady-state\n"
-         "workload: useful when you want the fleet busy while you attack\n"
-         "the spectrum. Args: two point names, or two (x,y,z)."),
-        ("patrol", "patrol a circuit  (loop the waypoints)",
-         "Loops a circuit of points. A wider version of shuttle, and the\n"
-         "one that takes vehicles in and out of a jammer's reach\n"
-         "repeatedly. Args: three or more point names."),
-        ("pursue", "pursue another agent  (follow at a standoff)",
-         "Follows a named agent. Interesting under jamming because the\n"
-         "pursuer steers from its BELIEF about where the target is, so a\n"
-         "stale position report is a visible tracking error. Args: an\n"
-         "agent id."),
-        ("orbit", "orbit the origin  (circle at a radius)",
-         "Circles the origin at a radius. A constant-motion objective with\n"
-         "no destination to argue about. Args: a radius in metres."),
-        ("wall_follow", "wall follow  (track a wall - needs a lidar)",
-         "Tracks a wall with the lidar. The one objective that does not\n"
-         "need a position fix at all, which is exactly what makes it worth\n"
-         "comparing against under GNSS denial. Args: left or right."),
-        ("stop", "hold position", "Freeze here. Args: none."),
-    )
+    # THE OBJECTIVE PALETTE IS GONE, and its absence is the design.
+    #
+    # It offered eight verbs on the Setup tab beside the mission, which put
+    # two ways of tasking a fleet next to each other and made it look as
+    # though you had to choose. You do not. A MISSION is the task - go to
+    # these points, in this order, this many times - and the OBJECTIVE each
+    # vehicle holds is generated from it one leg at a time by the
+    # coordinator. It is always just "go there", and the formation is
+    # preserved, so there was never anything for an operator to pick.
+    #
+    # The verbs still exist for what they are for: retasking ONE vehicle onto
+    # something the fleet is not doing - a scout, a pursuer, a deliberate
+    # relay left behind. That is a per-agent exception, it is typed at the
+    # terminal where exceptions belong, and it is documented in COMMANDS.md:
+    #
+    #     car3: pursue car1
+    #     car3: wall_follow right
+    #     car3: stop
+    #
+    # A vehicle retasked that way loses its plan, because `pursue` has no end
+    # and putting a task that can never finish into the pass/fail column would
+    # leave it failing forever.
 
-    def _fill_objective_args(self):
-        """Pre-fill arguments from THIS scene's points.
+    def mission_plan(self):
+        """The plan the pickers describe, or None.
 
-        A suggested objective that does not validate is worse than no
-        suggestion: it teaches you the feature is broken. Every default here
-        names points the loaded scene actually declares, so pressing Assign
-        immediately after choosing a verb always works.
+        {who, waypoints, laps} - the whole mission as one dict, which is what
+        goes into the composed run and what SETMISSION reconstructs.
         """
-        verb = self.obj_combo.currentData()
-        label = self.obj_combo.currentText()
-        pts = sorted((self._view() or {}).get("points") or {})
-        goal = self._goal_name()
-        mob = sorted(a for a in (self._blue_ids or set()) if a != "gcs")
-        if verb == "advance":
-            self.obj_args.setText("" if "until a wall" in label
-                                  else (goal or (pts[-1] if pts else "")))
-        elif verb == "shuttle":
-            self.obj_args.setText(" ".join(pts[:2]) if len(pts) >= 2 else "")
-        elif verb == "patrol":
-            self.obj_args.setText(" ".join(pts[:3]) if len(pts) >= 3 else "")
-        elif verb == "pursue":
-            self.obj_args.setText(mob[0] if mob else "")
-        elif verb == "orbit":
-            self.obj_args.setText("2.0")
-        elif verb == "wall_follow":
-            self.obj_args.setText("right")
+        name = (self.exp_mission.currentText()
+                if hasattr(self, "exp_mission") else "")
+        goals = self._goal_names()
+        if not name or not goals:
+            return None
+        return {"who": "all", "waypoints": goals,
+                "laps": self.mission_laps_value(), "mission": name}
+
+    def _compose_mission(self):
+        """Write the chosen mission into the composed run.
+
+        THE MISSION IS SET BEFORE PLAY. It used to be a command and nothing
+        else, which meant that until the sim was running the fleet had no
+        mission to look at: the trees said UNASSIGNED, the map showed nothing,
+        and you pressed Play partly to find out what you had set up. A run is
+        COMPOSED here - scene, fleet, spawns, doctrine, architecture - and the
+        mission is one more thing composed with it.
+
+        Nothing about the command gate is lost. At t=0 nothing has been jammed
+        yet, so gating the initial assignment would be theatre; every order
+        issued after the run starts still travels the command channel and is
+        still refused when it cannot get through.
+        """
+        if not getattr(self, "_setup_scene", None):
+            return
+        plan = self.mission_plan()
+        if plan == getattr(self, "_plan_composed", None):
+            return
+        self._plan_composed = plan
+        self._compose_setup()
+        if plan:
+            self._mission_name = plan["mission"]
+            laps = plan["laps"]
+            self.lbl_mission.setText(
+                f"Mission: {plan['mission']}   "
+                + " -> ".join(plan["waypoints"])
+                + (f"   x{laps}" if laps > 1 else ""))
         else:
-            self.obj_args.setText("")
-        plannable = verb in self.PLANNABLE
-        if hasattr(self, "obj_laps"):
-            self.obj_laps.setEnabled(plannable)
-            n = len([w for w in self.obj_args.text().split() if w])
-            self.lbl_laps.setText(
-                (f"a mission: {n} point{'s' if n != 1 else ''}, passed when "
-                 f"every lap is done" if plannable and n else
-                 "a mission: name the points above" if plannable else
-                 "open-ended - no end, so no pass or fail"))
-
-    # The verbs that VISIT POINTS, and can therefore be a mission with an
-    # end. Everything else - pursue, orbit, wall_follow, stop - is open-ended
-    # by nature, and giving it a lap count would put a task that can never
-    # finish into the pass/fail column forever.
-    PLANNABLE = ("advance", "shuttle", "patrol")
-
-    def assign_objective(self):
-        """Send the chosen objective, or the chosen MISSION, to the selection.
-
-        A verb that visits points becomes a SETPLAN - a circuit and a number
-        of laps - so it has an end and can be passed or failed. Everything
-        else stays a plain open-ended objective, and says so.
-
-        Either way it goes down the ordinary command channel and is gated by
-        command authority exactly as a typed order is. Selection comes from
-        the map, so a scout can be pushed ahead of a formation without
-        touching the rest of it.
-        """
-        verb = self.obj_combo.currentData()
-        args = self.obj_args.text().strip()
-        who = sorted(self.viewport.selected) or sorted(
-            a for a in (self._blue_ids or set()) if a != "gcs")
-        who = [a for a in who if a not in (self._red_ids or set())
-               and a != "gcs"]
-        if not who:
-            self.say("Nothing to task. Select vehicles on the map, or compose "
-                     "a blue fleet first.")
-            return
-
-        pts = [w for w in args.replace(",", " ").split() if w]
-        if verb in self.PLANNABLE and pts and "(" not in args:
-            laps = int(self.obj_laps.value())
-            self._send_lines([f"SETPLAN {aid} {' '.join(pts)} laps {laps}"
-                              for aid in who])
-            self.say(
-                f"MISSION -> {', '.join(who)}:  {' -> '.join(pts)} x{laps}\n"
-                f"  Each vehicle is told the FIRST leg only. The coordinator "
-                f"sends the next one when it reports arriving - over the "
-                f"network, so an order that cannot get through does not "
-                f"arrive and the mission stalls where it stands.\n"
-                f"  Watch the mission line: passed / awaiting orders / "
-                f"failed.")
-            return
-
-        if verb == "shuttle" and args and not args.lower().startswith("between") \
-                and "(" not in args:
-            # 'shuttle between E F' reads better and is what COMMANDS.md
-            # documents; the parser takes either.
-            args = f"between {args}"
-        lines = []
-        for aid in who:
-            a = args
-            if verb == "pursue" and a == aid:
-                # NOBODY PURSUES THEMSELVES. The pre-filled target is just the
-                # first vehicle in the fleet, which is the one you most often
-                # have selected - so the suggestion has to step aside rather
-                # than produce an order that is silently a no-op.
-                others = [x for x in sorted(self._blue_ids or set())
-                          if x not in (aid, "gcs")]
-                if not others:
-                    self.say(f"{aid} has nobody else to pursue - skipped.")
-                    continue
-                a = others[0]
-            lines.append(f"{aid}: {verb}{(' ' + a) if a else ''}")
-        if not lines:
-            return
-        self._send_lines(lines)
-        self.say(f"{verb} -> {', '.join(who)}"
-                 + (f"  ({args})" if args else "")
-                 + "\n  OPEN-ENDED: this objective has no finish, so it is "
-                   "not scored pass/fail. Use advance, shuttle or patrol with "
-                   "named points for a mission that can be passed."
-                 + "\n  Any vehicle whose commander cannot reach it will be "
-                   "skipped, and the skip printed. That is a result.")
+            self._mission_name = None
+            self.lbl_mission.setText("Mission: UNASSIGNED")
 
     def issue_sandbox_mission(self):
-        """SETMISSION (with the goal) then LAUNCH blue, from a button."""
-        name = self.exp_mission.currentText()
-        if not name:
-            self.say("Choose a mission first.")
+        """Give the fleet its mission - composed before Play, commanded after.
+
+        ARMING IS NOT HERE. `blue launch` stays at the terminal because
+        tasking a fleet and setting it going are two decisions, and being able
+        to inspect what it intends to do in between is the whole reason they
+        were split.
+        """
+        plan = self.mission_plan()
+        if plan is None:
+            self.say("Choose a mission and give it at least one goal first. "
+                     "Add point, then pick it in the goal slot.")
             return
-        goals = self._goal_names()
-        self._send_setup_orders(
-            f"{name} to {' '.join(goals)}" if goals else name, red=False)
-        self._mission_name = name
-        self.lbl_mission.setText(
-            f"Mission: {name}"
-            + (f" -> {' -> '.join(goals)}" if goals else ""))
+        running = (self.proc and self.proc.state() != QProcess.NotRunning) \
+            or getattr(self, "ws", None) is not None
+        self._compose_mission()
+        laps = plan["laps"]
+        line = (f"{plan['mission']} to {' '.join(plan['waypoints'])}"
+                + (f" laps {laps}" if laps > 1 else ""))
+        if running:
+            self._send_lines([f"SETMISSION {line}"])
+            self.say(f"SETMISSION {line}\n"
+                     f"  Gated by command authority: any vehicle its "
+                     f"commander cannot reach is skipped and the skip "
+                     f"printed. That is a result.\n"
+                     f"  Now arm them - in the BLUE terminal: blue launch")
+        else:
+            self.say(f"Mission set: {line}\n"
+                     f"  Written into the composed run, so it is already "
+                     f"assigned when the world starts. Press Play, then in "
+                     f"the BLUE terminal: blue launch")
 
     def add_point(self):
         """Put a point on the map at coordinates you type, named P1, P2, ...
@@ -5622,7 +5550,7 @@ class Console(QMainWindow):
 
     def _on_goal_chosen(self, _i):
         self._goal_touched = True
-        self._fill_objective_args()
+        self._compose_mission()
 
     def _send_lines(self, lines):
         """Write command lines to the retask spool - one file per command."""
@@ -5646,32 +5574,60 @@ class Console(QMainWindow):
         self.exp_mission.blockSignals(False)
         self._refresh_goals()
 
-    def _refresh_goals(self):
-        """Build one goal picker per goal THIS MISSION asks for, and fill them
-        with the points that exist.
+    def _change_goals(self, delta):
+        """Add or drop a goal slot. A mission that fixes its own count says
+        so rather than silently ignoring the button."""
+        spec = self._mission_limits()
+        if spec["goals"] != "any":
+            self.say(f"'{self.exp_mission.currentText()}' fixes its own goals "
+                     f"({spec['goals']}) - there is nothing to add.")
+            return
+        self._want_goals = max(1, int(getattr(self, "_want_goals", 1)) + delta)
+        self._refresh_goals()
 
-        The count comes from the mission file, so adding a mission that needs
-        three goals needs no code here. Zero goals (an `advance` with no
-        destination) hides the row entirely rather than showing a dropdown
-        that does nothing.
+    def _mission_limits(self):
+        """{"goals": n|"any"|0, "laps": n|"any"} for the chosen mission."""
+        name = (self.exp_mission.currentText()
+                if hasattr(self, "exp_mission") else "")
+        if not name or _mission_spec is None:
+            return {"goals": 0, "laps": 1}
+        try:
+            return _mission_spec(REPO_ROOT / "missions" / f"{name}.yaml")
+        except Exception:                                  # noqa: BLE001
+            return {"goals": 0, "laps": 1}
+
+    def _refresh_goals(self):
+        """Build the goal pickers this mission needs and fill them.
+
+        HOW MANY IS ALSO A DECISION. A mission declares the SHAPE of a task -
+        visit points in order, or loop them - and nothing about geometry, not
+        even how much of it there is. `advance` with one goal is the
+        penetration command; with three it is a route; it is the same file.
+        So the count comes from the operator here, not from the mission, and
+        the + / - buttons are how it is said.
+
+        Laps appear only for a mission that comes back. Advance visits each
+        point once by definition, and offering a lap count for it would be
+        offering to turn it into a patrol under another name.
         """
         if not hasattr(self, "goal_lay"):
             return
         pts = dict((self._view() or {}).get("points") or {})
-        want = 0
-        name = (self.exp_mission.currentText()
-                if hasattr(self, "exp_mission") else "")
-        if name and _mission_goal_count is not None:
-            try:
-                want = int(_mission_goal_count(
-                    REPO_ROOT / "missions" / f"{name}.yaml"))
-            except Exception:                              # noqa: BLE001
-                want = 0
+        spec = self._mission_limits()
+        name = self.exp_mission.currentText() if hasattr(self, "exp_mission") \
+            else ""
+        if spec["goals"] == "any":
+            want = max(1, int(getattr(self, "_want_goals", 1) or 1))
+        else:
+            # A mission that fixes its own count must NOT overwrite what the
+            # operator built for one that does not - stepping through
+            # `forward` (which needs none) on the way back to `advance` used
+            # to silently reset a three-goal route to one.
+            want = int(spec["goals"])
 
         keep = [c.currentData() for c in self.goal_combos]
         while len(self.goal_combos) > want:
-            c = self.goal_combos.pop()
-            c.setParent(None)
+            self.goal_combos.pop()._row.setParent(None)
         while len(self.goal_combos) < want:
             row = QWidget()
             rl = QHBoxLayout(row)
@@ -5683,17 +5639,13 @@ class Console(QMainWindow):
             c = QComboBox()
             c.activated.connect(self._on_goal_chosen)
             c.setToolTip(
-                "One of the points on the map. Penetration is measured along "
-                "the line from where the fleet starts to the first goal, so "
-                "it means the same thing on any scene.\n"
+                "One of the points on the map. The fleet visits the goals in "
+                "order, in formation.\n"
                 "Drag the point itself on the map to move it.")
             rl.addWidget(c, 1)
             self.goal_lay.addWidget(row)
             c._row = row
             self.goal_combos.append(c)
-        for c in self.goal_combos:
-            if getattr(c, "_row", None) is not None:
-                c._row.setVisible(True)
 
         names = sorted(pts, key=lambda k: (len(k), k))
         for i, c in enumerate(self.goal_combos):
@@ -5705,30 +5657,39 @@ class Console(QMainWindow):
                           f"{_num(q.get('y')):.0f}, {_num(q.get('z')):.0f})")
                 c.setItemData(c.count() - 1, n)
             # KEEP WHAT WAS CHOSEN, then fall back to a DIFFERENT point per
-            # slot: a shuttle whose two ends default to the same point is not
-            # a shuttle, it is a vehicle standing still, and it would look
-            # like the model failing rather than the defaults being lazy.
+            # slot: a two-goal mission whose ends default to the same point is
+            # a vehicle standing still, and it would look like the model
+            # failing rather than the defaults being lazy.
             j = c.findData(keep[i]) if i < len(keep) else -1
             if j < 0:
                 j = min(i, max(len(names) - 1, 0))
             c.setCurrentIndex(max(j, 0))
             c.blockSignals(False)
 
-        self.goal_box.setVisible(want > 0 and bool(names))
-        self.lbl_goals.setVisible(want > 0)
-        if not want:
-            self.lbl_goals.setText(
-                f"Goals - '{name}' needs none")
+        has = want > 0
+        self.goal_box.setVisible(has and bool(names))
+        self.lbl_goals.setVisible(has)
+        laps_open = spec["laps"] == "any"
+        self.lbl_lapcap.setVisible(laps_open)
+        self.mission_laps.setVisible(laps_open)
+        if not has:
+            self.lbl_goals.setText(f"'{name}' needs no goals")
         elif not names:
             self.lbl_goals.setText(
-                f"Goals - this mission needs {want}. Add a point first.")
+                "Goals - add a point first (Add point, below)")
         else:
-            self.lbl_goals.setText(f"Goals ({want} for '{name}')")
+            self.lbl_goals.setText(
+                f"Goals for '{name}' - visited in order"
+                + (", then repeated" if laps_open else ", once each"))
         self.lbl_points.setText(
             f"{len(names)} point{'s' if len(names) != 1 else ''} on the map"
             if names else "no points yet")
-        if hasattr(self, "obj_combo"):
-            self._fill_objective_args()
+        self._compose_mission()
+
+    def mission_laps_value(self):
+        """The lap count, or 1 for a mission that does not repeat."""
+        return (int(self.mission_laps.value())
+                if self._mission_limits()["laps"] == "any" else 1)
 
     def _goal_names(self):
         """Every chosen goal, in slot order."""
@@ -5816,6 +5777,10 @@ class Console(QMainWindow):
         axes = self._sweep_axes()
         if not axes["jam_rel_db"]:
             return None, "The jammer axis has no values - set steps to 1 or more."
+        if self._mission_limits()["goals"] and not self._goal_names():
+            return None, ("This mission needs at least one goal. Add a point "
+                          "(Setup -> Add point), then pick it in the goal "
+                          "slot.")
         # Squads for the hierarchical and tiered cells. The first blue vehicle
         # leads - stated here rather than assumed silently, and replaced by a
         # squad column in the fleet table when that lands.
@@ -5839,6 +5804,9 @@ class Console(QMainWindow):
             # single `goal` above stays because penetration is measured along
             # the line to the FIRST one, and the sweep reads it for that.
             "goals": self._goal_names(),
+            # Laps, where the mission leaves them open. The experiment sweeps
+            # the same mission the sandbox would have run, goals and all.
+            "laps": self.mission_laps_value(),
             "duration_s": 400.0, "warmup_s": 5.0, "rate_hz": 10.0,
             "stop_when_stalled": True, "stall_grace_s": 5.0,
             "squads": squads, "coordinator": "gcs",
@@ -5950,6 +5918,13 @@ class Console(QMainWindow):
             nets[k] = {**(nets.get(k) or {}), **v}
         if nets:
             doc["networks"] = nets
+        # THE MISSION, COMPOSED. Written with the run rather than issued at
+        # it, so what the fleet has been told is visible before Play.
+        plan = getattr(self, "_plan_composed", None)
+        if plan:
+            doc["plan"] = {"who": plan["who"],
+                           "waypoints": list(plan["waypoints"]),
+                           "laps": int(plan["laps"])}
         if self._points_override:
             # POINTS MOVED BY HAND. A scene declares where FAR is; where you
             # decide to send a fleet is a decision about this run, so it is an

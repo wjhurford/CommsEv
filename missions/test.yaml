@@ -31,12 +31,18 @@ description: >
 
 
 objectives:
-  # Named ids, because this mission deliberately gives each car ITS OWN lane -
-  # that is the whole point of the benchmark. It therefore needs a fleet whose
-  # vehicles are called car1, car2, car3; any other fleet gets a loud refusal
-  # naming what it asked for and what is running. For a mission that fits any
-  # fleet, key the objective on `all` or on a network name instead - see
-  # missions/advance.yaml.
-  car1: {do: shuttle, between: [A, B]}
-  car2: {do: shuttle, between: [C, D]}
-  car3: {do: shuttle, between: [E, F]}
+  # LITERAL COORDINATES, deliberately, and this is the ONE mission that should
+  # have them. It is a fixed benchmark: the control condition everything else
+  # is measured against, which means it has to be identical every time and
+  # must not depend on points somebody set up differently this morning.
+  #
+  # Every other mission names no geometry at all - it asks for N goals and the
+  # run says where they are. That is what makes one mission file run on any
+  # scene. This one is the exception that proves it: welded on purpose,
+  # because a benchmark that moves is not a benchmark.
+  #
+  # It needs a fleet whose vehicles are called car1, car2, car3; any other
+  # fleet gets a loud refusal naming what it asked for and what is running.
+  car1: {do: shuttle, between: [{x: -3.0, y:  2.0}, {x: 3.0, y:  2.0}]}
+  car2: {do: shuttle, between: [{x: -3.0, y:  0.0}, {x: 3.0, y:  0.0}]}
+  car3: {do: shuttle, between: [{x: -3.0, y: -2.0}, {x: 3.0, y: -2.0}]}

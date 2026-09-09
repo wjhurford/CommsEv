@@ -264,8 +264,13 @@ def test_files_load():
                     # objectives block, because the objective each vehicle
                     # actually holds is generated from the plan one leg at a
                     # time by the coordinator.
+                    # A file marked `deprecated:` is a headstone - it says
+                    # what replaced it and why, which is worth more to whoever
+                    # goes looking for it than a missing file.
                     ok = (is_dict
-                          and bool(doc.get("objectives") or doc.get("plan"))
+                          and (bool(doc.get("objectives") is not None
+                                    or doc.get("plan"))
+                               or doc.get("deprecated"))
                           and not doc.get("agents")
                           and "scene" not in doc and "fleet" not in doc)
                     why = ("a mission must declare objectives or a plan, and "
@@ -286,8 +291,8 @@ def test_three_layer_chain():
     # A scene is the world only.
     scene = st.resolve_mission(str(REPO / "scenes" / "lab_box.yaml"))
     check("scene has an arena", bool(scene.get("arena")))
-    check("scene defines the lane points",
-          set("ABCDEF") <= set(scene.get("points") or {}))
+    check("a scene ships NO points - they belong to the run",
+          not (scene.get("points") or {}), str(scene.get("points")))
     check("scene has NO agents", not scene.get("agents"))
     check("scene has NO networks", not scene.get("networks"))
 
@@ -335,8 +340,11 @@ def test_three_layer_chain():
     check("SETMISSION tasks the three cars", len(changed) == 3, str(msgs))
     check("SETMISSION reports the mission name for the run title",
           name == "test")
-    check("car1 got its lane",
-          agents_by_id["car1"]["mission"].get("between") == ["A", "B"])
+    check("car1 got its lane, on the benchmark's own coordinates",
+          [dict(q) for q in
+           agents_by_id["car1"]["mission"].get("between")]
+          == [{"x": -3.0, "y": 2.0}, {"x": 3.0, "y": 2.0}],
+          str(agents_by_id["car1"]["mission"].get("between")))
 
 
 def test_mission_contract():
@@ -372,6 +380,11 @@ def test_retask_grammar():
 # --------------------------------------------------------------------------
 # Patch 7: assign/inspect/launch gate, REMISSION decomposition, LOADMISSION
 # --------------------------------------------------------------------------
+def _q(w, k):
+    """One component of a waypoint that may be a dict or a name."""
+    return float(w[k]) if isinstance(w, dict) else w
+
+
 def _poses_for(agents):
     """Fresh poses at each agent's spawn point - the shape stream() builds."""
     return {a["id"]: {"x": a["start"]["x"], "y": a["start"]["y"],
@@ -542,8 +555,8 @@ def test_setmission_applies_and_names():
     agents_by_id = {a["id"]: a for a in agents}
     poses = _poses_for(agents)
     qdir = Path(tempfile.mkdtemp())
-    mpath = _mission_file({"car1": {"do": "shuttle", "between": ["A", "B"]},
-                           "car2": {"do": "shuttle", "between": ["C", "D"]}},
+    mpath = _mission_file({"car1": {"do": "shuttle", "between": ["P1", "P2"]},
+                           "car2": {"do": "shuttle", "between": ["P3", "P4"]}},
                           name="named_run")
     _queue_with(qdir, f"SETMISSION {mpath}\n")
     changed = st.drain_retasks(qdir, agents_by_id, arena, links, poses)
@@ -565,10 +578,12 @@ def test_setmission_by_name():
     qdir = Path(tempfile.mkdtemp())
     _queue_with(qdir, "SETMISSION test\n")
     changed = st.drain_retasks(qdir, agents_by_id, arena, links, poses)
-    got = {aid: m.get("between") for aid, m in changed}
+    got = {aid: [(_q(w, "x"), _q(w, "y")) for w in m.get("between")]
+           for aid, m in changed}
     check("SETMISSION test applies missions/test.yaml's three lanes",
-          got == {"car1": ["A", "B"], "car2": ["C", "D"],
-                  "car3": ["E", "F"]}, str(got))
+          got == {"car1": [(-3.0, 2.0), (3.0, 2.0)],
+                  "car2": [(-3.0, 0.0), (3.0, 0.0)],
+                  "car3": [(-3.0, -2.0), (3.0, -2.0)]}, str(got))
     check("run titled 'test'", st.CURRENT_MISSION["name"] == "test")
 
 
@@ -619,7 +634,7 @@ def test_setmission_out_of_bounds():
     mpath = _mission_file({"car1": {"do": "shuttle",
                                     "between": [{"x": -3.0, "y": 5.0},
                                                 {"x": 3.0, "y": 5.0}]},
-                           "car2": {"do": "shuttle", "between": ["C", "D"]}})
+                           "car2": {"do": "shuttle", "between": ["P3", "P4"]}})
     _queue_with(qdir, f"SETMISSION {mpath}\n")
     changed = st.drain_retasks(qdir, agents_by_id, arena, links, poses)
     tasked = {aid for aid, _ in changed}
@@ -939,7 +954,8 @@ def test_missions_are_blue_only():
     jamming, not manoeuvre. See docs/cells-and-network.md."""
     print("\nMISSIONS ARE BLUE ONLY")
     arena, agents, links = st.load_scenario(
-        {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"]})
+        {"scene": "lab_box", "fleets": ["3_roboracer", "red_jammer"],
+         "points": {"P1": {"x": -3.0, "y": 2.0}, "P2": {"x": 3.0, "y": 2.0}}})
     abid = {a["id"]: a for a in agents}
     nets = arena["networks"]
     check("blue car is taskable", st._is_taskable(abid["car1"], nets))
@@ -948,8 +964,8 @@ def test_missions_are_blue_only():
 
     poses = _poses_for(agents)
     # SETMISSION naming a red agent skips it with a reason
-    mpath = _mission_file({"jam1": {"do": "shuttle", "between": ["A", "B"]},
-                           "car1": {"do": "shuttle", "between": ["A", "B"]}},
+    mpath = _mission_file({"jam1": {"do": "shuttle", "between": ["P1", "P2"]},
+                           "car1": {"do": "shuttle", "between": ["P1", "P2"]}},
                           name="mixed")
     changed, msgs, _ = st.apply_mission_file(mpath, abid, arena["points"],
                                              arena)
@@ -1307,7 +1323,8 @@ def test_missions_read_belief_not_ground_truth():
     import random, copy
 
     arena, agents, links = st.load_scenario(
-        {"scene": "open_field", "fleets": ["3_roboracer_no_lidar", "red_jammer"]})
+        {"scene": "open_field", "fleets": ["3_roboracer_no_lidar", "red_jammer"],
+         "points": dict(OPEN_FIELD_POINTS)})
     by = {a["id"]: a for a in agents}
 
     # jam1 denies GNSS outright; jam2 (armed later) cuts the comms band.
@@ -1321,7 +1338,7 @@ def test_missions_read_belief_not_ground_truth():
     agents.append(j2); by["jam2"] = j2
 
     by["car1"]["mission"] = {"type": "pursuit", "target": "car3", "standoff": 1.2}
-    by["car3"]["mission"] = {"type": "shuttle", "between": ["E", "F"]}
+    by["car3"]["mission"] = {"type": "shuttle", "between": ["P1", "P2"]}
     for a in agents:
         if a["id"].startswith("car"):
             a["armed"] = True
@@ -1526,6 +1543,19 @@ def _corridor(*fleets, points=None):
             "points": dict(points or CORRIDOR_POINTS)}
 
 
+OPEN_FIELD_POINTS = {"P1": {"x": -6.0, "y": 2.0, "z": 0.0},
+                     "P2": {"x": 6.0, "y": 2.0, "z": 0.0},
+                     "P3": {"x": 0.0, "y": -6.0, "z": 0.0}}
+
+
+def _field(*fleets, points=None):
+    """An open_field run with points supplied by the operator."""
+    return {"scene": "open_field",
+            "fleets": [str(FIXTURE_FLEETS / f) for f in
+                       (fleets or ("3_roboracer_no_lidar.yaml",))],
+            "points": dict(points or OPEN_FIELD_POINTS)}
+
+
 def _sweep_mod():
     """tools/sweep.py as a module, without running its CLI."""
     import importlib.util
@@ -1547,16 +1577,17 @@ def test_a_mission_is_portable_across_scenes():
     to whoever is running it.
     """
     print("\nA MISSION ASKS FOR N GOALS AND THE RUN SUPPLIES THEM")
-    check("advance asks for one goal",
-          st.mission_goal_count(REPO / "missions" / "advance.yaml") == 1)
-    check("shuttle asks for two",
-          st.mission_goal_count(REPO / "missions" / "shuttle.yaml") == 2)
+    check("advance lets the operator choose how many goals",
+          st.mission_spec(REPO / "missions" / "advance.yaml")["goals"] == "any")
+    check("...and fixes one lap, because that is what advance MEANS",
+          st.mission_spec(REPO / "missions" / "advance.yaml")["laps"] == 1)
+    check("patrol leaves both open - points AND how many times round",
+          st.mission_spec(REPO / "missions" / "patrol.yaml")
+          == {"goals": "any", "laps": "any"})
     check("forward asks for none - it has no destination at all",
-          st.mission_goal_count(REPO / "missions" / "forward.yaml") == 0)
+          st.mission_spec(REPO / "missions" / "forward.yaml")["goals"] == 0)
 
-    arena, agents, links = st.load_scenario({
-        "scene": "open_field",
-        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    arena, agents, links = st.load_scenario(_field())
     by = {a["id"]: a for a in agents}
     points = arena.get("points") or {}
 
@@ -1564,34 +1595,43 @@ def test_a_mission_is_portable_across_scenes():
     changed, msgs, _ = st.apply_mission_file(
         str(REPO / "missions" / "advance.yaml"), by, points, arena)
     check("a mission with no goal chosen tasks nobody, and says why",
-          not changed and any("needs 1 point" in m for m in msgs),
+          not changed and any("at least one point" in m for m in msgs),
           f"{msgs[:1]}")
 
     # A GOAL FROM THIS SCENE: the same file tasks the whole fleet.
     changed, msgs, _ = st.apply_mission_file(
         str(REPO / "missions" / "advance.yaml"), by, points, arena,
-        goals=["B"])
+        goals=["P2"])
     check("given a point, the same file tasks the fleet",
           len(changed) >= 3, f"{len(changed)} tasked: {msgs[:1]}")
     check("every advance objective points at the goal that was chosen",
-          all((by[a].get("mission") or {}).get("to") == "B"
+          all((by[a].get("mission") or {}).get("to") == "P2"
               for a, _ in changed))
 
-    # TOO FEW FOR A TWO-GOAL MISSION is refused rather than half-flown: a
-    # shuttle given one end is not a shorter shuttle, it is a vehicle sitting
-    # on a waypoint.
+    # HOW MANY IS THE OPERATOR'S TOO. One goal is the penetration command;
+    # three is a route; the mission file is the same either way.
     changed, msgs, _ = st.apply_mission_file(
-        str(REPO / "missions" / "shuttle.yaml"), by, points, arena,
-        goals=["A"])
-    check("a two-goal mission given one goal is refused, not half-flown",
-          not changed and any("needs 2 points" in m for m in msgs), str(msgs))
+        str(REPO / "missions" / "advance.yaml"), by, points, arena,
+        goals=["P1", "P2", "P3"])
+    check("the same mission takes three goals and visits them in order",
+          by["car1"]["_plan"]["waypoints"] == ["P1", "P2", "P3"],
+          str(by["car1"].get("_plan")))
+    check("...once each, because advance fixes one lap",
+          by["car1"]["_plan"]["laps"] == 1)
+
+    # PATROL IS THE SAME THING THAT COMES BACK. Two points patrolled is a
+    # shuttle, which is why there is no shuttle mission any more.
     changed, msgs, _ = st.apply_mission_file(
-        str(REPO / "missions" / "shuttle.yaml"), by, points, arena,
-        goals=["A", "B"])
-    check("given both, it flies the circuit",
-          changed and by["car1"]["_plan"]["waypoints"] == ["A", "B"]
+        str(REPO / "missions" / "patrol.yaml"), by, points, arena,
+        goals=["P1", "P2"], laps=4)
+    check("patrol takes the operator's lap count",
+          by["car1"]["_plan"]["waypoints"] == ["P1", "P2"]
           and by["car1"]["_plan"]["laps"] == 4,
           str(by["car1"].get("_plan")))
+    st.apply_mission_file(str(REPO / "missions" / "advance.yaml"), by,
+                          points, arena, goals=["P1", "P2"], laps=9)
+    check("advance IGNORES a lap count - it would be a patrol in disguise",
+          by["car1"]["_plan"]["laps"] == 1, str(by["car1"]["_plan"]))
 
     # A point the scene does not have is refused, and says what it does have.
     changed, msgs, _ = st.apply_mission_file(
@@ -1603,7 +1643,7 @@ def test_a_mission_is_portable_across_scenes():
     # `forward` needs nothing and must not acquire a destination.
     changed, _msgs, _ = st.apply_mission_file(
         str(REPO / "missions" / "forward.yaml"), by, points, arena,
-        goals=["B"])
+        goals=["P2"])
     check("a mission with no goals is left alone by one being offered",
           all((by[a].get("mission") or {}).get("to") is None
               for a, _ in changed), str([by[a].get("mission")
@@ -1634,8 +1674,9 @@ def test_a_scene_no_longer_ships_objectives_of_its_own():
     check("points supplied with the run are the ones it has",
           sorted(pts) == ["P1", "P2", "P3"], str(sorted(pts)))
     changed, msgs, _ = st.apply_mission_file(
-        str(REPO / "missions" / "shuttle.yaml"),
-        {a["id"]: a for a in agents2}, pts, arena2, goals=["P1", "P2"])
+        str(REPO / "missions" / "patrol.yaml"),
+        {a["id"]: a for a in agents2}, pts, arena2, goals=["P1", "P2"],
+        laps=3)
     check("a mission flies against points that never touched a scene file",
           len(changed) == 3, f"{len(changed)}: {msgs[:1]}")
 
@@ -1644,10 +1685,18 @@ def test_a_scene_no_longer_ships_objectives_of_its_own():
     # making a claim about itself, which is a different thing.
     lab, _a3, _l3 = st.load_scenario({
         "scene": "lab_box",
-        "fleets": [str(FIXTURE_FLEETS / "3_roboracer.yaml")]})
-    check("a benchmark scene may still name its own lanes",
-          {"A", "B", "E", "F"} <= set(lab.get("points") or {}),
-          str(sorted(lab.get("points") or {})))
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    check("no scene ships points at all - not even the benchmark ones",
+          not (lab.get("points") or {}), str(sorted(lab.get("points") or {})))
+    # The one mission that IS welded carries its own COORDINATES instead, so a
+    # benchmark that has to be identical every time does not depend on points
+    # somebody set up differently this morning.
+    by_lab = {a["id"]: a for a in _a3}
+    changed, msgs, _ = st.apply_mission_file(
+        str(REPO / "missions" / "test.yaml"), by_lab,
+        lab.get("points") or {}, lab)
+    check("the fixed benchmark still runs, on its own coordinates",
+          len(changed) == 3, f"{len(changed)}: {msgs[:1]}")
 
 
 def test_setmission_grammar_takes_a_goal():
@@ -1660,28 +1709,27 @@ def test_setmission_grammar_takes_a_goal():
     different points from the command line.
     """
     print("\nSETMISSION TAKES A GOAL")
-    arena, agents, links = st.load_scenario({
-        "scene": "open_field",
-        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    arena, agents, links = st.load_scenario(_field())
     agents_by_id = {a["id"]: a for a in agents}
     poses = _poses_for(agents)
 
     qdir = Path(tempfile.mkdtemp())
-    _queue_with(qdir, "SETMISSION advance to B\n")
+    _queue_with(qdir, "SETMISSION advance to P2\n")
     changed = st.drain_retasks(qdir, agents_by_id, arena, links, poses)
-    check("SETMISSION advance to B tasks the fleet on a scene with no FAR",
+    check("SETMISSION advance to P2 tasks the fleet",
           len(changed) >= 3, f"{len(changed)} tasked")
-    check("...and every vehicle is advancing on B",
-          all(m.get("to") == "B" for _aid, m in changed),
+    check("...and every vehicle is advancing on P2",
+          all(m.get("to") == "P2" for _aid, m in changed),
           str([m for _a, m in changed][:1]))
 
     # The same file, a different point, no edit anywhere.
     qdir2 = Path(tempfile.mkdtemp())
-    _queue_with(qdir2, "SETMISSION advance to F\n")
+    _queue_with(qdir2, "SETMISSION patrol to P1 P2 laps 5\n")
     changed2 = st.drain_retasks(qdir2, agents_by_id, arena, links, poses)
-    check("the same mission file re-points to F with no file edit",
-          changed2 and all(m.get("to") == "F" for _a, m in changed2),
-          str([m for _a, m in changed2][:1]))
+    check("the same points, patrolled, with laps typed on the line",
+          changed2 and agents_by_id["car1"]["_plan"]["laps"] == 5
+          and agents_by_id["car1"]["_plan"]["waypoints"] == ["P1", "P2"],
+          str(agents_by_id["car1"].get("_plan")))
 
     # Without the goal, on this scene, it is refused rather than half-applied.
     qdir3 = Path(tempfile.mkdtemp())
@@ -1690,7 +1738,7 @@ def test_setmission_grammar_takes_a_goal():
     check("without a goal the corridor's mission is refused here",
           not changed3, str(changed3))
     check("...and the fleet keeps the last order it actually received",
-          all((agents_by_id[i].get("mission") or {}).get("to") == "F"
+          all((agents_by_id[i].get("mission") or {}).get("to") == "P1"
               for i in ("car1", "car2", "car3")))
 
 
@@ -1709,7 +1757,7 @@ def test_penetration_is_measured_along_the_axis_of_advance():
     base = {
         "name": "axis-test", "scene": "open_field",
         "blue_fleet": str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml"),
-        "mission": "advance",
+        "mission": "advance", "points": dict(OPEN_FIELD_POINTS),
         "duration_s": 30.0, "warmup_s": 0.0, "rate_hz": 10.0,
         "stop_when_stalled": False,
         "coordinator": "gcs", "doctrine": "hold",
@@ -1724,7 +1772,7 @@ def test_penetration_is_measured_along_the_axis_of_advance():
             "cell": "axis"}
 
     # A goal due NORTH of the start. Nothing about this run happens in x.
-    north = dict(base, goal="A")          # A is at (-6, +2); start y is -7
+    north = dict(base, goal="P1")         # P1 is at (-6, +2); start y is -7
     row = sweep.run_one((north, dict(cell), False))
     check("a fleet advancing north records real penetration",
           not row.get("error") and row["penetration_m"] > 1.0,
@@ -1952,12 +2000,12 @@ def test_a_moved_point_overrides_the_scene_without_editing_it():
 
     # A scene that DOES declare points keeps them when the run adds its own.
     lab = {"scene": "lab_box",
-           "fleets": [str(FIXTURE_FLEETS / "3_roboracer.yaml")],
+           "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")],
            "points": {"P1": {"x": -2.0, "y": 0.0, "z": 0.0}}}
     arena2, agents2, _l2 = st.load_scenario(lab)
     pts2 = arena2.get("points") or {}
-    check("a point added by hand joins a scene's own rather than replacing "
-          "them", "P1" in pts2 and "A" in pts2, str(sorted(pts2)))
+    check("a point added by hand is the only geometry a scene has",
+          sorted(pts2) == ["P1"], str(sorted(pts2)))
     changed, msgs, _ = st.apply_mission_file(
         str(REPO / "missions" / "advance.yaml"),
         {a["id"]: a for a in agents2}, pts2, arena2, goals=["P1"])

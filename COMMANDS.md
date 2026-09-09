@@ -117,10 +117,32 @@ do, and only then set it going.
 **Cell: BLUE only.** Missions are a blue-side action; the red cell is refused.
 
 ```
-SETMISSION <name>                  any file in missions/<name>.yaml
-SETMISSION <name> to <P1>          one goal
-SETMISSION <name> to <P1> <P2>     as many as the mission asks for
+SETMISSION <name>                          any file in missions/<name>.yaml
+SETMISSION <name> to <P1>                  one goal
+SETMISSION <name> to <P1> <P2> <P3>        a route, visited in order
+SETMISSION patrol to <P1> <P2> laps 4      and how many times round
 ```
+
+### A mission says what SHAPE the task is. Everything else is yours
+
+There are three, and between them they cover everything:
+
+| Mission | Goals | Laps | What it is |
+|---|---|---|---|
+| `advance` | as many as you add | 1, fixed | Visit each point once, in order. One goal is the penetration command; three is a route |
+| `patrol` | as many as you add | yours | The same circuit, repeated. **Two points patrolled is a shuttle** — which is why there is no shuttle mission |
+| `forward` | none | — | Drive on until a wall or until command is lost. No arrival, so no score: a probe, not a task |
+
+`advance` fixes one lap deliberately. Offering it a lap count would be offering
+to turn it into a patrol under a second name, and a lap count typed at one is
+ignored rather than quietly obeyed.
+
+**The objective is always just "go there."** The coordinator holds the route and
+hands out one leg at a time; formation is preserved throughout. There is nothing
+for an operator to choose between the mission and the vehicle, which is why the
+objective palette is gone from Setup. The verbs still exist for retasking **one**
+vehicle onto something the fleet is not doing — `car3: pursue car1` — typed at
+the terminal, where an exception belongs.
 
 ### A mission says how many goals it needs, not where they are
 
@@ -154,21 +176,40 @@ does. `forward` asks for none and is left alone by any goal offered to it.
 
 ### Where points come from now
 
-**Scenes no longer ship objectives.** `corridor_200m` declares no points at
-all. `HOME`, `FAR`, `APEX`, `WINGL` and `WINGR` were every one of them an
-objective in disguise — `APEX`/`WINGL`/`WINGR` were a wedge's formation slots
-hardcoded into the room it happened to be standing in, which is exactly what
-formations-as-functions removed.
+**No scene ships points. Not one.** `HOME`, `FAR`, `APEX`, `WINGL`, `WINGR`,
+`A`–`F` — every one of them was an objective in disguise.
+`APEX`/`WINGL`/`WINGR` were a wedge's formation slots hardcoded into the room
+it happened to be standing in, which is exactly what formations-as-functions
+removed; `A`–`F` were three lanes across a box, which is a mission somebody
+wrote once.
 
 Points are created where they are decided: **Setup → Add point**, typed as
 coordinates and then draggable on the map. They are named `P1`, `P2`, … and
 they ride with the composed run, so what a result was measured against is
-recorded alongside it.
+recorded alongside it. This works identically in **sandbox and experiment
+mode** — set up `lab_box` with two points in a line and patrol them, or the
+corridor with one point at the far end and advance to it, and it is the same
+two controls either way.
 
-A scene *may* still declare points — `lab_box` and `open_field` keep `A`–`F`,
-because those lanes are the fixed geometry of a benchmark that has to be
-identical every time. That is a scene making a claim about itself. A corridor
-claiming to know where you want to go is not the same thing.
+The one exception is `missions/test.yaml`, the fixed benchmark, which carries
+its own **literal coordinates**. It is the control condition everything else is
+measured against, so it has to be identical every time and must not depend on
+points somebody set up differently this morning. Every other mission names no
+geometry at all — which is what makes one mission file run on any scene.
+
+### The mission is set before Play
+
+Choosing a mission and its goals writes the plan into the composed run, so the
+trees, the map and the properties panel show what the fleet has been told
+without a simulator having to be running to be told it. **Issue mission** is
+the button; **arming stays at the terminal** — `blue launch` — because tasking
+a fleet and setting it going are two decisions, and being able to inspect what
+it intends to do in between is the whole reason they were split.
+
+Nothing about the command gate is lost. At t=0 nothing has been jammed yet, so
+gating the initial assignment would be theatre. Every order issued *after* the
+run starts still travels the command channel and is still refused when it
+cannot get through.
 
 Penetration is measured along the line from where the fleet started to the
 **first** goal, so it means the same thing on any scene rather than only on an

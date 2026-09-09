@@ -1,22 +1,26 @@
 # =============================================================================
 # Deadband MISSION — advance
 # =============================================================================
-# ONE GOAL. THE MISSION DOES NOT SAY WHERE IT IS.
+# GO THERE. THEN THERE. THEN THERE. ONCE EACH.
 #
-# `goals: 1` means "this mission needs one point; you say which". It used to
-# say `to: FAR`, which welded it to the one scene that had a point by that
-# name and, worse, let the scene author decide the objective.
+# `goals: any` means the mission does not decide how many points it wants -
+# you do, in Setup, by adding goal slots. One point is the penetration
+# command. Three points is a route. The mission is the SHAPE of the task; the
+# geometry is a decision about this run and belongs to whoever is running it.
 #
-# `advance` moves THE FLEET so its centre lands on the goal, with each vehicle
-# holding its offset from the formation's centre - so a wedge stays a wedge, a
-# column stays a column, and the shape you spawned is the shape that advances.
-# Nothing here is hardcoded to a fleet size, a fleet's names, or a scene.
+# `laps: 1` is what makes it advance rather than patrol: every point is
+# visited once, in order, and then the mission is finished. Patrol is the
+# same thing with the circuit repeated - which is why there is no separate
+# shuttle mission any more. Patrolling two points IS shuttling.
 #
-# It is a MISSION, not an objective: one lap of one point, so it has an end
-# and can be passed or failed. The penetration experiment is this file.
+# THE OBJECTIVE IS ALWAYS JUST "GO THERE". The coordinator holds the route and
+# hands each vehicle one leg at a time; when it reports arriving, the next leg
+# is sent. Formation is preserved throughout - each vehicle keeps its offset
+# from the formation's centre, so a wedge stays a wedge - unless you
+# deliberately REOBJECTIVE one vehicle onto something else.
 #
-#   Setup      choose the mission, then pick its goal from your points
-#   terminal   SETMISSION advance to P1
+#   Setup      choose the mission, add goal slots, point each at a point
+#   terminal   SETMISSION advance to P1 P2 P3
 #              blue launch
 # =============================================================================
 
@@ -25,11 +29,12 @@ name: advance
 kind: mission
 
 description: >
-  The fleet advances to one chosen point in whatever formation it is in. The
-  penetration command: how far can this fleet get into contested spectrum
-  before it loses command? Fits any fleet, any size, any shape, any scene.
+  The fleet visits each chosen point once, in order, in whatever formation it
+  is in. One point is the penetration command. Passed by a vehicle that
+  reaches them all; failed by one that does not, or one that reports an
+  arrival it did not make. Fits any fleet, any size, any shape, any scene.
 
 plan:
   who: all
-  goals: 1
-  laps: 1
+  goals: any        # you choose how many, in Setup
+  laps: 1           # each point once - that is what makes it advance

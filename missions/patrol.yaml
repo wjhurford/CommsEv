@@ -1,0 +1,43 @@
+# =============================================================================
+# Deadband MISSION — patrol
+# =============================================================================
+# ROUND THE CIRCUIT, N TIMES.
+#
+# The only difference from `advance` is that the circuit repeats. Two points
+# patrolled IS a shuttle, which is why there is no separate shuttle mission:
+# one fewer name for the same thing.
+#
+# `goals: any` - you choose how many points, in Setup.
+# `laps: any`  - you choose how many times round. This is the ONLY mission
+#                where laps means anything, because it is the only one that
+#                comes back.
+#
+# WHY LAPS MATTER. A patrol objective patrols forever, so "did it work?" has
+# no answer and every metric it produces is a rate or a mean. Saying how many
+# times round makes it a task with an END: it can be PASSED or FAILED, and a
+# run scores what fraction of the fleet passed.
+#
+# The vehicles are still only ever told ONE LEG at a time. The coordinator
+# sends the next when a vehicle reports arriving - over the network, so an
+# order that cannot get through does not arrive and the mission stalls where
+# it stands. And because it is transmitted, it can be intercepted: LISTEN 2400
+# from the red cell.
+#
+#   Setup      choose the mission, add goal slots, set laps
+#   terminal   SETMISSION patrol to P1 P2 laps 4
+#              blue launch
+# =============================================================================
+
+spec_version: 0.1
+name: patrol
+kind: mission
+
+description: >
+  The fleet loops the chosen points, a chosen number of times. Two points is a
+  shuttle. Passed by a vehicle that completes every lap; failed by one that
+  does not, or one that reports an arrival it did not make.
+
+plan:
+  who: all
+  goals: any        # you choose how many, in Setup
+  laps: any         # you choose how many times round

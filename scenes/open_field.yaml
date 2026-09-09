@@ -37,11 +37,11 @@ background:
   wind:
     speed: {value: 0.0, unit: "m/s", source: ""}
 
-points:
-  A: {x: -6.0, y:  2.0}
-  B: {x:  6.0, y:  2.0}
-  C: {x: -6.0, y:  0.0}
-  D: {x:  6.0, y:  0.0}
-  E: {x: -6.0, y: -2.0}
-  F: {x:  6.0, y: -2.0}
-  HOME: {x: 0.0, y: -6.0}
+# NO POINTS. Deliberately - see scenes/corridor_200m.yaml for the full
+# reasoning. A scene is the WORLD; where you send a fleet inside it is a
+# decision about THIS RUN, and it belongs to whoever is running it.
+#
+# This file used to name A..F: three lanes across the room, which is not
+# geometry, it is a mission somebody wrote once. Points are now created where
+# they are decided - Setup -> Add point - named P1, P2, ... and they ride with
+# the composed run, so what a result was measured against is recorded with it.

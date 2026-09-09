@@ -520,6 +520,39 @@ def load_scenario(path):
             a["last_rejection"] = err
             a["mission"] = {"type": "static"}
 
+    # THE MISSION, IF THE COMPOSITION CARRIES ONE.
+    #
+    # A run composed in the Console can declare its own plan - the mission,
+    # its goals and its laps, chosen before anything started. This is what
+    # lets the mission be SET BEFORE PLAY: the trees, the map and the
+    # properties panel all show what the fleet has been told without a sim
+    # having to be running to be told it.
+    #
+    # It is ungated on purpose, and the reason is not laziness: SETMISSION is
+    # gated by command authority because an order has to REACH a vehicle, and
+    # at t=0 nothing has been jammed yet, so the gate is trivially satisfied
+    # and the gating would be theatre. Every order issued AFTER the run starts
+    # still goes down the command channel and is still refused when it cannot
+    # get through - which is the thing worth measuring.
+    _plan = plan_from_mission(doc)
+    if _plan and _plan.get("waypoints"):
+        _laps = 1 if _plan["laps"] == ANY else int(_plan["laps"])
+        _who = str(_plan.get("who", "all")).lower()
+        for a in agents:
+            if a.get("ghost") or a.get("jammer") \
+                    or a.get("platform") == "ground_station":
+                continue
+            if _who not in ("all", str(a.get("network", "")).lower(),
+                            str(a.get("id", "")).lower()):
+                continue
+            missing = [w for w in _plan["waypoints"]
+                       if w not in (world["points"] or {})]
+            if missing:
+                print(f"composed plan names {', '.join(missing)}, which this "
+                      f"run has no point for - not assigned", file=sys.stderr)
+                break
+            install_plan(a, _plan["waypoints"], _laps)
+
     # Reachability is EMERGENT, not declared. Every same-network pair is a
     # CANDIDATE; whether it is usable is decided each tick by the RF model, and
     # which candidates are actually used is decided by routing.
@@ -827,24 +860,34 @@ def arrival_tolerance_m(agent):
     return max(_num(d.get("length"), 0.5), 0.25)
 
 
+ANY = "any"          # "the operator decides, per run" - never a default
+
+
+def _count(v, default=1):
+    """A plan field that may be a number or the word `any`."""
+    if isinstance(v, str) and v.strip().lower() == ANY:
+        return ANY
+    try:
+        return max(int(v), 1)
+    except (TypeError, ValueError):
+        return default
+
+
 def plan_from_mission(doc):
     """The plan a mission file declares, normalised, or None.
 
-        plan: {goals: 2, laps: 4}          <- how MANY points it needs
-        plan: {waypoints: [A, B], laps: 4} <- or exactly which ones
+        plan: {goals: any, laps: 1}      advance - visit each point once
+        plan: {goals: any, laps: any}    patrol  - round the circuit N times
+        plan: {waypoints: [A, B], laps: 4}   welded, for a fixed benchmark
 
-    A MISSION SAYS HOW MANY GOALS IT NEEDS. IT DOES NOT SAY WHERE THEY ARE.
+    A MISSION IS THE SHAPE OF A TASK. IT DECIDES NOTHING ABOUT GEOMETRY.
 
-    That is the whole correction. `advance to FAR` welded one mission to one
-    scene - the only one with a point by that name - and, worse, it made the
-    scene author decide the objective. A scene is the world; where you choose
-    to send a fleet inside it is a decision about this run, and it belongs to
-    whoever is running it.
-
-    So `goals: 2` means "a shuttle needs two ends, you say which" and the
-    points are bound at assignment time, from the Console's goal pickers or
-    from `SETMISSION <name> to P1 P2`. The same shuttle then runs on any scene
-    with any two points, and there is nothing to edit to move it.
+    Not where the points are, and now not even how many there are. `goals: any`
+    means the operator adds as many goal slots as the job needs: one point is
+    the penetration command, three is a route, and it is the same mission
+    file either way. `laps: any` means the operator says how many times round
+    - which is the ONLY thing separating patrol from advance, and the reason
+    there is no shuttle mission any more. Patrolling two points IS shuttling.
 
     `waypoints:` is still accepted for a mission deliberately welded to named
     points - a saved benchmark whose whole purpose is to be identical every
@@ -854,40 +897,45 @@ def plan_from_mission(doc):
     if not isinstance(plan, dict):
         return None
     who = str(plan.get("who", "all"))
-    laps = max(int(plan.get("laps", 1)), 1)
+    laps = _count(plan.get("laps", 1))
     if plan.get("waypoints"):
         return {"waypoints": [str(w) for w in plan["waypoints"]],
                 "goals": len(plan["waypoints"]), "laps": laps, "who": who}
-    try:
-        n = int(plan.get("goals", 0))
-    except (TypeError, ValueError):
-        n = 0
-    if n > 0:
-        return {"waypoints": None, "goals": n, "laps": laps, "who": who}
+    goals = _count(plan.get("goals", 0), default=0)
+    if goals == ANY or goals > 0:
+        return {"waypoints": None, "goals": goals, "laps": laps, "who": who}
     return None
 
 
-def mission_goal_count(path):
-    """How many points this mission file needs, for the Console's pickers.
+def mission_spec(path):
+    """What this mission lets the operator choose: {"goals": .., "laps": ..}.
 
-    0 means it names its own (or has no plan at all), so nothing has to be
-    chosen. Read from the file rather than inferred, so adding a mission needs
-    no code.
+    Each is a number (fixed by the mission), the string "any" (the operator
+    decides), or 0 goals for a mission with no destination at all. Read from
+    the file, so adding a mission needs no code in the Console.
     """
     try:
         doc = _load_yaml(path) or {}
     except OSError:
-        return 0
+        return {"goals": 0, "laps": 1}
     plan = plan_from_mission(doc)
     if not plan:
         # An `advance` objective with a destination still needs somewhere to
-        # go, and the goal picker is where that is now chosen.
+        # go, and the goal pickers are where that is now chosen.
         for obj in (doc.get("objectives") or {}).values():
             if isinstance(obj, dict) and obj.get("do") == "advance" \
                     and "to" in obj:
-                return 1
-        return 0
-    return 0 if plan["waypoints"] else int(plan["goals"])
+                return {"goals": 1, "laps": 1}
+        return {"goals": 0, "laps": 1}
+    return {"goals": 0 if plan["waypoints"] else plan["goals"],
+            "laps": plan["laps"]}
+
+
+def mission_goal_count(path):
+    """How many points this mission needs, as a number. `any` reports 1 - the
+    minimum it can be run with - for callers that cannot offer a choice."""
+    g = mission_spec(path)["goals"]
+    return 1 if g == ANY else int(g)
 
 
 def install_plan(agent, waypoints, laps=1):
@@ -3008,7 +3056,8 @@ def _is_taskable(agent, networks):
 
 
 def apply_mission_file(path, agents_by_id, points, arena,
-                       links=None, poses=None, goal=None, goals=None):
+                       links=None, poses=None, goal=None, goals=None,
+                       laps=None):
     """SETMISSION: distribute a mission file's per-agent objectives onto the
     currently running agent set, gated by command authority.
 
@@ -3090,20 +3139,29 @@ def apply_mission_file(path, agents_by_id, points, arena,
     # objectives at all.
     plan = plan_from_mission(doc)
     if plan:
-        want = int(plan["goals"])
+        # LAPS THE RUN CHOSE, where the mission left it open. Only patrol
+        # does; advance is one lap by definition, and overriding that would
+        # quietly turn it into a patrol under another name.
+        if plan["laps"] == ANY:
+            plan["laps"] = _count(laps, default=1)
+            if plan["laps"] == ANY:
+                plan["laps"] = 1
+        # `any` goals: however many the run supplied, at least one.
+        want = (max(len(picked), 1) if plan["goals"] == ANY
+                else int(plan["goals"]))
         if plan["waypoints"] is None:
             # THE MISSION ASKED FOR N POINTS AND THIS RUN SUPPLIES THEM. Too
             # few is a loud refusal rather than a mission quietly flown with
             # half a circuit - a two-point shuttle given one point is not a
             # shorter shuttle, it is a vehicle sitting on a waypoint.
-            if len(picked) < want:
+            if len(picked) < want or not picked:
                 return [], [
-                    f"SETMISSION: '{mission_name}' needs {want} "
-                    f"point{'s' if want != 1 else ''} and {len(picked)} "
+                    f"SETMISSION: '{mission_name}' needs "
+                    f"{'at least one point' if not picked else f'{want} points'}"
+                    f" and {len(picked)} "
                     f"{'was' if len(picked) == 1 else 'were'} given. "
-                    f"Choose them in Setup, or type "
-                    f"'SETMISSION {mission_name} to "
-                    f"{' '.join(f'P{i + 1}' for i in range(want))}'."], None
+                    f"Add goal slots in Setup, or type "
+                    f"'SETMISSION {mission_name} to P1 P2 ...'."], None
             plan["waypoints"] = picked[:want]
         elif picked and len(plan["waypoints"]) == 1:
             # A one-waypoint plan is re-pointed by a chosen goal, which is how
@@ -3458,9 +3516,9 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
             continue
 
         if verb0 == "SETMISSION" and len(head) == 2:
-            # SETMISSION <name>                    the mission as written
-            # SETMISSION <name> to <P>             one goal
-            # SETMISSION <name> to <P1> <P2> ...   as many as it asks for
+            # SETMISSION <name>                            as written
+            # SETMISSION <name> to <P1> <P2> ...           its goals
+            # SETMISSION <name> to <P1> <P2> laps <n>      and its lap count
             #
             # A mission says HOW MANY goals it needs; this says where they
             # are. That is what makes one mission file run on any scene with
@@ -3471,11 +3529,22 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
             rest = head[1].strip()
             goal_pts = []
             parts = rest.split()
+            laps_n = None
+            if len(parts) >= 2 and parts[-2].upper() == "LAPS":
+                try:
+                    laps_n = max(int(parts[-1]), 1)
+                except ValueError:
+                    print("SETMISSION: laps must be a whole number",
+                          file=sys.stderr)
+                    continue
+                parts = parts[:-2]
             idx = max((i for i, tk in enumerate(parts)
                        if tk.upper() == "TO" and i > 0), default=None)
             if idx is not None and idx + 1 < len(parts):
                 goal_pts = parts[idx + 1:]
                 rest = " ".join(parts[:idx])
+            else:
+                rest = " ".join(parts)
             ref = rest
             mpath = Path(ref)
             if mpath.parent == Path(".") and not mpath.suffix:
@@ -3484,7 +3553,7 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                 mpath = REPO_ROOT / mpath
             file_changed, messages, mission_name = apply_mission_file(
                 mpath, agents_by_id, points, arena, links=links, poses=poses,
-                goals=goal_pts)
+                goals=goal_pts, laps=laps_n)
             for msg in messages:
                 print(msg, file=sys.stderr)
             if mission_name and file_changed:

@@ -10,3 +10,13 @@ spec_version: 0.1
 name: default_run
 scene: lab_box
 fleet: 3_roboracer
+
+# THE RUN CARRIES ITS OWN POINTS. Scenes no longer ship any: a scene is the
+# world, and where you send a fleet inside it is a decision about this run.
+# In the Console these are created with Setup -> Add point; here they are
+# written down, because a default run has to be runnable with nothing set up.
+points:
+  P1: {x: -3.0, y:  2.0}
+  P2: {x:  3.0, y:  2.0}
+  P3: {x: -3.0, y: -2.0}
+  P4: {x:  3.0, y: -2.0}
