@@ -4297,9 +4297,40 @@ class Console(QMainWindow):
             "all     sweep all three (experiment only).")
         self.route_combo.activated.connect(lambda _i: self._on_arch_chosen())
         alay.addWidget(self.route_combo)
+        # WHO IS THE COORDINATOR. Centralized and hierarchical both need one;
+        # decentralized has none by definition, so the picker disappears
+        # rather than sitting there greyed and implying otherwise.
+        self.lbl_coord = QLabel("Coordinator (the one who decides)")
+        alay.addWidget(self.lbl_coord)
+        self.coord_combo = QComboBox()
+        self.coord_combo.setToolTip(
+            "The agent everyone ultimately answers to. Normally the ground "
+            "station - it has the mains power, the big antenna and the "
+            "operator - but it can be a vehicle, which is what a fleet with "
+            "no bench looks like.")
+        self.coord_combo.activated.connect(lambda _i: self._on_arch_chosen())
+        alay.addWidget(self.coord_combo)
+
+        # WHO REPORTS TO WHOM. Shown when the AUTHORITY is hierarchical (a
+        # command tree needs one) or the ROUTING is tiered (squads are what
+        # tiered routing partitions on). One row per vehicle, so a squad is
+        # built by saying who each vehicle answers to rather than by naming
+        # groups - the tree is the thing that matters and this is it, written
+        # out.
+        self.lbl_tiers = QLabel("Reports to")
+        alay.addWidget(self.lbl_tiers)
+        self.tier_box = QWidget()
+        self.tier_lay = QVBoxLayout(self.tier_box)
+        self.tier_lay.setContentsMargins(0, 0, 0, 0)
+        self.tier_lay.setSpacing(3)
+        self.tier_combos = {}
+        alay.addWidget(self.tier_box)
+
         self.lbl_arch = QLabel("")
         self.lbl_arch.setObjectName("hint")
         self.lbl_arch.setWordWrap(True)
+        self.lbl_arch.setMinimumHeight(
+            4 * self.lbl_arch.fontMetrics().height() + 4)
         alay.addWidget(self.lbl_arch)
         slay.addWidget(self.arch_box)
         self.arch_box.setVisible(False)
@@ -4950,6 +4981,7 @@ class Console(QMainWindow):
             self._setup_fleet = fleet
             self._blue_ids = set(new_spawns)
         self._spawns.update(new_spawns)
+        self._refresh_command_structure()
         self._compose_setup()
         self._update_placing()
         both = " + ".join(x for x in (self._setup_fleet, self._setup_red) if x)
@@ -5784,11 +5816,8 @@ class Console(QMainWindow):
         # Squads for the hierarchical and tiered cells. The first blue vehicle
         # leads - stated here rather than assumed silently, and replaced by a
         # squad column in the fleet table when that lands.
-        ids = [a.get("id") for a in (composed.get("agents") or [])
-               if a.get("network") == "blue" and not a.get("ghost")
-               and not a.get("jammer")]
-        squads = ({"alpha": {"leader": ids[0], "members": ids[1:]}}
-                  if len(ids) >= 2 else {})
+        # THE SAME TREE THE SANDBOX WOULD HAVE RUN, drawn on the Setup tab.
+        squads = self._squads()
         name = "_".join(x for x in (self._setup_scene,
                                     self.exp_mission.currentText(),
                                     self._goal_name()) if x)
@@ -5809,7 +5838,8 @@ class Console(QMainWindow):
             "laps": self.mission_laps_value(),
             "duration_s": 400.0, "warmup_s": 5.0, "rate_hz": 10.0,
             "stop_when_stalled": True, "stall_grace_s": 5.0,
-            "squads": squads, "coordinator": "gcs",
+            "squads": squads,
+            "coordinator": self._coordinator() or "gcs",
             "leader_loss": "fallback",
             # THE SAME ARITHMETIC THE LABEL SHOWED. Built by _sweep_axes so
             # the run counter on the Setup tab and the grid that actually runs
@@ -5822,37 +5852,217 @@ class Console(QMainWindow):
             "seeds": [1],
         }, None
 
+    # WHAT EACH COMBINATION ACTUALLY DOES. Nine of them, because authority
+    # and routing are independent axes and every pairing is a real
+    # configuration - which is the framework's whole claim. Written as what
+    # happens, not as whether it is a good idea: the operator is choosing an
+    # architecture, and the useful thing to know is how command will flow and
+    # what breaks it.
+    ARCH_NOTES = {
+        ("centralized", "star"):
+            "Every vehicle talks only to {coord}, and {coord} decides for all "
+            "of them. One hop, one decision-maker: the quickest to command, "
+            "and each vehicle goes silent the moment its own hop to {coord} "
+            "breaks. Nothing relays.",
+        ("centralized", "mesh"):
+            "{coord} decides for everyone, but the fleet relays for each "
+            "other. A vehicle out of {coord}'s reach can still be commanded "
+            "through a peer - so the NETWORK survives distance that the "
+            "command structure alone would not. This is where a stalled "
+            "vehicle becomes a relay for the ones still moving.",
+        ("centralized", "tiered"):
+            "{coord} decides for everyone, but only leaders talk to it. A "
+            "member reaches {coord} through its leader, so losing one leader "
+            "silences its whole squad even though {coord} is still there and "
+            "still deciding.",
+        ("decentralized", "star"):
+            "Every vehicle decides for itself, and a star carries nothing "
+            "between them. Effectively independent robots sharing a channel: "
+            "jamming cannot strip an authority nobody is exercising, which is "
+            "why this is the CONTROL condition and not a result.",
+        ("decentralized", "mesh"):
+            "Every vehicle decides for itself and can hear every other. The "
+            "most survivable arrangement here - and today the least "
+            "coordinated, because they do not yet negotiate. Read it as a "
+            "control, not as a claim.",
+        ("decentralized", "tiered"):
+            "Every vehicle decides for itself; the network still partitions "
+            "into squads. Routing structure with no command structure over "
+            "it - useful for isolating what the topology alone is worth.",
+        ("hierarchical", "star"):
+            "Members answer to their leader and leaders to {coord} - but a "
+            "star carries no peer links, so a member reaches its leader VIA "
+            "{coord}, the node it was supposed to be less dependent on. Every "
+            "path runs through {coord}, so this behaves exactly as "
+            "centralized. A legitimate thing to configure and a real finding "
+            "that it collapses.",
+        ("hierarchical", "mesh"):
+            "Members answer to their leader, leaders to {coord}, and every "
+            "link in the fleet is available to carry either. Losing the link "
+            "to {coord} leaves each squad still commanded by its own leader - "
+            "degraded, not decapitated.",
+        ("hierarchical", "tiered"):
+            "Command and routing agree: each squad meshes internally, only "
+            "the leader talks upward to {coord}. The structure the network "
+            "carries is the structure that decides, which is the one case "
+            "where the two axes are not independent.",
+    }
+
     def _on_arch_chosen(self):
         """An architecture override, applied and reported.
 
         Recomposes the run immediately so the map redraws with the new
         topology - a routing change you cannot see is a routing change you
-        cannot trust - and warns about the one combination that silently
-        degenerates."""
+        cannot trust - and says, in a sentence, what this particular
+        combination DOES.
+        """
         auth = self.auth_combo.currentText()
         route = self.route_combo.currentText()
-        note = []
         if self.mode_combo.currentIndex() == 2:
             self._refresh_run_count()
-        # A hierarchy over a star is not a hierarchy. Star carries no peer
-        # links, so every squad member reaches its leader VIA the coordinator,
-        # and its fallback goes to the same coordinator - which is identical
-        # to centralized. It is a legitimate thing to configure and a real
-        # finding that it collapses, so it is allowed and explained rather
-        # than forbidden.
-        if auth == "hierarchical" and route == "star":
-            note.append("hierarchical over star: no squad links exist, so "
-                        "every member reaches its leader via the coordinator. "
-                        "This will behave as centralized.")
-        self.lbl_arch.setText("  ".join(note))
+        self._refresh_command_structure()
+
+        sweep = self.SWEEP_ALL
+        if auth == sweep or route == sweep:
+            self.lbl_arch.setText(
+                "Sweeping every combination of "
+                + ("authority" if auth == sweep else auth)
+                + " x "
+                + ("routing" if route == sweep else route)
+                + ". Each cell is a different answer to 'who decides' and "
+                  "'how do the packets get there', and they are independent - "
+                  "which is the thing the experiment exists to show.")
+        else:
+            note = self.ARCH_NOTES.get((auth, route), "")
+            self.lbl_arch.setText(
+                note.format(coord=self._coordinator() or "the coordinator"))
         if self._setup_scene:
             self._compose_setup()
+
+    def _coordinator(self):
+        return (self.coord_combo.currentData()
+                if hasattr(self, "coord_combo") else None)
+
+    def _blue_mobile(self):
+        """Blue vehicles a command tree can be built out of - the bench is
+        what they answer TO, never a rung on the ladder."""
+        view = getattr(self, "resolved", None) or self.doc or {}
+        bodies = {a.get("id"): a for a in (view.get("agents") or [])}
+        out = []
+        for aid in sorted(self._blue_ids or []):
+            b = bodies.get(aid) or {}
+            if b.get("ghost") or b.get("jammer") \
+                    or b.get("platform") == "ground_station":
+                continue
+            out.append(aid)
+        return out
+
+    def _refresh_command_structure(self):
+        """Show the coordinator picker and the reports-to rows this
+        architecture actually uses, and fill them from what is composed."""
+        if not hasattr(self, "coord_combo"):
+            return
+        auth = self.auth_combo.currentText()
+        route = self.route_combo.currentText()
+        sweep = self.SWEEP_ALL
+        # Sweeping an axis means every value of it will be run, so the
+        # structure has to exist for the ones that need it.
+        needs_coord = auth in ("centralized", "hierarchical", sweep)
+        needs_tree = auth in ("hierarchical", sweep) or route in ("tiered",
+                                                                 sweep)
+
+        ids = sorted(self._blue_ids or [])
+        keep = self.coord_combo.currentData()
+        self.coord_combo.blockSignals(True)
+        self.coord_combo.clear()
+        for aid in ids:
+            self.coord_combo.addItem(aid)
+            self.coord_combo.setItemData(self.coord_combo.count() - 1, aid)
+        i = self.coord_combo.findData(keep)
+        if i < 0:
+            # The ground station by default: mains power, a bigger amplifier
+            # and a proper antenna are exactly why a bench makes a good hub.
+            i = max(self.coord_combo.findData("gcs"), 0)
+        self.coord_combo.setCurrentIndex(max(i, 0))
+        self.coord_combo.blockSignals(False)
+        self.lbl_coord.setVisible(needs_coord and bool(ids))
+        self.coord_combo.setVisible(needs_coord and bool(ids))
+
+        mobile = self._blue_mobile()
+        coord = self._coordinator()
+        for aid in list(self.tier_combos):
+            if aid not in mobile:
+                self.tier_combos.pop(aid)._row.setParent(None)
+        for n, aid in enumerate(mobile):
+            c = self.tier_combos.get(aid)
+            if c is None:
+                row = QWidget()
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(0, 0, 0, 0)
+                rl.setSpacing(4)
+                lab = QLabel(aid)
+                lab.setFixedWidth(52)
+                rl.addWidget(lab)
+                c = QComboBox()
+                c.setToolTip(
+                    "Who this vehicle answers to. Point several at one "
+                    "vehicle and that vehicle is their squad leader; point "
+                    "them at the coordinator and they are commanded "
+                    "directly.")
+                c.activated.connect(lambda _i: self._on_arch_chosen())
+                rl.addWidget(c, 1)
+                self.tier_lay.addWidget(row)
+                c._row = row
+                self.tier_combos[aid] = c
+            prev = c.currentData()
+            c.blockSignals(True)
+            c.clear()
+            for opt in ([coord] if coord else []) + [m for m in mobile
+                                                     if m != aid]:
+                if opt is None:
+                    continue
+                c.addItem(f"{opt}  (coordinator)" if opt == coord else opt)
+                c.setItemData(c.count() - 1, opt)
+            j = c.findData(prev)
+            if j < 0:
+                # THE FIRST VEHICLE LEADS, and everyone else reports to it.
+                # Stated rather than assumed silently - it is the arrangement
+                # the corridor experiment has always used, and now it is
+                # visible and changeable instead of buried.
+                want = coord if n == 0 else mobile[0]
+                j = max(c.findData(want), 0)
+            c.setCurrentIndex(max(j, 0))
+            c.blockSignals(False)
+        self.lbl_tiers.setVisible(needs_tree and bool(mobile))
+        self.tier_box.setVisible(needs_tree and bool(mobile))
+
+    def _squads(self):
+        """The command tree the rows describe, as {name: {leader, members}}.
+
+        Derived from "who reports to whom" rather than typed as groups,
+        because the tree is the thing that matters and a squad is just a
+        leader with followers. Vehicles reporting straight to the coordinator
+        form no squad - they are commanded directly, which is what
+        centralized means.
+        """
+        coord = self._coordinator()
+        follow = {}
+        for aid, c in (self.tier_combos or {}).items():
+            boss = c.currentData()
+            if boss and boss != coord and boss != aid:
+                follow.setdefault(boss, []).append(aid)
+        names = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")
+        return {names[i] if i < len(names) else f"squad{i + 1}":
+                {"leader": leader, "members": sorted(members)}
+                for i, (leader, members) in enumerate(sorted(follow.items()))}
 
     def _arch_override(self):
         """{"blue": {...}} of whatever the operator has overridden, or {}."""
         over = {}
-        auth = getattr(self, "auth_combo", None)
-        route = getattr(self, "route_combo", None)
+        auth_w = getattr(self, "auth_combo", None)
+        route_w = getattr(self, "route_combo", None)
+        auth = auth_w.currentText() if auth_w is not None else ""
+        route = route_w.currentText() if route_w is not None else ""
         # ALWAYS written, never "whatever the file said". A fleet declares no
         # command policy at all now, so if these were not written the model
         # would fall back to an invisible default - and an invisible default
@@ -5860,22 +6070,32 @@ class Console(QMainWindow):
         # whole sweep. What the dropdown shows is what runs.
         # `all` is a SWEEP instruction, never a value: it must never reach
         # the model, which would not know what to do with it.
-        if auth is not None and auth.currentText() != self.SWEEP_ALL:
+        if auth and auth != self.SWEEP_ALL:
             # `topology` is the legacy alias command_authority() falls back on.
-            over["authority"] = over["topology"] = auth.currentText()
-        if route is not None and route.currentText() != self.SWEEP_ALL:
-            over["routing"] = route.currentText()
-        if over.get("authority") == "hierarchical" or \
-                over.get("routing") == "tiered":
-            # A hierarchy needs squads to find a leader in, and tiered routing
-            # needs squads to partition on. Until the fleet table can express
-            # squad membership, the first blue vehicle leads the rest - stated
-            # here rather than assumed silently.
-            ids = [a for a in sorted(self._blue_ids or [])
-                   if a not in ("gcs",)]
-            if len(ids) >= 2:
-                over["squads"] = {"alpha": {"leader": ids[0],
-                                            "members": ids[1:]}}
+            over["authority"] = over["topology"] = auth
+        if route and route != self.SWEEP_ALL:
+            over["routing"] = route
+        # THE COORDINATOR, chosen rather than assumed. Everything downstream
+        # reads it - command_authority walks toward it, the reassignment
+        # transmissions come FROM it, and the whole star-vs-mesh comparison
+        # is measured against where it is standing.
+        coord = self._coordinator()
+        if coord:
+            over["coordinator"] = coord
+        # THE COMMAND TREE, from the reports-to rows. A hierarchy needs squads
+        # to find a leader in and tiered routing needs squads to partition on;
+        # both now come from what the operator actually drew instead of "the
+        # first vehicle leads", which was a guess that happened to match the
+        # corridor experiment and would have quietly mismatched anything else.
+        # ONLY WHERE THEY MEAN SOMETHING. A squads block written into a
+        # centralized/star run is a structure nothing reads, and a stale
+        # structure nothing reads is the kind of thing that gets believed six
+        # months later when somebody opens the composed YAML.
+        if auth in ("hierarchical", self.SWEEP_ALL) \
+                or route in ("tiered", self.SWEEP_ALL):
+            squads = self._squads()
+            if squads:
+                over["squads"] = squads
                 over.setdefault("leader_loss", "fallback")
         return {"blue": over} if over else {}
 

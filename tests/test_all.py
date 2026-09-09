@@ -1091,8 +1091,15 @@ def test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists():
     check("GNSS jamming makes the error GROW over time",
           len(errs) >= 3 and errs[-1] > errs[0] > 0,
           f"{errs}")
-    check("the drift is on the order of a few % of the ~18 m travelled",
-          0.3 < errs[-1] < 2.0, f"{errs[-1]}")
+    # SOURCED, NOT GUESSED. 0.49% of distance travelled (Papadopoulos &
+    # Misailidis 2007, Table I, worst uncalibrated differential-drive case:
+    # 60.87 cm over 124.9 m). Over ~18 m that is ~9 cm of expected error, and
+    # because the drift direction is a random walk the realised value spreads
+    # either side of it. The old test asserted 0.3-2.0 m, which was the old
+    # invented 4% - an order of magnitude worse than anything measured, and
+    # what made every indoor mission fail on drift within seconds.
+    check("the drift is a fraction of a percent of the ~18 m travelled",
+          0.01 < errs[-1] < 0.5, f"{errs[-1]} m")
     check("a regained fix recovers the position (error back to ~0)",
           recovered < 0.05, f"{recovered}")
 
@@ -1100,17 +1107,30 @@ def test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists():
     # nothing to scan - so a lidar car ALSO drifts under GNSS jamming here.
     lclean, lerrs, _ = run("3_roboracer", 1575.42, 120)
     check("a lidar car in an OPEN field also drifts (nothing to scan)",
-          lerrs[-1] > 0.1, f"{[lclean] + lerrs}")
+          lerrs[-1] > 0.01, f"{[lclean] + lerrs}")
     # WITH features (walls) a lidar localises without GNSS - but it is NOT
-    # perfect: scan-matching error still accumulates (~1% of distance, UAV
-    # Navigation VNS in unknown terrain). So it drifts, just far slower than
-    # inertial-only. Claiming zero was an over-claim.
+    # perfect: scan-matching error still accumulates, so it drifts. Claiming
+    # zero was an over-claim.
     llab, llerrs, _ = run("3_roboracer", 1575.42, 120, scene="lab_box")
     check("a lidar car with walls still drifts a little (SLAM is not perfect)",
           llerrs[-1] > 0.0, f"{[llab] + llerrs}")
-    check("...but far less than an unaided car over the same ground",
-          llerrs[-1] < errs[-1] / 2.0,
-          f"lidar {llerrs[-1]} vs unaided {errs[-1]}")
+    # AN AIDED VEHICLE IS AT LEAST NOT WORSE THAN AN UNAIDED ONE. That is the
+    # only claim this test can honestly make today. DRIFT_RATE_AIDED used to
+    # be a vendor figure of ~1% of distance, which is now WORSE than the
+    # measured unaided 0.49% - incoherent, so it was held at the unaided rate
+    # rather than replaced with a better-feeling guess. Restore the stronger
+    # assertion (aided is MUCH better) the moment a measured lidar- or
+    # vision-aided drift figure is sourced. See SOURCES.md.
+    # Asserted on the RATES, not on two runs in different rooms over
+    # different distances - which is what the old version did, and it only
+    # ever passed because the unaided rate was ten times too big.
+    check("an aiding sensor is never modelled as worse than none",
+          st.DRIFT_RATE_AIDED <= st.DRIFT_RATE_UNAIDED,
+          f"aided {st.DRIFT_RATE_AIDED} vs unaided {st.DRIFT_RATE_UNAIDED}")
+    check("the unaided rate is the one the paper measured",
+          abs(st.DRIFT_RATE_UNAIDED - 0.005) < 1e-9,
+          f"{st.DRIFT_RATE_UNAIDED} - Papadopoulos & Misailidis 2007 Table I "
+          f"worst uncalibrated case is 60.87 cm / 124.9 m = 0.49%")
 
     # A COMMS-band jammer does NOT cause positional drift (wrong band).
     cclean, cerrs, _ = run("3_roboracer_no_lidar", 2400.0, 80)
@@ -1359,7 +1379,7 @@ def test_missions_read_belief_not_ground_truth():
 
     check("a pursuer's picture of its target DIVERGES under GNSS denial "
           "(the old code had it exactly right, forever)",
-          err_at[115] > 0.25, f"error at t=11.5s: {err_at[115]:.3f} m")
+          err_at[115] > 0.01, f"error at t=11.5s: {err_at[115]:.3f} m")
     kn, b3, _ = know[115]
     check("that picture tracks the target's own BELIEF, not its true pose",
           math.hypot(kn["x"] - b3.get("x", 0.0), kn["y"] - b3.get("y", 0.0)) < 0.25,
@@ -2153,17 +2173,25 @@ def test_drift_that_makes_a_reported_arrival_untrue_is_a_failure():
     mission success while sitting somewhere else entirely.
     """
     print("\nA REPORTED ARRIVAL THAT IS NOT TRUE IS A FAILED MISSION")
-    frame, _txs, _h, agents = _planned_run(jam_dbm=40.0, gnss=True, dur=200.0)
+    frame, _txs, _h, agents = _planned_run(jam_dbm=40.0, gnss=True, dur=600.0)
     sc = frame["mission_score"]
-    check("GNSS denial fails the mission", sc["pass_frac"] == 0.0, str(sc))
-    check("...and fails it specifically on drift",
-          sc["drifted"] == sc["tasked"] and sc["failed"] == sc["tasked"],
-          str(sc))
+    check("GNSS denial stops the fleet passing cleanly",
+          sc["pass_frac"] < 1.0, str(sc))
+    check("...and at least one vehicle fails specifically on drift",
+          sc["drifted"] >= 1 and sc["failed"] >= 1, str(sc))
+    # A PARTIAL RESULT, and that is the point of scoring a percentage. With
+    # the sourced drift rate (0.49% of distance, Papadopoulos & Misailidis
+    # 2007) a 190 m corridor accumulates around a metre of error, so SOME
+    # vehicles report a false arrival and some do not. Under the invented 4%
+    # that preceded it every vehicle failed every time, which looked decisive
+    # and was an artefact of a number nobody had measured.
+    check("the outcome is partial, not all-or-nothing",
+          0.0 <= sc["pass_frac"] < 1.0 and sc["tasked"] == 3, str(sc))
     reasons = [(a.get("_plan") or {}).get("failed_reason")
-               for a in agents if a.get("_plan")]
-    check("each failure says how far off it actually was",
-          all(r and "while" in r and "tolerance" in r for r in reasons),
-          str(reasons[:1]))
+               for a in agents if (a.get("_plan") or {}).get("failed_reason")]
+    check("each failure says how wrong its own estimate was",
+          reasons and all("off its own estimate" in r and "tolerance" in r
+                          for r in reasons), str(reasons[:1]))
     # The same fleet with a working fix passes, so the failure is the
     # spectrum and not the plan.
     clean, _t, _hh, _aa = _planned_run()

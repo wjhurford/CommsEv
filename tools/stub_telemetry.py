@@ -99,8 +99,34 @@ GNSS_DENIAL_DBM = -120.0
 # UAV Navigation VECTOR autopilot figure for pure MEMS inertial (~33 m/min);
 # with visual aiding it falls to ~0.01 (1%). Source: UAV Navigation, "Dead
 # Reckoning Operations".
-DRIFT_RATE_UNAIDED = 0.04
-DRIFT_RATE_AIDED = 0.01
+# MEASURED, not guessed. Papadopoulos & Misailidis, "On Differential Drive
+# Robot Odometry with Application to Path Planning", European Control
+# Conference 2007, Table I: a Pioneer 3-DX differential-drive robot driven
+# over ~125 m paths accumulated 16.1-60.9 cm of position error UNCALIBRATED,
+# i.e. 0.13%-0.49% of distance travelled. The worst case - 60.87 cm over
+# 124.9 m, tight curvature, caster wheel - is 0.49%, and that is what is used
+# here: an uncalibrated vehicle is the honest default.
+#
+# This replaces a value of 0.04 (4% of distance) that was invented. It was an
+# ORDER OF MAGNITUDE worse than the worst measured case, which made every
+# indoor mission fail on drift within seconds and made lab_box unusable - the
+# scene declares GNSS denied (no sky view), so the fleet dead-reckons from
+# t=0 and a 6 m lane produced a quarter of a metre of error.
+#
+# NOTE THE VEHICLE CLASS. This is a wheeled robot with wheel encoders. A
+# quadcopter has no odometry at all and drifts on inertial integration, which
+# is a different number entirely - it stays on the sourcing list for the UAV
+# transition and must not be assumed equal to this.
+DRIFT_RATE_UNAIDED = 0.005
+# UNSOURCED, AND HELD AT THE UNAIDED FIGURE AS A FLOOR RATHER THAN GUESSED.
+# The previous 0.01 came from a vendor claim of ~1% of distance for lidar
+# aiding, which is now WORSE than the measured unaided figure above - an
+# aided vehicle drifting faster than an unaided one is incoherent, so it
+# cannot stand. Picking a better number by feel would be exactly the kind of
+# invention this constant just stopped being. Held equal to unaided (an
+# aiding sensor is at least not harmful) until a measured lidar- or
+# vision-aided drift figure is sourced. See SOURCES.md.
+DRIFT_RATE_AIDED = DRIFT_RATE_UNAIDED
 # A sensor that gives an RF-immune position fix (lidar/vision localisation)
 # greatly reduces drift but does NOT remove it: scan-matching and loop-closure
 # error accumulate too. UAV Navigation measured ~1% of distance with their
@@ -534,6 +560,16 @@ def load_scenario(path):
     # and the gating would be theatre. Every order issued AFTER the run starts
     # still goes down the command channel and is still refused when it cannot
     # get through - which is the thing worth measuring.
+    # THE FLEET, PUBLISHED AT LOAD. An `advance` works out each vehicle's
+    # offset from the formation's centre by looking at its peers, and caches
+    # it the FIRST time it is evaluated. If anything calls mission_target
+    # before a frame has run - a tool, a test, a panel - that list is empty,
+    # every vehicle believes it is alone, the offset comes out zero and the
+    # whole fleet is sent to one coordinate. Publishing here closes the trap
+    # rather than relying on nobody stepping in it.
+    global _ALL_AGENTS
+    _ALL_AGENTS = agents
+
     _plan = plan_from_mission(doc)
     if _plan and _plan.get("waypoints"):
         _laps = 1 if _plan["laps"] == ANY else int(_plan["laps"])
@@ -1020,22 +1056,43 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
             pl["awaiting_orders"] = False
             continue
 
-        # IT BELIEVES IT HAS ARRIVED. Is that true?
+        # IT BELIEVES IT HAS ARRIVED. Is what it is REPORTING materially
+        # false?
         #
-        # THE DRIFT FAILURE, and note there is no invented threshold here: the
-        # test is whether the arrival it is REPORTING is one it has actually
-        # made, judged with the same tolerance the vehicle itself used. A
-        # fleet under GNSS denial reports mission success while sitting
-        # somewhere else entirely, and that is a failure however confident the
-        # telemetry sounds.
+        # THE TEST IS ON THE VEHICLE'S OWN POSITION ERROR, not on its distance
+        # from the waypoint. That distinction is the whole correctness of this
+        # check and the first version got it wrong.
+        #
+        # Comparing TRUE distance-to-waypoint against the arrival tolerance
+        # makes the boundary a coin flip: belief and truth differ by
+        # millimetres with a good fix, so whichever one crosses the threshold
+        # first decides the outcome, and a vehicle that has plainly arrived
+        # gets marked FAILED on a rounding difference. Measured: two of three
+        # cars failed with "reported reaching P2 while 0.6 m away (tolerance
+        # 0.6 m)" - the same number to one decimal place, which is not a
+        # finding, it is noise.
+        #
+        # |belief - truth| is the quantity that actually means "how wrong is
+        # what it just told you". If that is inside the vehicle's own arrival
+        # tolerance then its report is as accurate as the criterion it used to
+        # decide it had arrived, and there is nothing to fail. If it is
+        # outside, the fleet is reporting success from somewhere it is not -
+        # which is exactly what GNSS denial does, and it is a failure however
+        # confident the telemetry sounds.
+        #
+        # Still no invented threshold: the same tolerance, applied to the
+        # right quantity.
         truth = poses.get(aid) or {}
-        d_true = math.hypot(_num(truth.get("x")) - tx,
-                            _num(truth.get("y")) - ty)
-        if d_true > tol:
+        err = math.hypot(_num(b.get("x")) - _num(truth.get("x")),
+                         _num(b.get("y")) - _num(truth.get("y")))
+        if err > tol:
+            d_true = math.hypot(_num(truth.get("x")) - tx,
+                                _num(truth.get("y")) - ty)
             pl["drifted"] = True
             pl["state"] = "failed"
             pl["failed_reason"] = (
-                f"reported reaching {pl['waypoints'][pl['leg']]} while "
+                f"reported reaching {pl['waypoints'][pl['leg']]} from "
+                f"{err:.1f} m off its own estimate - it is actually "
                 f"{d_true:.1f} m away (tolerance {tol:.1f} m)")
             continue
 
@@ -1399,7 +1456,23 @@ def mission_target(agent, t, poses, arena):
                             _num(mine.get("y", start["y"])) - cy)
 
         ox, oy = m["_offset"]
-        return (gx + ox, gy + oy)
+        # THE SLOT MUST BE SOMEWHERE THE VEHICLE CAN ACTUALLY GET TO.
+        #
+        # A formation offset applied to a goal near a wall pushes that
+        # vehicle's slot OUTSIDE the room. It then drives into the wall, stops
+        # short of a target it can never reach, and - because a leg only
+        # completes on arrival - the whole mission stalls there with nothing
+        # on screen to say why. Measured: a three-car line advancing on a
+        # point 3 m from the edge of an 8 m box put the lead car's slot at
+        # x = 3.67 in an arena usable to 3.4, and the patrol stopped dead
+        # after its first leg.
+        #
+        # Clamped into the usable arena, so the formation DEFORMS against the
+        # boundary instead of the mission becoming impossible. That is also
+        # what really happens: a wall is a wall, and a fleet closing on one
+        # ends up abreast of it rather than inside it.
+        tx_, ty_, _tz = clamp_to_arena(gx + ox, gy + oy, 0.0, arena)
+        return (tx_, ty_)
 
     if kind == "pursuit":
         tgt = poses.get(m.get("target"))
