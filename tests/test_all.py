@@ -2454,6 +2454,78 @@ def test_a_two_sensor_car_publishes_both_without_a_topic_clash():
           == {30.0})
 
 
+def test_the_bridge_publishes_every_ranging_sensor_it_advertises():
+    """What the ROS 2 bridge puts on the wire must match what the agent says
+    it carries - and a topic that is advertised but never written to is worse
+    than a missing one, because a graph looks complete and a subscriber waits
+    forever.
+
+    Checked against the world node's own source rather than by running ROS,
+    which is not installed here: the contract is that every ranging sensor
+    gets a namespaced LaserScan and a depth camera also gets a CameraInfo.
+    """
+    print("\nTHE BRIDGE PUBLISHES WHAT THE AGENT ADVERTISES")
+    src = (REPO / "ros2" / "src" / "deadband_ros" / "deadband_ros"
+           / "world_node.py").read_text(encoding="utf-8")
+    check("the world node publishes one scan per ranging sensor",
+          'f"/{aid}/{sen[\'id\']}/scan"' in src, "namespaced scan topic")
+    check("...decided by sensor_spec, not a hardcoded lidar type",
+          "self.sim.sensor_spec(sen[\"type\"])" in src
+          or "sensor_spec(sen[" in src)
+    check("a depth camera also gets its intrinsics",
+          "CameraInfo" in src and "camera_info" in src)
+    check("no flat /<agent>/scan is published any more",
+          'f"/{aid}/scan"' not in src,
+          "two sensors on one topic is an interleaved mixture")
+
+    ctl = (REPO / "ros2" / "src" / "deadband_ros" / "deadband_ros"
+           / "controller_node.py").read_text(encoding="utf-8")
+    check("the controller subscribes to its own longest-reaching sensor",
+          "range_max" in ctl and "/scan" in ctl)
+
+    # The advertised list and the sensors on the agent have to agree.
+    ag = {"id": "car1", "platform": "roboracer",
+          "sensors": [{"id": "lidar", "type": "ust10lx"},
+                      {"id": "depth", "type": "d435i"}]}
+    topics = {p["topic"] for p in st.publications_for(ag)}
+    check("both scans are advertised on the topics the node publishes",
+          {"/car1/lidar/scan", "/car1/depth/scan"} <= topics, str(topics))
+    check("and the camera's intrinsics with them",
+          "/car1/depth/camera_info" in topics)
+
+
+def test_a_dual_band_vehicle_declares_two_radios_and_no_sensors():
+    """The control condition for frequency agility.
+
+    Nothing but the link, so what happens to the link IS what happens to the
+    vehicle - a car that could localise or keep going on intent would confound
+    the measurement.
+    """
+    print("\nA DUAL-BAND VEHICLE: TWO RADIOS, NO SENSORS")
+    doc = yaml.safe_load(
+        (REPO / "agents" / "roboracer_dualband.yaml").read_text(
+            encoding="utf-8"))
+    check("it carries no sensors at all", doc.get("sensors") == [])
+    radios = doc.get("radios") or []
+    check("it declares two radios", len(radios) == 2, str(len(radios)))
+    bands = [_q(r.get("band"), "value") if isinstance(r.get("band"), dict)
+             else r.get("band") for r in radios]
+    check("on genuinely separate bands", sorted(bands) == [2400, 5800],
+          str(bands))
+    check("the primary radio is still the singular `radio:` block, so every "
+          "existing link calculation reads it unchanged",
+          isinstance(doc.get("radio"), dict))
+
+    # ADJACENT-CHANNEL LEAKAGE IS ALREADY MODELLED, which is what makes the
+    # second band a real escape rather than a smaller version of the same
+    # problem. A jammer on 2.4 GHz puts essentially nothing into 5.8 GHz.
+    same = st.aci_mu(0.0)
+    far = st.aci_mu(abs(5800 - 2400))
+    check("a jammer on the same channel lands in full", same > 0.99, str(same))
+    check("...and almost none of it reaches the other band",
+          far < 1e-6, f"{far}")
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -2492,6 +2564,8 @@ if __name__ == "__main__":
                test_a_depth_camera_is_not_a_small_lidar,
                test_range_decides_whether_a_sensor_can_localise_at_all,
                test_a_two_sensor_car_publishes_both_without_a_topic_clash,
+               test_the_bridge_publishes_every_ranging_sensor_it_advertises,
+               test_a_dual_band_vehicle_declares_two_radios_and_no_sensors,
                test_a_mission_has_an_end_and_is_passed_or_failed,
                test_the_coordinator_issues_one_leg_at_a_time_over_the_network,
                test_drift_that_makes_a_reported_arrival_untrue_is_a_failure,

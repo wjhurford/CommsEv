@@ -352,6 +352,7 @@ class Viewport(QWidget):
         self.selected_points = set()
         self._band = None         # rubber-band rectangle, screen coords
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
+        self.scan_extras = []      # every OTHER ranging sensor on that agent
         self.show_axes = False
         # The key is collapsed by default: once you know it, it is clutter
         # sitting on top of the arena. Click "key" in the corner to open it.
@@ -979,6 +980,29 @@ class Viewport(QWidget):
         agent = next((a for a in self.agents if a.get("id") == agent_id), None)
         if not agent:
             return
+        # EVERY RANGING SENSOR THIS AGENT CARRIES, not just the first. A car
+        # with a lidar and a depth camera has two fields of view, and drawing
+        # one of them makes the other invisible - which is the opposite of the
+        # point of fitting both.
+        for extra in (self.scan_extras or []):
+            self._one_scan(p, agent, extra)
+        self._one_scan(p, agent, scan)
+
+    def _one_scan(self, p, agent, scan):
+        """One sensor's return, drawn in world coordinates.
+
+        The two sensors are drawn in DIFFERENT COLOURS and their reach rings
+        are labelled with the sensor's own name, because the interesting thing
+        about carrying both is where one stops and the other does not. A
+        single colour would show two arcs and leave you working out which was
+        which from their size.
+        """
+        if not scan or not scan.get("ranges"):
+            return
+        agent_id = agent.get("id")
+        depth = bool(scan.get("slice_of_depth_image"))
+        hull_col = QColor(120, 190, 130, 22) if depth else QColor(62, 154, 168, 20)
+        dot_col = QColor(150, 224, 165) if depth else QColor(120, 214, 226)
 
         pose = agent.get("pose", {})
         x, y, z = _num(pose.get("x")), _num(pose.get("y")), _num(pose.get("z"))
@@ -1006,11 +1030,35 @@ class Viewport(QWidget):
         # A faint hull first, so the swept region still reads at a glance.
         if pts:
             hull = QPolygonF([self.to_screen(x, y, z)] + pts + [self.to_screen(x, y, z)])
-            p.setBrush(QBrush(QColor(62, 154, 168, 20)))
+            p.setBrush(QBrush(hull_col))
             p.setPen(Qt.NoPen)
             p.drawPolygon(hull)
 
-        p.setBrush(QBrush(QColor(120, 214, 226)))
+        # THE EDGES OF THE FIELD OF VIEW, drawn out to the sensor's rated
+        # range whether or not anything returned along them. For a 270-degree
+        # lidar this is nearly the whole circle and adds little; for an
+        # 87-degree camera it is the entire story - a narrow cone that stops
+        # three metres out, next to a lidar sweeping the room. Without the
+        # edges, a camera pointed at empty space draws NOTHING and reads as a
+        # broken sensor rather than one whose window is empty.
+        if depth:
+            p.setBrush(Qt.NoBrush)
+            edge = QPen(QColor(150, 224, 165, 130), 1.2)
+            edge.setStyle(Qt.DashLine)
+            p.setPen(edge)
+            o = self.to_screen(x, y, z)
+            for a in (yaw + a0, yaw + a1):
+                p.drawLine(o, self.to_screen(x + rmax * math.cos(a),
+                                             y + rmax * math.sin(a), z))
+            # The far arc, so the cone is closed and its depth is legible.
+            arc = [self.to_screen(x + rmax * math.cos(yaw + a0
+                                                      + (a1 - a0) * k / 24.0),
+                                  y + rmax * math.sin(yaw + a0
+                                                      + (a1 - a0) * k / 24.0), z)
+                   for k in range(25)]
+            p.drawPolyline(QPolygonF(arc))
+
+        p.setBrush(QBrush(dot_col))
         p.setPen(Qt.NoPen)
         for pt in pts:
             p.drawEllipse(pt, 1.7, 1.7)
@@ -1025,9 +1073,15 @@ class Viewport(QWidget):
         rp = self.to_screen(x, y, z)
         p.setBrush(Qt.NoBrush)
         p.setFont(QFont("Consolas", 8))
-        for radius, alpha, style, label in (
-                (rmax, 70, Qt.DotLine, f"rated {rmax:.0f} m"),
-                (reff, 150, Qt.DashLine, f"reaches {reff:.1f} m")):
+        model = scan.get("model", "sensor")
+        # A DEPTH CAMERA'S REACH IS NOT A RING. It sees through a window, so a
+        # full circle at its range would claim coverage behind the vehicle
+        # that it does not have. Its cone edges and far arc are drawn above
+        # instead, and the ring is skipped.
+        rings = () if depth else (
+            (rmax, 70, Qt.DotLine, f"{model} rated {rmax:.0f} m"),
+            (reff, 150, Qt.DashLine, f"reaches {reff:.1f} m"))
+        for radius, alpha, style, label in rings:
             edge = self.to_screen(x + radius, y, z)
             px = abs(edge.x() - rp.x())
             if px < 5:
@@ -7915,6 +7969,7 @@ class Console(QMainWindow):
         # Same scan, drawn on the map, so the panel can be checked against the
         # world instead of taken on trust.
         self.viewport.scan_overlay = (self.selected_agent, scan) if scan else None
+        self.viewport.scan_extras = (frame.get("scans") or []) if frame else []
         self.viewport.update()
 
     # -- running ------------------------------------------------------------

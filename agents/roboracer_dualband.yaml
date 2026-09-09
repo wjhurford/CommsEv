@@ -1,0 +1,88 @@
+# =============================================================================
+# Deadband AGENT — roboracer_dualband
+# =============================================================================
+# NO SENSORS. TWO RADIOS. This vehicle exists to answer one question and it is
+# not a navigation question:
+#
+#     WHEN A CHANNEL IS TAKEN AWAY FROM YOU, CAN YOU MOVE?
+#
+# Every fleet so far has had exactly one channel, so jamming it was the end of
+# the conversation - the only variables left were who decides and how the
+# packets travel. A second radio makes the CHANNEL a decision too, and that
+# opens the two experiments this agent was built for:
+#
+#   1. EVADE      Channel A is jammed. The coordinator moves the fleet to
+#                 channel B and command is restored. How long was it down,
+#                 and did anything fail while it was?
+#
+#   2. FOLLOWED   The jammer HOPS. Every time the fleet moves, the jammer
+#                 finds it again. Now the question is a race: can the fleet
+#                 change channel faster than the adversary can search, and
+#                 what does it cost to keep doing it?
+#
+# Deliberately sensorless. A vehicle carrying a lidar and a camera has other
+# ways to survive losing its radio - it can localise, it can keep going on
+# intent - and those confound the measurement. This one has nothing but the
+# link, so what happens to the link IS what happens to the vehicle. It is the
+# control condition for the whole frequency-agility question.
+#
+# TWO RADIOS, NOT ONE RADIO THAT RETUNES. That distinction is real hardware:
+# two transceivers can listen on both channels at once, which is what makes
+# detecting the jammer on the channel you just left possible at all. One
+# retuning radio is deaf to everything it is not currently on, and a fleet
+# that cannot hear the band it left cannot know whether it is safe to go back.
+# Which of those you have is a procurement decision with a tactical
+# consequence, and this file is the two-radio side of it.
+# =============================================================================
+
+spec_version: 0.1
+name: roboracer_dualband
+kind: agent
+
+description: >
+  F1TENTH-class ground vehicle with two radios on separate bands and no
+  sensors at all. Built for the frequency-agility experiments: what a fleet
+  can do when the channel it is using is taken away from it.
+
+platform: roboracer
+colour: "#D08C4A"
+
+dimensions:
+  length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+  width:  {value: 0.3,  unit: m, source: "Measured, car #1, 2026-07-21"}
+  height: {value: 0.2,  unit: m, source: "Measured, car #1, 2026-07-21"}
+
+# THE PRIMARY RADIO. `radio:` stays singular and is what every existing link
+# calculation reads, so this vehicle behaves exactly like any other on its
+# first channel and nothing downstream has to change to run it today.
+radio:
+  tx_power: {value: 20, unit: dBm, source: ""}   # <-- module datasheet
+  band:     {value: 2400, unit: MHz, source: "2.4 GHz ISM, the fleet's command band"}
+
+# THE SECOND RADIO. Listed separately and NOT yet read by the link model -
+# see docs/BACKLOG.md. Declaring the hardware before the behaviour exists is
+# deliberate: the agent file is what you could buy, and the channel-agility
+# policy that uses it is a DECISION that belongs in the Console, not in here.
+#
+# 5.8 GHz because it is the other licence-exempt band an F1TENTH-class vehicle
+# realistically carries, and because the separation matters: a jammer sitting
+# on 2.4 GHz puts almost nothing into 5.8 GHz, so moving there is a genuine
+# escape rather than a smaller version of the same problem. aci_mu() already
+# models how much of one channel lands in another.
+radios:
+  - id: radio_a
+    tx_power: {value: 20, unit: dBm, source: ""}
+    band:     {value: 2400, unit: MHz, source: "2.4 GHz ISM"}
+  - id: radio_b
+    tx_power: {value: 20, unit: dBm, source: ""}
+    band:     {value: 5800, unit: MHz, source: "5.8 GHz ISM"}
+
+performance:
+  max_speed:       {value: 1.5, unit: m/s,   source: "Measured, car #1, 2026-07-21"}
+  max_accel:       {value: 2.0, unit: m/s^2, source: "Measured, car #1, 2026-07-21"}
+  min_turn_radius: {value: 0.6, unit: m,     source: "Measured, car #1, 2026-07-21"}
+
+# NO SENSORS. Not an omission - see the header. This vehicle is the control
+# condition: nothing but the link, so what happens to the link is what happens
+# to the vehicle.
+sensors: []

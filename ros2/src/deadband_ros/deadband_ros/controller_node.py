@@ -74,9 +74,18 @@ class ControllerNode(Node):
         # Our OWN lidar only. A mission is entitled to what this agent senses;
         # subscribing to everyone's scans would let it cheat in a way no real
         # vehicle can, and cheating quietly is worse than not working.
-        if any(sn["type"] == "ust10lx" for sn in self.agent["sensors"]):
-            self.create_subscription(LaserScan, f"/{self.me}/scan",
-                                     self.on_scan, 10)
+        # THE LONGEST-REACHING ONE. A mission asking "what is in front of me"
+        # wants the sensor that can see furthest; subscribing to both and
+        # merging them is a sensor-fusion decision, and making it silently
+        # here would hide it. Named explicitly so the choice is visible.
+        ranging = sorted(
+            (sn for sn in self.agent["sensors"]
+             if self.sim.sensor_spec(sn["type"])),
+            key=lambda sn: -self.sim.sensor_spec(sn["type"])["range_max"])
+        if ranging:
+            self.create_subscription(
+                LaserScan, f"/{self.me}/{ranging[0]['id']}/scan",
+                self.on_scan, 10)
         self.pub = self.create_publisher(
             AckermannDriveStamped, f"/{self.me}/drive", 10)
         self.t = 0.0

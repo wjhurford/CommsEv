@@ -4,7 +4,12 @@ The world: physics and sensors for every agent, as real ROS 2 topics.
 This is the simulator half. It owns where things are and what the sensors see,
 and it publishes exactly the message types a real RoboRacer publishes:
 
-    /<agent>/scan   sensor_msgs/LaserScan       from the lidar raycast
+    /<agent>/<sensor>/scan          sensor_msgs/LaserScan
+                                    one per RANGING sensor - a lidar sweep or
+                                    a depth camera's horizontal slice
+    /<agent>/<sensor>/camera_info   sensor_msgs/CameraInfo
+                                    a depth camera's intrinsics, from the
+                                    datasheet's field of view
     /<agent>/odom   nav_msgs/Odometry           pose and velocity
     /<agent>/speed  std_msgs/Float32            convenience, as f1tenth does
 
@@ -29,6 +34,12 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import LaserScan
+try:
+    from sensor_msgs.msg import CameraInfo
+    HAVE_CAMERA_INFO = True
+except ImportError:                       # pragma: no cover - ROS not present
+    CameraInfo = None
+    HAVE_CAMERA_INFO = False
 from std_msgs.msg import Float32
 
 from .common import default_scenario, load_sim_core
@@ -126,9 +137,28 @@ class WorldNode(Node):
                 "odom": self.create_publisher(Odometry, f"/{aid}/odom", 10),
                 "speed": self.create_publisher(Float32, f"/{aid}/speed", 10),
             }
-            if any(s["type"] == "ust10lx" for s in a["sensors"]):
-                self.pubs[aid]["scan"] = self.create_publisher(
-                    LaserScan, f"/{aid}/scan", SENSOR_QOS)
+            # ONE PUBLISHER PER RANGING SENSOR, on the topic
+            # publications_for() advertises. A car carrying a lidar AND a
+            # RealSense has two fields of view and two scans; a single flat
+            # /<agent>/scan would put two publishers on one topic, and a
+            # subscriber would receive an interleaved mixture of a 270-degree
+            # 10 m sweep and an 87-degree 3 m cone - which looks exactly like
+            # a sensor going mad and is very hard to diagnose.
+            for sen in a["sensors"]:
+                spec = self.sim.sensor_spec(sen["type"])
+                if spec is None:
+                    continue
+                self.pubs[aid].setdefault("scans", {})[sen["id"]] = \
+                    self.create_publisher(
+                        LaserScan, f"/{aid}/{sen['id']}/scan", SENSOR_QOS)
+                # A DEPTH CAMERA ALSO PUBLISHES ITS INTRINSICS. Without a
+                # CameraInfo nothing downstream can turn a depth frame into
+                # metres, so a camera that published only ranges would be
+                # advertising a capability the graph cannot actually use.
+                if HAVE_CAMERA_INFO and spec is self.sim.DEPTHCAM:
+                    self.pubs[aid].setdefault("info", {})[sen["id"]] = \
+                        self.create_publisher(
+                            CameraInfo, f"/{aid}/{sen['id']}/camera_info", 10)
             # Static furniture does not take drive commands, so it should not
             # advertise a /drive topic either.
             if HAVE_ACKERMANN and a["platform"] != "ground_station":
@@ -209,36 +239,68 @@ class WorldNode(Node):
         msg.data = float(p.get("speed", 0.0))
         pubs["speed"].publish(msg)
 
-        if "scan" not in pubs:
-            return
-        lidar = next(s for s in agent["sensors"] if s["type"] == "ust10lx")
-        scan = self.sim.scan_for(agent, lidar, self.poses, self.agents,
-                                 self.arena, self.rng)
-        # Hand the scan to the mission layer for the NEXT tick. Without this a
-        # scenario mission of `type: script` sees world.scan() -> None in the
-        # ROS path but real data in the headless path, so a lidar-driven
-        # mission works standalone and drives into a wall under ROS. Same
-        # one-tick lag a real subscriber has.
-        self.sim._LAST_SCANS[aid] = scan
-        out = LaserScan()
-        out.header.stamp = stamp
-        out.header.frame_id = f"{aid}/{lidar['id']}"
-        out.angle_min = float(scan["angle_min"])
-        out.angle_max = float(scan["angle_max"])
-        n = len(scan["ranges"])
-        out.angle_increment = (out.angle_max - out.angle_min) / max(n - 1, 1)
-        out.range_min = float(scan["range_min"])
-        out.range_max = float(scan["range_max"])
-        # A no-return is +inf, which is what the LaserScan message specifies for
-        # a beam that found nothing. Writing range_max instead would tell every
-        # downstream node there is a wall exactly at the sensor's limit.
-        out.ranges = [float("inf") if r is None else float(r)
-                      for r in scan["ranges"]]
-        # sensor_msgs/LaserScan carries no covariance field, so a filter has to
-        # get the range uncertainty from the datasheet: +/-40 mm accuracy, taken
-        # as a 2-sigma bound, gives sigma = 20 mm. That number is in the sim
-        # core's LIDAR dict and is applied as noise on every ray here.
-        pubs["scan"].publish(out)
+        first = True
+        for sen in agent["sensors"]:
+            pub = (pubs.get("scans") or {}).get(sen["id"])
+            if pub is None:
+                continue
+            spec = self.sim.sensor_spec(sen["type"])
+            scan = self.sim.scan_for(agent, sen, self.poses, self.agents,
+                                     self.arena, self.rng)
+            # Hand the PRIMARY scan to the mission layer for the NEXT tick.
+            # Without this a scenario mission of `type: script` sees
+            # world.scan() -> None in the ROS path but real data in the
+            # headless path, so a lidar-driven mission works standalone and
+            # drives into a wall under ROS. Same one-tick lag a real
+            # subscriber has.
+            if first:
+                self.sim._LAST_SCANS[aid] = scan
+                first = False
+            out = LaserScan()
+            out.header.stamp = stamp
+            out.header.frame_id = f"{aid}/{sen['id']}"
+            out.angle_min = float(scan["angle_min"])
+            out.angle_max = float(scan["angle_max"])
+            n = len(scan["ranges"])
+            out.angle_increment = (out.angle_max - out.angle_min) / max(n - 1, 1)
+            out.range_min = float(scan["range_min"])
+            out.range_max = float(scan["range_max"])
+            # A no-return is +inf, which is what the LaserScan message
+            # specifies for a beam that found nothing. Writing range_max
+            # instead would tell every downstream node there is a wall
+            # exactly at the sensor's limit.
+            out.ranges = [float("inf") if r is None else float(r)
+                          for r in scan["ranges"]]
+            # LaserScan carries no covariance, so a filter has to take range
+            # uncertainty from the datasheet. The lidar is +/-40 mm absolute
+            # (2-sigma, so sigma = 20 mm); the depth camera is <2% of range,
+            # which is why its noise is applied proportionally in scan_for
+            # rather than as one number here.
+            pub.publish(out)
+
+            info_pub = (pubs.get("info") or {}).get(sen["id"])
+            if info_pub is not None:
+                info = CameraInfo()
+                info.header.stamp = stamp
+                info.header.frame_id = f"{aid}/{sen['id']}"
+                info.width, info.height = spec["res"]
+                # A PINHOLE MODEL FROM THE DATASHEET'S FIELD OF VIEW. No
+                # distortion coefficients, because the sim has no lens - and
+                # publishing zeros as though they were a calibration would
+                # invite somebody to trust an intrinsic matrix that was never
+                # measured. The frame says what it is.
+                fx = (info.width / 2.0) / math.tan(
+                    math.radians(spec["fov_deg"]) / 2.0)
+                fy = (info.height / 2.0) / math.tan(
+                    math.radians(spec.get("fov_v_deg", spec["fov_deg"])) / 2.0)
+                cx, cy = info.width / 2.0, info.height / 2.0
+                info.distortion_model = "plumb_bob"
+                info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+                info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+                info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0,
+                          0.0, 0.0, 1.0, 0.0]
+                info_pub.publish(info)
 
 
 def main(args=None):

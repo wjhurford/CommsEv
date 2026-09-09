@@ -69,10 +69,17 @@ class BridgeNode(Node):
             # subscribing blindly invents a /gcs/scan for a ground station that
             # has no lidar - which is a confusing thing to leave in a graph
             # other people will read.
-            if any(sen["type"] == "ust10lx" for sen in a["sensors"]):
-                self.create_subscription(LaserScan, f"/{aid}/scan",
-                                         lambda m, i=aid: self.on_scan(i, m),
-                                         SENSOR_QOS)
+            # NAMESPACED PER SENSOR, matching what world_node publishes and
+            # what publications_for() advertises. A car with a lidar and a
+            # depth camera has two of these; both are subscribed, so the
+            # bridge carries whatever the vehicle actually senses rather than
+            # the first sensor that happened to match a hardcoded type.
+            for sen in a["sensors"]:
+                if self.sim.sensor_spec(sen["type"]) is None:
+                    continue
+                self.create_subscription(
+                    LaserScan, f"/{aid}/{sen['id']}/scan",
+                    lambda m, i=aid: self.on_scan(i, m), SENSOR_QOS)
 
         self.frames = []
         threading.Thread(target=self.serve, daemon=True).start()
