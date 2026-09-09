@@ -1241,6 +1241,14 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
         # pointing now, and the whole point is that it turns from there.
         a["phase_t0"] = t
         pl["reassignments"] += 1
+        # A VEHICLE THAT DECIDES FOR ITSELF TRANSMITS NOTHING. Found by
+        # experiments/intercept.yaml: a decentralized fleet was emitting a
+        # reassignment for every leg, which red then "intercepted" - orders
+        # broadcast from an agent to itself. The decentralized column is
+        # supposed to be the control that shows there is nothing on the air,
+        # and it was the noisiest row in the table.
+        if auth.get("decider") == aid:
+            continue
         net = nets.get(a.get("network")) or {}
         pt = (arena.get("points") or {}).get(nxt) or {}
         out.append({

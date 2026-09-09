@@ -292,6 +292,15 @@ def run_one(args):
     prev = {i: (poses[i]["x"], poses[i]["y"]) for i in blue_ids}
     acc = {"cmd": [], "held": [], "dist": 0.0, "track": [], "belief": [],
            "sinr": [], "pdr": []}
+    # INTERCEPTION. Every reassignment is a transmission, so the other side
+    # can hear it - and whether it does is the same link budget as everything
+    # else, jammer included. `ears` are the red agents that are not jamming:
+    # a radio and a person, listening. See experiments/intercept.yaml.
+    ears = [a["id"] for a in agents
+            if a.get("network") not in (None, "blue") and not a.get("jammer")]
+    heard = {e: {"n": 0, "sinr": [], "first": None} for e in ears}
+    orders_sent = 0
+    heard_any = 0
     frames = []
 
     # PENETRATION. The outcome metric: how far each vehicle actually got,
@@ -364,6 +373,22 @@ def run_one(args):
             tx, ty = _target_on_truth(by[i], t + dt, poses, arena)
             acc["track"].append(math.hypot(poses[i]["x"] - tx,
                                            poses[i]["y"] - ty))
+        for tx in (f.get("transmissions") or []):
+            if tx.get("network") != "blue":
+                continue
+            orders_sent += 1
+            who = {h["id"]: h for h in (tx.get("heard_by") or [])}
+            if who:
+                heard_any += 1
+            for e in ears:
+                h = who.get(e)
+                if not h:
+                    continue
+                heard[e]["n"] += 1
+                heard[e]["sinr"].append(h.get("sinr_db"))
+                if heard[e]["first"] is None:
+                    heard[e]["first"] = round(t, 2)
+
         w = f.get("worst_link")
         if w:
             acc["sinr"].append(w["sinr_db"])
@@ -445,9 +470,23 @@ def run_one(args):
         "belief_err_m": mean(acc["belief"]),
         "worst_sinr_db": mean(acc["sinr"]),
         "worst_pdr": mean(acc["pdr"]),
+        # WHAT RED HEARD. `orders_sent` is the denominator - a fleet that is
+        # fully jammed issues no orders at all, so a low interception fraction
+        # can mean "could not hear" or "there was nothing to hear", and the
+        # two are only separable with the count beside the fraction.
+        "orders_sent": orders_sent,
+        "orders_heard_any": heard_any,
+        "intercept_frac": round(heard_any / orders_sent, 4) if orders_sent
+        else None,
         "wall_s": round(time.time() - t_start, 3),
         "error": "",
     }
+    for e in ears:
+        row[f"heard_{e}"] = heard[e]["n"]
+        row[f"intercept_frac_{e}"] = (round(heard[e]["n"] / orders_sent, 4)
+                                      if orders_sent else None)
+        row[f"intercept_sinr_{e}"] = mean(heard[e]["sinr"])
+        row[f"first_intercept_s_{e}"] = heard[e]["first"]
     return (row, frames) if want_frames else row
 
 
@@ -551,6 +590,13 @@ def main(argv=None):
         rows = [run_one(p) for p in payload]
     rows.sort(key=lambda r: r.get("cell", ""))
 
+    # ANY COLUMN A RUN PRODUCED. Per-listener interception columns are named
+    # after the listener, so the header cannot be written out in advance.
+    extra = []
+    for r in rows:
+        for k in r:
+            if k not in extra:
+                extra.append(k)
     fields = (names + ["seed", "cell", "runs_agents",
                        "mission_pass_frac", "mission_complete",
                        "mission_failed", "mission_awaiting_orders",
@@ -561,7 +607,9 @@ def main(argv=None):
                        "commanded_fraction",
                        "held_fraction", "distance_m", "track_err_m",
                        "belief_err_m", "worst_sinr_db", "worst_pdr",
+                       "orders_sent", "orders_heard_any", "intercept_frac",
                        "wall_s", "error"])
+    fields = fields + [k for k in extra if k not in fields]
     csv_path = outdir / "results.csv"
     with csv_path.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")

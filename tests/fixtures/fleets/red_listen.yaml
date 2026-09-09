@@ -1,0 +1,88 @@
+# =============================================================================
+# Deadband FLEET (RED) — red_listen
+# =============================================================================
+# ONE JAMMER AND THREE EARS. The red fleet for experiments/intercept.yaml.
+#
+# The jammer is the same emitter red_comms uses, on the command band. What is
+# new is the three listeners, which do nothing but receive. They are placed at
+# three standoffs by the experiment file, so one run answers "how close does an
+# ear have to be" without needing a swept axis for it - the three columns in
+# the results are the three distances.
+#
+# WHY BOTH ON ONE SIDE. Because the interesting result is the conflict. Red
+# would like to jam blue's command channel AND read blue's orders off it, and
+# those two wishes fight: the jammer raises the noise floor at its own
+# listeners, and past a certain power blue stops issuing orders at all, so
+# there is nothing left to intercept. Putting the two capabilities in one fleet
+# is what makes that trade-off measurable rather than assertable.
+#
+# Power is set live from the RED cell terminal:  JAM jam1 power <dBm>
+# =============================================================================
+
+spec_version: 0.1
+name: red_listen
+kind: fleet
+
+description: >
+  One 2.4 GHz jammer on the command band plus three static intercept
+  receivers. For measuring what red can hear of blue's orders, and what its
+  own jamming costs it.
+
+networks:
+  red:
+    system: adversary
+    band: 2400
+
+agents:
+  - id: jam1
+    platform: jammer
+    network: red
+    pose: {x: 0.0, y: 3.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      width:  {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+      height: {value: 0.30, unit: m, source: "Nominal emitter footprint"}
+    jammer:
+      tx_power: {value: 10, unit: dBm, source: ""}   # <-- module datasheet
+      band:     {value: 2400, unit: MHz, source: "Blue's command band - see the blue fleet file"}
+
+  # THE EARS. Named for what they are, so the results columns read as
+  # distances rather than as agent ids.
+  - id: ear_near
+    platform: listener
+    network: red
+    pose: {x: -60.0, y: 12.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.4, unit: m, source: "Nominal"}
+      width:  {value: 0.4, unit: m, source: "Nominal"}
+      height: {value: 1.2, unit: m, source: "Nominal mast height"}
+    performance:
+      max_speed: {value: 0.0, unit: m/s, source: "Static by definition"}
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    sensors: []
+
+  - id: ear_mid
+    platform: listener
+    network: red
+    pose: {x: -20.0, y: 12.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.4, unit: m, source: "Nominal"}
+      width:  {value: 0.4, unit: m, source: "Nominal"}
+      height: {value: 1.2, unit: m, source: "Nominal mast height"}
+    performance:
+      max_speed: {value: 0.0, unit: m/s, source: "Static by definition"}
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    sensors: []
+
+  - id: ear_far
+    platform: listener
+    network: red
+    pose: {x: 40.0, y: 12.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.4, unit: m, source: "Nominal"}
+      width:  {value: 0.4, unit: m, source: "Nominal"}
+      height: {value: 1.2, unit: m, source: "Nominal mast height"}
+    performance:
+      max_speed: {value: 0.0, unit: m/s, source: "Static by definition"}
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    sensors: []

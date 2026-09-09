@@ -1,0 +1,64 @@
+# =============================================================================
+# Deadband AGENT — listener
+# =============================================================================
+# A RADIO AND SOMEBODY LISTENING. No jammer, no sensors, nothing that moves: an
+# antenna at a fixed point, on a band, with a receiver.
+#
+# It exists because INTERCEPTION IS NOT JAMMING, and the framework keeps saying
+# so without ever having modelled it. A jammer changes the world and is
+# trivially detectable - it is the loudest thing in the room. A listener
+# changes nothing and emits nothing; its entire capability is being in range of
+# a transmitter that has to keep transmitting in order to command its fleet.
+#
+# Modelled as its own agent so an experiment can ask what each costs blue
+# separately, and what they cost EACH OTHER when one side does both: jamming
+# the command channel also deafens your own ear on it. See
+# experiments/intercept.yaml.
+#
+# WHAT IS MODELLED. Reception is the same link budget as every other link in
+# the model: path loss at the scene's exponent, the scene's noise floor, and
+# every armed same-band emitter summed into the denominator. So the ear is
+# degraded by its own side's jammer exactly as blue is.
+#
+# WHAT IS NOT, and it decides how far this can be pushed:
+#   * no antenna gain and no directionality - omni at both ends. A real
+#     intercept receiver uses a directional antenna and a low-noise front end
+#     and hears considerably further than this says. Every interception figure
+#     from this model is therefore a LOWER BOUND, which is the safe direction
+#     for it to be wrong in
+#   * no demodulation threshold of its own - it hears an order when the link
+#     would stand up, i.e. it is assumed no better than the intended receiver
+#   * no direction finding, no traffic analysis
+#   * no encryption or authentication question. It hears the ORDER, in the
+#     clear, because the model's radio has neither - which is also why
+#     accepting a SPOOFED order is still an open decision rather than a
+#     feature (progress/objectives.md, D2)
+# =============================================================================
+
+spec_version: 0.1
+name: listener
+kind: agent
+
+description: >
+  A static intercept receiver. One radio, no emissions, no sensors. Hears blue
+  reassignments when the link budget allows it, and is degraded by its own
+  side's jamming like anything else on the band.
+
+platform: listener
+
+dimensions:
+  length: {value: 0.4, unit: m, source: "Nominal - a tripod and a case"}
+  width:  {value: 0.4, unit: m, source: "Nominal"}
+  height: {value: 1.2, unit: m, source: "Nominal mast height"}
+
+# It does not move. Declared rather than left to be inferred from the name.
+performance:
+  max_speed: {value: 0.0, unit: m/s, source: "Static by definition"}
+  max_accel: {value: 0.0, unit: m/s^2, source: "Static by definition"}
+
+# The receive side of an ordinary 2.4 GHz module. tx_power is what it WOULD
+# transmit at if it ever did; nothing in the model makes it emit.
+radio:
+  tx_power: {value: 20, unit: dBm, source: ""}   # <-- module datasheet
+
+sensors: []

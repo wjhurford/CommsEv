@@ -1,0 +1,200 @@
+# =============================================================================
+# Deadband EXPERIMENT — intercept
+# =============================================================================
+# HEARING BLUE'S COMMANDS ON THE RED CHANNEL, and what it costs red to try.
+#
+# THE QUESTION
+#
+#   A fleet under mission command has to be TOLD things. Every time a vehicle
+#   reaches a waypoint the coordinator issues the next leg, and that order is a
+#   transmission on a known band from a known place. Red can hear it.
+#
+#   So: what fraction of blue's orders can an adversary read, how close does it
+#   have to be, and - the part that makes this an experiment rather than a demo
+#   - what does red's own jamming do to its own ability to listen?
+#
+# THE CONFLICT, WHICH IS THE POINT
+#
+#   Red wants two incompatible things on one channel.
+#
+#     Jam it, and blue loses command. But the jammer raises the noise floor at
+#     red's own receivers too - the model sums every armed same-band emitter
+#     into the denominator of every link, red's included - so red goes deaf on
+#     the channel it is attacking.
+#
+#     Worse for red: a fleet that cannot be commanded STOPS ISSUING ORDERS.
+#     Blue's coordinator only transmits when a vehicle reports arriving, so a
+#     stalled fleet is a silent one. Past a certain jamming power there is
+#     nothing left to intercept, not because red cannot hear it but because it
+#     was never said.
+#
+#   So interception should peak at some INTERMEDIATE jamming power and fall off
+#   in both directions - low power, blue talks freely but red is far away in
+#   SINR terms; high power, red is deaf and blue is silent. That curve is the
+#   result. If it comes out flat or monotonic, the prediction is wrong and that
+#   is worth knowing.
+#
+# WHY IT IS A MINI EXPERIMENT
+#
+#   27 cells, one seed, one axis with a control. It runs in a couple of minutes
+#   and it needs no new mechanics: `intercept()` and the `heard_by` field have
+#   existed since orders became transmissions; this is the first thing to
+#   MEASURE them. It is also the groundwork for deception - you cannot spoof an
+#   order you have never heard - which stays an open decision (D2) until
+#   there is a source for the radio having no authentication.
+#
+# READING THE RESULTS
+#
+#   orders_sent            how many reassignments blue transmitted at all.
+#                          THE DENOMINATOR, and the one that separates "red
+#                          could not hear it" from "there was nothing to hear"
+#   intercept_frac         fraction of those heard by at least one ear
+#   intercept_frac_ear_*   the same, per listening post
+#   intercept_sinr_ear_*   how comfortably it heard them
+#   first_intercept_s_*    when red first learned anything
+#   commanded_fraction     blue's side of the same coin
+#
+#   Plot intercept_frac against jam_rel_db with orders_sent beside it. The two
+#   together are the finding; either alone is misleading.
+#
+#     python3 tools/sweep.py experiments/intercept.yaml
+#
+# FIRST RUN, 2026-09-09 (30 cells, 19 s). Reproduce before quoting.
+#
+#   P_j/P_t   orders    heard by      heard by     near-ear    commanded
+#     (dB)     sent     near ear      far ear      SINR (dB)   fraction
+#   -------   ------    ---------     --------     ---------   ---------
+#    silent      9        100%          100%          41          1.00
+#     -20        6        100%          100%          40          0.94
+#     -10        3        100%          100%          36          0.92
+#      -5        3        100%            0%          32          0.44
+#       0        3        100%            0%          27          0.86
+#      +2        3        100%            0%          25          0.84
+#      +5        0          -              -           -          0.81
+#     +20        0          -              -           -          0.34
+#
+# THE PREDICTION HELD, and in the more interesting of the two ways. What
+# collapses first is not red's ability to hear - the near ear still had 25 dB
+# of SINR when the traffic stopped - it is the OPPORTUNITY. Blue issues nine
+# reassignments when it is unjammed and none at all past +5 dB, because a
+# fleet that cannot be commanded stops arriving anywhere and a coordinator
+# with nothing to answer says nothing. Red silenced the channel it wanted to
+# read.
+#
+# The far ear goes deaf long before the near one, at about -5 dB, which is the
+# ordinary geometry: it sits closest to the jammer.
+#
+# THE DECENTRALIZED ROW IS THE CONTROL AND IT READS ZERO EVERYWHERE. A fleet
+# that decides for itself transmits nothing, so there is nothing to intercept
+# at any jamming power. That is a real argument for decentralisation which has
+# nothing to do with jamming resistance - it is an EMCON argument - and it is
+# the first result in this framework that is about being heard rather than
+# about being stopped. (The first version of this run had decentralized as the
+# noisiest row in the table: vehicles were emitting reassignments addressed to
+# themselves. The experiment found that bug before it found anything else.)
+#
+# OPEN, AND NOT YET EXPLAINED. Decentralized penetration falls from 186 m to
+# 92 m at +10 dB and above, even though those vehicles never lose command. The
+# likely mechanism is that formation keeping is not free: `_fleet_centre` is
+# computed from each vehicle's KNOWLEDGE of its peers, and that knowledge
+# arrives over the same jammed links, so a decentralized fleet can still lose
+# its shape and stall against its own stations. If that is what is happening it
+# is a finding worth its own experiment - you lose formation before you lose
+# command - but it is unverified, so do not quote it.
+# =============================================================================
+
+spec_version: 0.1
+name: intercept
+kind: experiment
+
+description: >
+  Three vehicles advance down a 200 m corridor while three static red
+  listeners try to read the coordinator's reassignment traffic, under a red
+  jammer on the same band. Measures what fraction of blue's orders red hears,
+  from how far, and how red's own jamming degrades its own interception.
+
+scene: corridor_200m
+blue_fleet: 3_roboracer_no_lidar
+red_fleet: red_listen
+mission: advance
+
+duration_s: 300.0
+warmup_s: 5.0            # clean spectrum while the fleet gets moving
+rate_hz: 10.0
+stop_when_stalled: true
+stall_grace_s: 5.0
+
+# --- geometry -----------------------------------------------------------------
+# Blue starts at the ground-station end and advances toward the jammer. The
+# three ears sit off to one side at increasing depth, so the vehicles pass
+# them: ear_near is behind the fleet's start, ear_mid is a third of the way
+# along, ear_far is beyond the fleet's likely stopping point.
+#
+# THE OFFSET MATTERS. All three are 12 m off the corridor's centreline rather
+# than on it, so an ear is never accidentally the shortest path between two
+# blue agents - it is listening, not standing in the way.
+spawns:
+  gcs:      {x: -95.0, y:   0.0}
+  car1:     {x: -89.0, y:   0.0}
+  car2:     {x: -93.0, y:   3.0}
+  car3:     {x: -93.0, y:  -3.0}
+  jam1:     {x:  95.0, y:   0.0}
+  ear_near: {x: -60.0, y:  12.0}
+  ear_mid:  {x: -20.0, y:  12.0}
+  ear_far:  {x:  40.0, y:  12.0}
+
+doctrine: hold                  # lose command -> stop. Stopping means silence.
+
+# --- what is varied -----------------------------------------------------------
+axes:
+  authority: [centralized, decentralized, hierarchical]
+  # AUTHORITY IS AN AXIS HERE FOR A REASON. It changes how much there is to
+  # intercept, not just who hears it:
+  #   centralized    every leg for every vehicle is transmitted from the gcs.
+  #                  The most orders on the air, and the most to overhear
+  #   hierarchical   the squad leader issues its members' legs, so the traffic
+  #                  is shorter-range and an ear near the ground station may
+  #                  hear less than one near the squad
+  #   decentralized  every vehicle decides for itself. NOTHING is transmitted,
+  #                  so there is nothing to intercept at all - the control
+  #                  condition, and a real argument for decentralisation that
+  #                  has nothing to do with jamming resistance
+  #
+  # P_j / P_t in dB. -999 is the silent-jammer control: what red hears when it
+  # is only listening.
+  jam_rel_db: [-999, -20, -10, -5, 0, 2, 5, 8, 12, 20]
+  # PINNED, not swept: this experiment is about the AIR, not about who relays.
+  # Declared as a one-value axis because that is how a pinned value is stated -
+  # it then appears in every results row, so the CSV says what it was.
+  routing: [star]
+
+# Deterministic in this configuration - no lidar, and red_listen attacks the
+# command band only, so GNSS is never denied and nothing wanders. Put seeds
+# back the moment either enters. Same reasoning as penetration.yaml.
+seeds: [1]
+
+squads:
+  alpha: {leader: car1, members: [car2, car3]}
+coordinator: gcs
+leader_loss: fallback
+
+# FOUR LEGS, NOT ONE, AND THAT IS THE WHOLE MEASUREMENT. An advance to a
+# single point is issued once and never spoken of again - the coordinator
+# transmits nothing after the launch, so there is nothing on the air to
+# intercept and the experiment measures zero by construction (it did, first
+# time round: orders_sent = 0 in all 27 cells).
+#
+# A four-point advance makes the coordinator TALK: each vehicle reports
+# reaching a leg and is told the next one, so the traffic exists because the
+# mission needs it to, not because the experiment wanted some. That is also
+# the honest version of the finding - a fleet is exposed in proportion to how
+# often it has to be re-tasked.
+points:
+  START: {x: -95.0, y: 0.0}
+  L1:    {x: -45.0, y: 0.0}
+  L2:    {x:   0.0, y: 0.0}
+  L3:    {x:  50.0, y: 0.0}
+  FAR:   {x:  95.0, y: 0.0}
+
+goals: [L1, L2, L3, FAR]
+goal: FAR                       # for the penetration axis, which needs one

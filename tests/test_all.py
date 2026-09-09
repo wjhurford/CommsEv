@@ -2775,6 +2775,28 @@ def test_one_command_tree_serves_both_routing_and_authority():
         a["on_link_loss"] = "intent"
     auth2 = {a["id"]: st.command_authority(a, {}, links, poses, {"blue": net},
                                            link_states=states) for a in agents}
+    # AN AGENT THAT DECIDES FOR ITSELF PUTS NOTHING ON THE AIR. The control
+    # condition for experiments/intercept.yaml - and it was wrong: a
+    # decentralized fleet emitted a reassignment per leg, addressed from each
+    # vehicle to itself, and red duly "intercepted" them.
+    arena_i, ags_i, lks_i = st.load_scenario(str(REPO / "default_run.yaml"))
+    cars_i = [a for a in ags_i if a.get("platform") != "ground_station"]
+    (arena_i["networks"] or {}).setdefault("blue", {})
+    arena_i["networks"]["blue"]["authority"] = "decentralized"
+    for a in cars_i:
+        st.install_plan(a, ["P1", "P2", "P3"], laps=1)
+        a["armed"] = True
+    ps_i = {a["id"]: dict(a["start"], speed=0.0) for a in ags_i}
+    rg_i = random.Random(1)
+    st.TRANSMISSIONS.clear()
+    for q in range(200):
+        st.frame(q * 0.1, 0.1, q, arena_i, ags_i, lks_i, ps_i, rg_i)
+    legs = sum((a.get("_plan") or {}).get("reassignments", 0) for a in cars_i)
+    check("a decentralized fleet flies its legs...",
+          legs > 0, f"{legs} leg changes")
+    check("...and transmits nothing at all doing it",
+          not st.TRANSMISSIONS, f"{len(st.TRANSMISSIONS)} transmissions")
+
     check("a leader executing INTENT still commands its squad",
           auth2["car2"]["reachable"] and auth2["car3"]["reachable"],
           f"car2 {auth2['car2']} car3 {auth2['car3']}")

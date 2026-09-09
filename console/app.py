@@ -2357,6 +2357,37 @@ class PlotPane(QWidget):
         finally:
             p.end()
 
+    AUTH_COLOUR = {"centralized": "#D2694F",
+                   "decentralized": "#4FA3D1",
+                   "hierarchical": "#6FAE7E"}
+    ROUTE_DASH = {"star": Qt.SolidLine, "mesh": Qt.DashLine,
+                  "tiered": Qt.DotLine}
+
+    @classmethod
+    def series_style(cls, path, idx):
+        """(colour, dash) for a series - by CONFIGURATION where there is one.
+
+        Nine curves in nine arbitrary colours needs a nine-row legend, and a
+        nine-row legend is a wall of text lying on the data. Reported twice,
+        and the second time with the answer: "the rest of them are the colour
+        only of their authority, otherwise the legend gets way way too long,
+        this way the legend is 4 things - the 3 authorities and selected."
+
+        Right, and it makes the chart say something rather than merely
+        distinguish: colour IS the authority, dash IS the routing, so the
+        three warm curves are the centralized family whatever else varies.
+        A series whose name is not a configuration (a live run, where it is a
+        vehicle and a metric) falls back to the ordinary palette.
+        """
+        label = path[7:] if path.startswith("agents.") else path
+        bits = label.split(".", 1)[0].split("_")
+        auth = next((b for b in bits if b in cls.AUTH_COLOUR), None)
+        route = next((b for b in bits if b in cls.ROUTE_DASH), None)
+        if auth is None:
+            return QColor(PALETTE[idx % len(PALETTE)]), Qt.SolidLine
+        return (QColor(cls.AUTH_COLOUR[auth]),
+                cls.ROUTE_DASH.get(route, Qt.SolidLine))
+
     @staticmethod
     def series_label(path):
         """The readable name of a series - what the legend calls it.
@@ -2414,9 +2445,18 @@ class PlotPane(QWidget):
             # like a seventh, and a floating baseline hides exactly that.
             if g_lo > 0:
                 g_lo = 0.0
-        for idx, path in enumerate(self.series):
+        # THE SELECTED SERIES IS DRAWN LAST, so it is on top of its family
+        # rather than buried under it.
+        chosen = getattr(self.area, "selected", None)
+        order = sorted(range(len(self.series)),
+                       key=lambda i: self.series[i] == chosen)
+        for idx in order:
+            path = self.series[idx]
             pairs = allpairs[path]
-            colour = QColor(PALETTE[idx % len(PALETTE)])
+            lit = (path == chosen)
+            colour, dash = self.series_style(path, idx)
+            if lit:
+                colour = QColor(C_WARN)
             if not pairs:
                 p.setPen(QPen(colour))
                 p.drawText(left + 6, top + 14 + idx * 14, f"{path}   no data")
@@ -2436,26 +2476,37 @@ class PlotPane(QWidget):
             for tt, v in pairs:
                 poly.append(QPointF(left + w * (tt - t0) / (t1 - t0),
                                     top + h - (v - lo) / span * (h - 8) - 4))
-            p.setPen(QPen(colour, 1.4))
+            pen = QPen(colour, 2.4 if lit else 1.2)
+            pen.setStyle(Qt.SolidLine if lit else dash)
+            p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawPolyline(poly)
             # A COMPACT LEGEND. The full dotted path is how the series is
             # addressed, not what it is called: on a swept chart every entry
             # began "agents." and ended with the same metric, so the nine
             # names differed only in the middle and the legend was a wall.
-            # A KEY, NOT A LEGEND. Nine configurations printed as nine full
-            # names across the top of the plot is a wall of text lying on top
-            # of the very lines it describes - unreadable, and it hides the
-            # data. Reported twice. What goes on the plot now is a numbered
-            # swatch; the names, ranges and colours live in the Legend window
-            # (the Legend button, or right-click here), where there is room
-            # for them.
-            sw = QRectF(left + 6, top + 6 + idx * 12, 8, 8)
-            p.fillRect(sw, QBrush(colour))
-            p.setPen(QPen(QColor(C_DIM)))
-            p.drawText(QPointF(left + 19, top + 14 + idx * 12), str(idx + 1))
-            self._key.append((idx + 1, colour.name(), path,
-                              own_lo, own_hi))
+            self._key.append((idx + 1, colour.name(), path, own_lo, own_hi))
+
+        # A FOUR-ROW KEY, whatever the number of series: the three
+        # authorities, and whichever one is selected. Click a row in the
+        # series list to light one up.
+        fams = [(a, c) for a, c in self.AUTH_COLOUR.items()
+                if any(self.series_style(q, 0)[0].name().lower() == c.lower()
+                       for q in self.series)]
+        rows = [(c, a) for a, c in fams]
+        if chosen in self.series:
+            rows.append((C_WARN, self.series_label(chosen)))
+        elif fams:
+            rows.append((C_DIM, "click a series to light it up"))
+        p.setFont(QFont("Consolas", 8))
+        # Bottom left, where a decaying curve leaves the page empty - the top
+        # left is exactly where the data starts.
+        for r, (col, text) in enumerate(rows):
+            y = top + h - 6 - (len(rows) - 1 - r) * 12
+            p.fillRect(QRectF(left + 6, y - 6, 8, 8), QBrush(QColor(col)))
+            p.setPen(QPen(QColor(C_TEXT if col == C_WARN else C_DIM)))
+            p.drawText(QPointF(left + 19, y + 1), text)
+        p.setFont(QFont("Consolas", 9))
 
         cursor = self.area.cursor
         if cursor is not None and 0 <= cursor < len(t):
@@ -2500,6 +2551,9 @@ class PlotArea(QWidget):
         self.frames = []
         self.cursor = None
         self.live = False
+        # WHICH SERIES IS LIT. One at a time, chosen by clicking its row in
+        # the series list - see Console._select_series.
+        self.selected = None
         # THE X AXIS IS NOT ALWAYS TIME. A swept result is a value per
         # PARAMETER, not per second, and an axis that says "s" under jammer
         # power is simply wrong. Set by whoever loads the frames.
@@ -5032,6 +5086,8 @@ class Console(QMainWindow):
         self.series_tree.setIndentation(12)
         self.series_tree.itemDoubleClicked.connect(
             lambda it, _c: self.plots.add_to_first_empty(it.data(0, Qt.UserRole)))
+        self.series_tree.itemClicked.connect(
+            lambda it, _c: self._select_series(it.data(0, Qt.UserRole)))
         rlay.addWidget(self.series_tree, 1)
         hint = QLabel("Drag a series onto a plot, or double-click it.\n"
                       "Right-click a plot to split it.")
@@ -5039,15 +5095,11 @@ class Console(QMainWindow):
         hint.setWordWrap(True)
         rlay.addWidget(hint)
 
-        legend = QPushButton("Legend...")
-        legend.setToolTip("What the numbered swatches on each plot mean - "
-                          "series name, colour and range.\n"
-                          "Also on right-click in any plot.")
-        legend.clicked.connect(
-            lambda: (self.plots.first_plot() or QWidget()).show_legend()
-            if self.plots.first_plot() else
-            QMessageBox.information(self, "Legend", "No plots yet."))
-        rlay.addWidget(legend)
+        hint2 = QLabel("Colour is the authority, dash is the routing. "
+                       "Click a series to light it up.")
+        hint2.setObjectName("hint")
+        hint2.setWordWrap(True)
+        rlay.addWidget(hint2)
 
         findings = QPushButton("Copy findings")
         findings.setToolTip(
@@ -7859,6 +7911,19 @@ class Console(QMainWindow):
             item.setData(0, Qt.UserRole, path)
         self.series_tree.expandAll()
         self.series_tree.blockSignals(False)
+
+    def _select_series(self, path):
+        """Light one series on every plot; click it again to unlight it.
+
+        With colour carrying the AUTHORITY, the individual curve you are
+        chasing needs some other way to stand out - so it is picked, not named
+        in a legend. The chart then says two things at once: which family a
+        curve belongs to, and which single curve you are reading.
+        """
+        if not isinstance(path, str):
+            return
+        self.plots.selected = None if self.plots.selected == path else path
+        self.plots.refresh()
 
     def findings_text(self):
         """WHAT THIS RUN ACTUALLY MEASURED, as text you can paste.
