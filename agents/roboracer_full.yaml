@@ -1,0 +1,60 @@
+# =============================================================================
+# Deadband AGENT — roboracer_full
+# =============================================================================
+# BOTH SENSORS ON ONE CAR, which is what you would actually build.
+#
+# A Hokuyo UST-10LX for reach and coverage - 270 degrees, 10 m, one plane - and
+# an Intel RealSense D435i for a volume close in - 87 degrees, 0.3-3 m, plus a
+# 6-DoF IMU. They are complementary rather than redundant:
+#
+#   the lidar sees the ROOM        far, all round, but blind to anything above
+#                                  or below its scan plane
+#   the camera sees the OBSTACLE   in three dimensions, close, and only in
+#                                  front
+#
+# In the model, a vehicle takes the BEST drift rate of any aiding sensor whose
+# range actually reaches the nearest feature. So in a small room this car has
+# two ways to stay localised, and in a wide corridor it falls back to the
+# lidar alone - which is exactly the behaviour the two-sensor build is bought
+# for, and it comes out of their datasheets rather than being asserted.
+#
+# It is also the heaviest radio load: more sensors is more to publish, and
+# channel contention counts contenders. See docs/BACKLOG.md - contention
+# counts AGENTS, not traffic, so that cost is not yet charged. Until it is,
+# this car is flattered.
+# =============================================================================
+
+spec_version: 0.1
+name: roboracer_full
+kind: agent
+
+description: >
+  F1TENTH-class ground vehicle carrying both a Hokuyo UST-10LX and an Intel
+  RealSense D435i. Reach and coverage from the lidar, a close-in volume and a
+  6-DoF IMU from the camera. The build you would take into an unknown room.
+
+platform: roboracer
+colour: "#8E7CC3"
+
+dimensions:
+  length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+  width:  {value: 0.3,  unit: m, source: "Measured, car #1, 2026-07-21"}
+  height: {value: 0.2,  unit: m, source: "Measured, car #1, 2026-07-21"}
+
+radio:
+  tx_power: {value: 20, unit: dBm, source: ""}   # <-- module datasheet
+
+performance:
+  max_speed:       {value: 1.5, unit: m/s,   source: "Measured, car #1, 2026-07-21"}
+  max_accel:       {value: 2.0, unit: m/s^2, source: "Measured, car #1, 2026-07-21"}
+  min_turn_radius: {value: 0.6, unit: m,     source: "Measured, car #1, 2026-07-21"}
+
+sensors:
+  # Hokuyo UST-10LX: 270 deg, 0.06-10 m (4 m at 10% reflectance), +/-40 mm,
+  # 40 Hz. Source: UST-10LX specification sheet, sections 2-2 and 4.
+  - {id: lidar, type: ust10lx, mount: {offset: {x: 0.1, y: 0.0, z: 0.15}}}
+  # Intel RealSense D435i: 87x58 deg, 0.28-3 m ideal, <2% at 2 m, up to
+  # 1280x720 at up to 90 fps, 6-DoF IMU.
+  # Source: Intel RealSense D435i product specification.
+  - {id: depth, type: d435i, mount: {offset: {x: 0.12, y: 0.0, z: 0.09}}}
+  - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}

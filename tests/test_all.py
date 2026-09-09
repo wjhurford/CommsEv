@@ -2311,6 +2311,149 @@ def test_a_mission_file_can_declare_a_plan():
           by["car1"].get("_plan") is None, str(by["car1"].get("_plan")))
 
 
+def test_a_depth_camera_is_not_a_small_lidar():
+    """The D435i and the UST-10LX fail in OPPOSITE directions, and the model
+    has to show that or there is no reason to have both.
+
+        UST-10LX   270 deg, 0.06-10 m, one horizontal plane, 40 Hz
+        D435i      87 deg,  0.28-3 m,  a volume, up to 90 fps
+
+    Reach and coverage against a close-in volume. Which one keeps a fleet
+    localised under GNSS denial is therefore a property of the SCENE as much
+    as of the vehicle - which is a thing this framework can now say and could
+    not before.
+    """
+    print("\nA DEPTH CAMERA IS NOT A SMALL LIDAR")
+    lid, cam = st.sensor_spec("ust10lx"), st.sensor_spec("d435i")
+    check("both are recognised as ranging sensors",
+          lid is not None and cam is not None)
+    check("an IMU is not one - it is what DRIFTS, not what fixes",
+          st.sensor_spec("generic_imu") is None)
+    check("the lidar reaches much further", lid["range_max"] > cam["range_max"] * 3)
+    check("the lidar sees much wider", lid["fov_deg"] > cam["fov_deg"] * 3)
+    check("the camera sees closer than the lidar can",
+          cam["range_min"] > lid["range_min"])
+    check("the camera has a VERTICAL field; the lidar has a plane",
+          cam.get("fov_v_deg") and not lid.get("fov_v_deg"))
+
+    # ERROR IS SPECIFIED DIFFERENTLY, and modelled differently. The lidar is
+    # +/-40 mm flat; the camera is <2% at 2 m, which grows with range because
+    # stereo disparity error does.
+    check("the lidar's accuracy is absolute", lid.get("accuracy_m") == 0.040)
+    check("the camera's accuracy is proportional",
+          cam.get("accuracy_frac") == 0.02 and not cam.get("accuracy_m"))
+
+    arena, agents, links = st.load_scenario({
+        "scene": "lab_box",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer.yaml")]})
+    car = next(a for a in agents if a["id"] == "car1")
+    depth = dict(car)
+    depth["sensors"] = [{"id": "depth", "type": "d435i",
+                         "offset": {"x": 0.0, "y": 0.0, "z": 0.14}}]
+    poses = _poses_for(agents)
+    import random as _rand
+    rng = _rand.Random(1)
+    sc = st.scan_for(depth, depth["sensors"][0], poses, agents, arena, rng)
+    check("a depth scan names the camera, not a lidar",
+          sc["model"] == "RealSense D435i", sc["model"])
+    check("...and says it is a SLICE of a depth image, not a plane sweep",
+          sc["slice_of_depth_image"] is True)
+    check("its arc is the camera's 87 degrees",
+          abs(math.degrees(sc["angle_max"] - sc["angle_min"]) - 87.0) < 1e-6,
+          str(math.degrees(sc["angle_max"] - sc["angle_min"])))
+    # Nothing BEYOND range is measured - but a return AT the limit carries
+    # its measurement noise like any other, and 2% of 3 m is 6 cm. A camera
+    # reporting 3.03 m where its nominal maximum is 3.00 m is what real
+    # hardware does; clamping it would hide the noise the datasheet specifies.
+    far = max((r for r in sc["ranges"] if r != st.NO_RETURN), default=0.0)
+    check("nothing beyond 3 m plus its own noise is ever returned",
+          far <= 3.0 * 1.05, f"{far} m")
+
+
+def test_range_decides_whether_a_sensor_can_localise_at_all():
+    """A 3 m sensor in a room whose walls are 4 m away is not aiding.
+
+    This is the whole reason range is in the model rather than being a number
+    on a spec sheet. A depth-camera car crossing open ground has nothing
+    within three metres to match against, so it dead-reckons however good the
+    camera is - and re-acquires as it comes back in near a wall. A lidar
+    reaching 10 m does not have that problem in the same room.
+    """
+    print("\nRANGE DECIDES WHETHER A SENSOR CAN LOCALISE AT ALL")
+    lab, _a, _l = st.load_scenario({
+        "scene": "lab_box",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer.yaml")]})
+    corridor, _a2, _l2 = st.load_scenario({
+        "scene": "corridor_200m",
+        "fleets": [str(FIXTURE_FLEETS / "3_roboracer_no_lidar.yaml")]})
+    lidar_car = {"sensors": [{"id": "l", "type": "ust10lx"}]}
+    depth_car = {"sensors": [{"id": "d", "type": "d435i"}]}
+    imu_car = {"sensors": [{"id": "i", "type": "generic_imu"}]}
+    both = {"sensors": [{"id": "l", "type": "ust10lx"},
+                        {"id": "d", "type": "d435i"}]}
+
+    # FEATURELESS FIRST. The corridor declares every boundary open - no walls
+    # to match against - so no sensor localises anywhere in it, however close
+    # to the edge it is. Range cannot rescue a scene with nothing in it.
+    check("in a scene with no solid boundary, NOTHING localises",
+          st._position_aiding(lidar_car, corridor, {"x": 0.0, "y": 19.0})
+          is None
+          and st._position_aiding(depth_car, corridor, {"x": 0.0, "y": 19.0})
+          is None)
+
+    # lab_box is 8 x 8 with solid walls, so its walls are 4 m from the centre.
+    mid = {"x": 0.0, "y": 0.0}
+    check("in the middle of the room the lidar has the walls at 4 m",
+          st._position_aiding(lidar_car, lab, mid) is not None)
+    check("...and the camera, reaching 3 m, does NOT",
+          st._position_aiding(depth_car, lab, mid) is None)
+
+    near = {"x": 0.0, "y": 3.5}
+    check("half a metre off the wall, the camera has it too",
+          st._position_aiding(depth_car, lab, near) is not None)
+
+    check("an IMU never localises, anywhere",
+          st._position_aiding(imu_car, lab, near) is None)
+    check("a two-sensor car falls back to the lidar when the camera is short",
+          st._position_aiding(both, lab, mid) is not None)
+
+
+def test_a_two_sensor_car_publishes_both_without_a_topic_clash():
+    """Two publishers on one topic is not a naming inconvenience.
+
+    A car carrying a lidar AND a D435i has two scans and two IMUs - the
+    chassis one and the camera's own. Flat topic names put two nodes on one
+    topic and a consumer receives an interleaved mixture of both, which is the
+    kind of fault that looks like a sensor going mad.
+    """
+    print("\nBOTH SENSORS, NO TOPIC CLASH")
+    ag = {"id": "car1", "platform": "roboracer",
+          "sensors": [{"id": "lidar", "type": "ust10lx"},
+                      {"id": "depth", "type": "d435i"},
+                      {"id": "imu", "type": "generic_imu"}]}
+    pubs = st.publications_for(ag)
+    topics = [p["topic"] for p in pubs]
+    check("every topic is unique", len(topics) == len(set(topics)),
+          str([t for t in topics if topics.count(t) > 1]))
+    check("both scans are published, namespaced by sensor",
+          "/car1/lidar/scan" in topics and "/car1/depth/scan" in topics,
+          str(topics))
+    check("both IMUs are published",
+          "/car1/imu/data" in topics and "/car1/depth/imu" in topics)
+    check("the camera publishes the topics its real driver does",
+          {"/car1/depth/image_rect_raw", "/car1/depth/camera_info",
+           "/car1/depth/color/points"} <= set(topics), str(topics))
+    types = {p["topic"]: p["type"] for p in pubs}
+    check("the cloud is a PointCloud2 and the depth frame an Image",
+          types["/car1/depth/color/points"] == "sensor_msgs/PointCloud2"
+          and types["/car1/depth/image_rect_raw"] == "sensor_msgs/Image")
+    check("the lidar runs at its 40 Hz and the camera at the driver's 30",
+          {p["rate_hz"] for p in pubs if p["topic"] == "/car1/lidar/scan"}
+          == {40.0}
+          and {p["rate_hz"] for p in pubs if p["topic"] == "/car1/depth/scan"}
+          == {30.0})
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -2346,6 +2489,9 @@ if __name__ == "__main__":
                test_a_hand_drawn_formation_saves_scales_and_sweeps,
                test_the_map_cannot_place_what_the_model_will_refuse,
                test_a_moved_point_overrides_the_scene_without_editing_it,
+               test_a_depth_camera_is_not_a_small_lidar,
+               test_range_decides_whether_a_sensor_can_localise_at_all,
+               test_a_two_sensor_car_publishes_both_without_a_topic_clash,
                test_a_mission_has_an_end_and_is_passed_or_failed,
                test_the_coordinator_issues_one_leg_at_a_time_over_the_network,
                test_drift_that_makes_a_reported_arrival_untrue_is_a_failure,

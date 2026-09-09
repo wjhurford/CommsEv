@@ -133,7 +133,26 @@ DRIFT_RATE_AIDED = DRIFT_RATE_UNAIDED
 # Visual Navigation System in UNKNOWN terrain, and "no measurable drift" only
 # against KNOWN terrain (a surveyed map). 1% is the honest default; a scene
 # that declares a surveyed map could justify less. Zero was an over-claim.
-DRIFT_RATE_LIDAR = 0.01
+# LIDAR SCAN-MATCHING DRIFT. See SOURCES.md - this is an OPEN question, not a
+# settled number, and it is deliberately not a guess dressed as one.
+#
+# What is measured: LOAM (Zhang & Singh, RSS 2014, Table I) reports 0.9% of
+# distance travelled in an indoor corridor with NO loop closure. That is worse
+# than the 0.49% measured for plain wheel odometry, which sounds wrong and is
+# not: what a lidar really buys is BOUNDED error through loop closure and
+# re-localisation, not a lower error per metre. This model has no loop
+# closure, so it cannot represent that benefit, and quoting a lower rate to
+# fake it would be inventing the answer.
+#
+# Held equal to the unaided rate until either a fused wheel+lidar figure is
+# sourced or bounded error is modelled properly. An aiding sensor is at least
+# not harmful; that is the whole claim this constant makes today.
+DRIFT_RATE_LIDAR = DRIFT_RATE_UNAIDED
+# DEPTH-CAMERA (VISUAL-INERTIAL) DRIFT. Also OPEN. Intel quote "<1% drift" for
+# their tracking camera, but that is a CLOSED-LOOP figure - the error on
+# returning to a place already seen - which is a different quantity from
+# open-loop drift during an outage and must not be substituted for it.
+DRIFT_RATE_DEPTHCAM = DRIFT_RATE_UNAIDED
 # Heading of the accumulating error random-walks; this is its per-tick sigma
 # (rad). Free parameter - it sets how the error meanders, not how fast it grows.
 DRIFT_TURN_SIGMA = 0.15
@@ -1731,6 +1750,7 @@ def _update_belief(a, poses, adx, ady, dt, position_lost, drift_rates, rng):
 # and no second axis. A single horizontal slice at the mount height is the
 # correct model, and it is why an agent outside that slice is invisible.
 LIDAR = {
+    "model": "UST-10LX",
     "fov_deg": 270.0,            # section 2-2 and section 4, Scan angle
     "steps": 1081,               # section 2-2, Measurement steps
     "angle_increment_deg": 0.25, # section 4, Angular resolution
@@ -1746,6 +1766,73 @@ LIDAR = {
     # A display concern, deliberately separate from the sensor's real spec.
     "n_display": 271,
 }
+
+# =============================================================================
+# INTEL REALSENSE D435i — a DEPTH CAMERA, which is not a small lidar
+# =============================================================================
+# Sourced from Intel's own product specification for the D435i.
+#
+# WHY IT IS MODELLED SEPARATELY AND NOT AS "A LIDAR WITH DIFFERENT NUMBERS".
+# The two sensors fail in opposite directions, and a fleet that carries one
+# has completely different behaviour under GNSS denial from a fleet that
+# carries the other:
+#
+#   UST-10LX     270 deg, 10 m, one horizontal plane, 40 Hz.
+#                Sees ALL ROUND and FAR, but only in its own slice of the
+#                world. It will scan-match against a corridor wall 10 m away.
+#
+#   D435i        87 deg, 0.3-3 m ideal, a VOLUME, up to 90 fps.
+#                Sees in three dimensions but through a narrow window and only
+#                a few metres. In a 200 m corridor with the walls 20 m apart
+#                it has nothing in range to match against at all, so a fleet
+#                relying on it is dead-reckoning even though it is "aided".
+#
+# That contrast is the reason to have both: which sensor keeps a fleet
+# localised is a property of the SCENE as much as of the vehicle, and the
+# framework has no way to show that with only one of them.
+#
+# MODELLED AS A HORIZONTAL SLICE of the depth image, which is what a real
+# stack does with it - depth_image_proc / pointcloud_to_laserscan turn the
+# depth frame into exactly this before anything navigates on it. The full
+# volume is not simulated and this file does not pretend it is.
+DEPTHCAM = {
+    "model": "RealSense D435i",
+    "fov_deg": 87.0,             # Intel spec: depth FOV 87 x 58 degrees
+    "fov_v_deg": 58.0,
+    "range_min": 0.28,           # Intel spec: "minimum depth distance ~28 cm"
+    "range_max": 3.0,            # Intel spec: "ideal range 0.3 m to 3 m"
+    # Intel spec: "<2% at 2 m". Proportional, not absolute - a depth camera's
+    # error grows with the square of range for stereo, so quoting one number
+    # in metres would be wrong at both ends. Held as a fraction and applied to
+    # the measured range.
+    "accuracy_frac": 0.02,
+    "res": (1280, 720),          # Intel spec: up to 1280 x 720
+    "fps_max": 90.0,             # Intel spec: up to 90 fps
+    "fps_typical": 30.0,         # the rate the ROS driver runs by default
+    "rgb_res": (1920, 1080),     # Intel spec
+    "rgb_fps": 30.0,
+    "technology": "active IR stereo",
+    "imu": "6-DoF, integrated",  # Intel: rotation and movement in 3 axes each
+    "n_display": 60,             # rays drawn/simulated across the FOV
+    "source": "Intel RealSense D435i product specification, intelrealsense.com",
+}
+
+
+def sensor_spec(sensor_type):
+    """The datasheet block for a ranging sensor, or None if it is not one.
+
+    One lookup, so adding a sensor is adding a dict rather than editing the
+    scan code - which is what stopped the depth camera from being 'a lidar
+    with different numbers' bolted into the same branch.
+    """
+    t = (sensor_type or "").lower()
+    if t in ("ust10lx", "hokuyo_ust10lx"):
+        return LIDAR
+    if t in ("d435i", "realsense_d435i", "d435"):
+        return DEPTHCAM
+    return None
+
+
 
 NO_RETURN = None           # explicit: the beam went out and nothing came back
 
@@ -1810,15 +1897,21 @@ def _ray_circle(ox, oy, dx, dy, cx, cy, r):
 
 
 def scan_for(agent, sensor, poses, agents, arena, rng):
-    """One lidar scan, from the sensor's actual mount height.
+    """One ranging sweep, from the sensor's actual mount height.
 
-    Models what the datasheet specifies and nothing it does not:
+    Works for the UST-10LX and for the D435i's horizontal depth slice: same
+    ray casting, different datasheet. Models what each datasheet specifies and
+    nothing it does not:
       * a single horizontal plane at the mount height
       * returns closer than range_min are errors, not measurements
-      * range depends on target reflectivity (10 m white, 4 m at 10% diffuse)
-      * measurement noise at the stated accuracy
+      * for the lidar, range depends on target reflectivity (10 m white, 4 m
+        at 10% diffuse); for the depth camera, range is what Intel specifies
+      * measurement noise at the stated accuracy - ABSOLUTE for the lidar
+        (+/-40 mm), PROPORTIONAL for the depth camera (<2% at 2 m), because
+        that is how each is specified and the difference is real
       * beyond range, an explicit no-return rather than a number
     """
+    spec = sensor_spec(sensor.get("type")) or LIDAR
     pose = poses[agent["id"]]
     plane_z = pose["z"] + sensor["offset"]["z"]
     ox, oy, yaw = pose["x"], pose["y"], pose["yaw"]
@@ -1839,11 +1932,17 @@ def scan_for(agent, sensor, poses, agents, arena, rng):
                      other["dimensions"]["width"]) / 2.0
         obstacles.append((p["x"], p["y"], radius))
 
-    n = LIDAR["n_display"]
-    span = math.radians(LIDAR["fov_deg"])
+    n = spec["n_display"]
+    span = math.radians(spec["fov_deg"])
     a_min = -span / 2.0
-    sigma = LIDAR["accuracy_m"] / 2.0    # +/-40 mm read as a ~2-sigma bound
-    wall_limit = effective_range(arena.get("surface_reflectivity"))
+    # ABSOLUTE vs PROPORTIONAL error, per datasheet. The lidar quotes +/-40 mm
+    # flat; the depth camera quotes a PERCENTAGE, because stereo disparity
+    # error grows with range - so a fixed sigma would be wrong at both ends of
+    # its span.
+    abs_sigma = (spec.get("accuracy_m") or 0.0) / 2.0
+    frac_sigma = spec.get("accuracy_frac")
+    wall_limit = (effective_range(arena.get("surface_reflectivity"))
+                  if spec is LIDAR else spec["range_max"])
 
     ranges = []
     for i in range(n):
@@ -1859,27 +1958,36 @@ def scan_for(agent, sensor, poses, agents, arena, rng):
         # Agents carry higher-reflectivity bodywork: the full range applies.
         for cx, cy, rad in obstacles:
             r = _ray_circle(ox, oy, dx, dy, cx, cy, rad)
-            if r <= LIDAR["range_max"]:
+            if r <= spec["range_max"]:
                 best = min(best, r)
 
-        if best == float("inf") or best > LIDAR["range_max"]:
+        if best == float("inf") or best > spec["range_max"]:
             ranges.append(NO_RETURN)
-        elif best < LIDAR["range_min"]:
+        elif best < spec["range_min"]:
             ranges.append(NO_RETURN)      # inside the blind zone: an error code
         else:
-            ranges.append(round(max(LIDAR["range_min"], best + rng.gauss(0, sigma)), 3))
+            sigma = (best * frac_sigma / 2.0) if frac_sigma else abs_sigma
+            ranges.append(round(max(spec["range_min"],
+                                    best + rng.gauss(0, sigma)), 3))
 
     return {
         "frame": f"{agent['id']}/{sensor['id']}",
-        "model": "UST-10LX",
+        "model": spec["model"],
+        "sensor_type": sensor.get("type"),
         "plane_z": round(plane_z, 3),
         "angle_min": a_min,
         "angle_max": span / 2.0,
-        "range_min": LIDAR["range_min"],
-        "range_max": LIDAR["range_max"],          # datasheet best case, white target
+        "range_min": spec["range_min"],
+        "range_max": spec["range_max"],           # datasheet best case
         "range_effective": round(wall_limit, 2),  # what it actually reaches here
         "surface_reflectivity": arena.get("surface_reflectivity"),
-        "steps_true": LIDAR["steps"],
+        "steps_true": spec.get("steps", spec["n_display"]),
+        # A DEPTH CAMERA SEES A VOLUME and this is one slice of it. Said in the
+        # frame rather than left for the reader to assume, because everything
+        # downstream treats these ranges as a plane and that is only the whole
+        # truth for the lidar.
+        "slice_of_depth_image": spec is DEPTHCAM,
+        "fov_v_deg": spec.get("fov_v_deg"),
         "ranges": ranges,
     }
 
@@ -1891,13 +1999,45 @@ def publications_for(agent):
         {"topic": f"/{agent['id']}/state", "type": "deadband/AgentState", "rate_hz": 10.0},
         {"topic": f"/{agent['id']}/speed", "type": "std_msgs/Float32", "rate_hz": 50.0},
     ]
-    kinds = {"ust10lx": ("scan", "sensor_msgs/LaserScan", 40.0),
-             "generic_imu": ("imu", "sensor_msgs/Imu", 200.0),
-             "generic_gnss": ("navsat", "sensor_msgs/NavSatFix", 5.0)}
+    # ONE TOPIC PER SENSOR for the simple ones; a depth camera publishes a
+    # WHOLE SET, and pretending otherwise would make the ROS 2 bridge a
+    # surprise later. These are the topics realsense2_camera actually brings
+    # up, under this agent's namespace.
+    kinds = {"ust10lx": [("scan", "sensor_msgs/LaserScan", 40.0)],
+             "generic_imu": [("data", "sensor_msgs/Imu", 200.0)],
+             "generic_gnss": [("navsat", "sensor_msgs/NavSatFix", 5.0)],
+             "d435i": [
+                 # The depth frame itself, and the camera model needed to
+                 # turn it into metres.
+                 ("image_rect_raw", "sensor_msgs/Image",
+                  DEPTHCAM["fps_typical"]),
+                 ("camera_info", "sensor_msgs/CameraInfo",
+                  DEPTHCAM["fps_typical"]),
+                 # The registered cloud - what a navigation stack consumes.
+                 ("color/points", "sensor_msgs/PointCloud2",
+                  DEPTHCAM["fps_typical"]),
+                 ("color/image_raw", "sensor_msgs/Image",
+                  DEPTHCAM["rgb_fps"]),
+                 # The D435i's own 6-DoF IMU, which is what makes it an `i`
+                 # and what makes visual-inertial odometry possible at all.
+                 ("imu", "sensor_msgs/Imu", 200.0),
+                 # THE STUB'S OWN OUTPUT. A horizontal slice of the depth
+                 # image, which is what depth_image_proc /
+                 # pointcloud_to_laserscan produce before anything navigates
+                 # on it - so the sim publishes the same shape the real stack
+                 # would, on the topic that stack would use.
+                 ("scan", "sensor_msgs/LaserScan", DEPTHCAM["fps_typical"]),
+             ]}
+    # NAMESPACED BY SENSOR, not by agent alone. A car carrying both a lidar
+    # and a D435i publishes TWO scans and TWO IMUs - the chassis one and the
+    # camera's own - and flat names put two publishers on one topic, which in
+    # ROS is not a naming inconvenience, it is two nodes fighting over a
+    # topic and a consumer receiving an interleaved mixture of both. The real
+    # driver namespaces the same way.
     for s in agent["sensors"]:
-        k = kinds.get(s["type"])
-        if k:
-            out.append({"topic": f"/{agent['id']}/{k[0]}", "type": k[1], "rate_hz": k[2]})
+        for k in kinds.get(s["type"], []):
+            out.append({"topic": f"/{agent['id']}/{s['id']}/{k[0]}",
+                        "type": k[1], "rate_hz": k[2]})
     if agent["platform"] != "ground_station":
         out.append({"topic": f"/{agent['id']}/cmd",
                     "type": "deadband/AgentCommand", "rate_hz": 20.0})
@@ -2168,19 +2308,48 @@ def radio_horizon_m(h1_m, h2_m):
     return 4120.0 * (math.sqrt(h1) + math.sqrt(h2))
 
 
-def _position_aiding(agent, arena):
-    """An RF-immune source of a position fix this agent carries. A lidar or
-    camera can localise WITHOUT GNSS or the radio - but ONLY where there is
-    something to localise against (see _scene_has_features). An IMU is NOT
-    aiding: it is the dead-reckoning source that DRIFTS. Returns the drift
-    rate under GNSS denial, or None if this agent has no usable fix source."""
+def _position_aiding(agent, arena, pose=None):
+    """An RF-immune source of a position fix this agent carries.
+
+    A lidar or depth camera can localise WITHOUT GNSS or the radio - but ONLY
+    where there is something in RANGE to localise against. An IMU is NOT
+    aiding: it is the dead-reckoning source that drifts.
+
+    RANGE IS PART OF THE TEST, and this is where the two sensors separate. A
+    UST-10LX reaches 10 m and sweeps 270 deg, so a corridor wall is a feature
+    it can hold on to. A D435i reaches 3 m through an 87 deg window, so in a
+    200 m corridor with the walls 20 m apart it has NOTHING in range and the
+    vehicle is dead-reckoning however good the camera is. Which sensor keeps a
+    fleet localised is a property of the SCENE as much as of the vehicle, and
+    a model that ignored range could not show that.
+
+    Returns the drift rate under GNSS denial, or None for no usable fix.
+    """
     if not _scene_has_features(arena):
-        return None                      # featureless field: lidar cannot help
+        return None                      # featureless: nothing to match on
+    ext = (arena.get("extent") or {})
+    hx, hy = _num(ext.get("x"), 8.0) / 2.0, _num(ext.get("y"), 8.0) / 2.0
+    # THE NEAREST WALL FROM WHERE THE VEHICLE ACTUALLY IS, not from the middle
+    # of the room. This is what makes range matter rather than being a number
+    # in a datasheet: a depth-camera car crossing open ground has nothing
+    # within three metres and dead-reckons, then re-acquires as it comes back
+    # in near a wall. The behaviour falls out of the geometry.
+    if pose:
+        nearest_wall = min(hx - abs(_num(pose.get("x"))),
+                           hy - abs(_num(pose.get("y"))))
+        nearest_wall = max(nearest_wall, 0.0)
+    else:
+        nearest_wall = min(hx, hy)
+    best = None
     for sen in agent.get("sensors") or []:
-        t = (sen.get("type") or "").lower()
-        if "lidar" in t or "ust10" in t or "camera" in t or "vision" in t:
-            return DRIFT_RATE_LIDAR
-    return None
+        spec = sensor_spec(sen.get("type"))
+        if spec is None:
+            continue
+        if nearest_wall > spec["range_max"]:
+            continue                     # the room is out of this sensor's reach
+        rate = DRIFT_RATE_DEPTHCAM if spec is DEPTHCAM else DRIFT_RATE_LIDAR
+        best = rate if best is None else min(best, rate)
+    return best
 
 
 def gnss_denied(agent, poses, jammers, plexp):
@@ -2841,7 +3010,7 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
     _position_lost, _drift_rates = set(), {}
     for a in agents:
         aid = a["id"]
-        aided = _position_aiding(a, arena)   # None, or a (low) drift rate
+        aided = _position_aiding(a, arena, poses.get(aid))
         gnss_ok = (_gnss_present
                    and not gnss_denied(a, poses, _jam0, _rf0["plexp"]))
         if gnss_ok:
@@ -2887,7 +3056,14 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
 
     agents_out = []
     for a in agents:
-        lidars = [s for s in a["sensors"] if s["type"] == "ust10lx"]
+        # EVERY RANGING SENSOR, longest reach first. The primary `scan` field
+        # stays for everything that already reads it; `scans` carries them all,
+        # so a car with both a lidar and a depth camera reports both cones
+        # instead of one of them silently winning.
+        ranging = sorted(
+            (s for s in a["sensors"] if sensor_spec(s["type"])),
+            key=lambda s: -sensor_spec(s["type"])["range_max"])
+        lidars = ranging
         # The noise floor THIS agent actually experiences, on its own
         # network's band, jammers included. The gap between this and the
         # scene's baseline is jamming, as a number, per agent.
@@ -2968,11 +3144,21 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # "why did that link drop" with no answer you could see.
             "radio": dict(a.get("radio") or {}),
             "pose": poses[a["id"]],
-            "scan": scan_for(a, lidars[0], poses, agents, arena, rng) if lidars else None,
+            "scan": (scan_for(a, ranging[0], poses, agents, arena, rng)
+                     if ranging else None),
+            "scans": [scan_for(a, sn, poses, agents, arena, rng)
+                      for sn in ranging[1:]],
             "publishes": publications_for(a),
             "sensors": [
                 {"id": s["id"], "type": s["type"], "offset": s["offset"], "ok": True,
-                 "summary": {"rate_hz": 40.0 if s["type"] == "ust10lx" else 200.0}}
+                 "summary": {
+                     "rate_hz": 40.0 if s["type"] == "ust10lx"
+                     else (DEPTHCAM["fps_typical"] if s["type"] == "d435i"
+                           else 200.0),
+                     **({"fov_deg": sensor_spec(s["type"])["fov_deg"],
+                         "range_max_m": sensor_spec(s["type"])["range_max"],
+                         "model": sensor_spec(s["type"])["model"]}
+                        if sensor_spec(s["type"]) else {})}}
                 for s in a["sensors"]
             ],
             "health": {"ok": True,
