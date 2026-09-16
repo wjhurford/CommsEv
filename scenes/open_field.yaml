@@ -1,5 +1,5 @@
 # =============================================================================
-# Deadband SCENE — open_field
+# CommsEv SCENE — open_field
 # =============================================================================
 # An outdoor rig for the GNSS-denial / drift demo. Unlike the lab (walls, no
 # GNSS), a field HAS a GNSS fix, so a GNSS-band jammer is the thing that takes

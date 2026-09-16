@@ -1,4 +1,4 @@
-# DEADBAND — handover brief
+# CommsEv — handover brief
 
 *Paste this into a new chat to discuss thesis framing, career positioning, or commercial angles. It is a summary, not the working context.*
 
@@ -6,13 +6,13 @@
 
 ## What it is
 
-**DEADBAND** is a simulation framework for multi-agent robotic systems (ground rovers now, drones later) operating under degraded and contested radio conditions. Built at Loughborough (AACME / LUCAS Lab) as a research assistant project.
+**CommsEv** is a simulation framework for multi-agent robotic systems (ground rovers now, drones later) operating under degraded and contested radio conditions. Built at Loughborough (AACME / LUCAS Lab) as a research assistant project.
 
 It models a causal chain that most tools break in half:
 
 > **RF physics → link state → command authority → agent behaviour → position knowledge → mission outcome**
 
-Robotics simulators (Gazebo, Isaac) move robots and assume communications are free. Network simulators (ns-3, OMNeT++) model the radio properly and don't move robots. DEADBAND sits in the gap: a jammed link becomes a lost command becomes a vehicle that stops — emergently, not scripted.
+Robotics simulators (Gazebo, Isaac) move robots and assume communications are free. Network simulators (ns-3, OMNeT++) model the radio properly and don't move robots. CommsEv sits in the gap: a jammed link becomes a lost command becomes a vehicle that stops — emergently, not scripted.
 
 ## The central claim
 
@@ -79,4 +79,4 @@ That puts a **topology** decision on the same measuring stick as a **physical-la
 
 Will: BEng Aeronautical (Loughborough, first-class), starting an **MSc in Aerial Robotics at Bristol** in 2026/27, UK Security Clearance, targeting a 2027 start in UK defence R&D / counter-UAS / autonomous systems. In contact with Anduril UK about a master's thesis collaboration with their software team, plus a graduate route.
 
-DEADBAND is the strongest technical asset in that story — but the open question is whether its value lies in **the tool**, **the result**, or **the method**, and how to position it accordingly.
+CommsEv is the strongest technical asset in that story — but the open question is whether its value lies in **the tool**, **the result**, or **the method**, and how to position it accordingly.

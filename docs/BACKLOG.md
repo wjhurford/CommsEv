@@ -291,7 +291,7 @@ break the simulator. Order is roughly dependency order.
 - The embedded terminal uses pipes, not a pseudo-terminal: no sudo prompts,
   no vim
 - The sim core still lives in `tools/stub_telemetry.py` and is imported by the
-  ROS nodes. It should move into the `deadband` package once interfaces settle
+  ROS nodes. It should move into the `commsev` package once interfaces settle
 
 ---
 

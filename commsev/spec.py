@@ -1,5 +1,5 @@
 """
-Loading and checking a Deadband scenario file.
+Loading and checking a CommsEv scenario file.
 
 This is the spine of the whole framework. A scenario file is the single source
 of truth for an experiment; everything else reads it. So this module has two
@@ -154,11 +154,13 @@ def _check_structure(doc: dict, report: Report) -> None:
     networks = doc.get("networks") or {}
     for net_name, net in networks.items():
         net = net or {}
-        # authority (or its legacy alias topology/architecture) must be named
-        # and valid - a silent typo here changes who commands whom.
+        # authority (or its legacy alias topology/architecture) may be absent:
+        # a fleet file declares WHO exists, and who decides for whom is picked
+        # in the Console's Setup tab (fleets/README.md). But if it IS named it
+        # must be valid - a silent typo here changes who commands whom.
         authority = (net.get("authority") or net.get("architecture")
                      or net.get("topology"))
-        if authority not in VALID_AUTHORITIES:
+        if authority is not None and authority not in VALID_AUTHORITIES:
             report.errors.append(
                 f"networks.{net_name}.authority: '{authority}' is not one of "
                 f"{sorted(VALID_AUTHORITIES)}"

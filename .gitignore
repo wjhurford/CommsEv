@@ -17,3 +17,27 @@ ros2/install/
 ros2/log/
 missions/__pycache__/
 console/_experiment_panel_src.py*
+console/last_error.log
+
+# session debris - never part of the project
+*.patch
+*.bak
+*.crdownload
+.claude_commit_msg.txt
+test_output.txt
+Claude outputs/
+
+
+# THE REFERENCE LIBRARY IS NOT SOURCE. About 100 MB of PDFs, most of them
+# publisher copies that are not ours to redistribute, and git keeps every
+# version of a binary forever - so one accidental commit makes the clone
+# permanently 100 MB heavier and no `git rm` afterwards takes it back out.
+#
+# The papers live beside the repo (OneDrive, a shared drive, wherever) and
+# what IS in version control is the thing that matters: SOURCES.md, which
+# names each one and says exactly which table or equation is being relied on.
+# A reader can find a paper from a citation. They cannot find a citation from
+# a PDF sitting in a folder.
+CommsEv_References/
+Deadband_References/
+

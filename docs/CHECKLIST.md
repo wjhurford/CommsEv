@@ -2,14 +2,14 @@
 > The live model is **scene + fleet, composed by a mission** - see `docs/vocabulary.md`.
 > Kept for provenance; do not follow the file names or commands here.
 
-# Deadband — project checklist
+# CommsEv — project checklist
 
 The running record of what is built and what is next, kept current every session
 so nothing lives only in a chat thread. `BACKLOG.md` holds the reasoning and the
 decisions; this is the flat tick-list. Newest done items at the top of Done.
 
 The aim, in one paragraph, for when it is needed (papers, a LinkedIn post, a
-hand-over): **Deadband is a pre-test simulation framework for multi-robot
+hand-over): **CommsEv is a pre-test simulation framework for multi-robot
 missions under real communication constraints. You describe a world (a map) and
 a task (a mission of per-agent objectives), combine them, and watch the fleet
 run — with the network modelled as a first-class object, so a mission can react
@@ -93,7 +93,7 @@ whether the fallback held.
 
 - [ ] **Attacks that actually fire (Cyber tab)** — jamming (a region or emitter
       raising the noise floor), spoofing (an agent fed false positions), replay.
-      The single highest-value addition: it turns Deadband from a fleet sim into
+      The single highest-value addition: it turns CommsEv from a fleet sim into
       a testbed for autonomy under attack, and every other feature below is more
       impressive once it exists.
 - [ ] **PACE plan** (Primary/Alternate/Contingency/Emergency per network) —
@@ -145,7 +145,7 @@ whether the fallback held.
 The distinction that makes this research rather than a label: **decision
 authority is not network topology.** A mesh can carry centralized decision-
 making, and then the mesh survives a hub loss while the decision-making does
-not. Deadband can show that gap because it models comms as a first-class object.
+not. CommsEv can show that gap because it models comms as a first-class object.
 
 - [x] **Three architectures with real consequences** — `architecture:` on a
       network, read by `command_authority()`, reported per agent every frame as

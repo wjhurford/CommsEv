@@ -1,0 +1,158 @@
+# =============================================================================
+# CommsEv FLEET (BLUE) — 8_roboracer_no_lidar
+# =============================================================================
+# THE SAME CLEAN RIG AS 3_roboracer_no_lidar, EIGHT CARS WIDE.
+#
+# Three vehicles is enough to prove a shape rotates. It is not enough to show
+# what a SHAPE COSTS: with three cars a wedge, a line and an echelon differ by
+# a couple of metres, every vehicle is within a couple of hops of the ground
+# station whatever you do, and every architecture scores the same. The
+# interesting question - does the shape you fly change how deep a jammed fleet
+# penetrates - needs a fleet big enough for the shape to matter.
+#
+# Eight cars, no LiDAR, one IMU each. No sensor loop closes on the world, so
+# any error under jamming is PURE: it is the positioning and command fault and
+# nothing else, with no wall-follower quietly compensating.
+#
+# The poses below are only a starting arrangement. experiments/penetration.yaml
+# sweeps `formation`, and apply_formation() re-places the whole fleet for each
+# cell - so what is written here is what you get when no formation is asked
+# for, not a claim about how they should be arranged.
+#
+# Use: Setup -> scene corridor_200m -> Blue fleet 8_roboracer_no_lidar.
+# =============================================================================
+
+spec_version: 0.1
+name: 8_roboracer_no_lidar
+kind: fleet
+
+description: >
+  Eight RoboRacer cars + a ground station, blue, NO LiDAR - the cars follow
+  GCS waypoints open-loop. Sized so that formation SHAPE is a variable worth
+  sweeping rather than a detail.
+
+networks:
+  blue:
+    system: friendly
+    coordinator: gcs
+    band: 2400
+
+agents:
+  - id: gcs
+    platform: ground_station
+    radio: {tx_power: {value: 30, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -95.0, y: 0.0, z: 0.0, yaw: 0.0}
+  - id: car1
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -89.0, y: -1.5, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car2
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -89.0, y: 1.5, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car3
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -91.0, y: -3.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car4
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -91.0, y: 3.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car5
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -93.0, y: -4.5, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car6
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -93.0, y: 4.5, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car7
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -95.0, y: -6.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}
+  - id: car8
+    platform: roboracer
+    radio: {tx_power: {value: 20, unit: dBm, source: ""}}
+    network: blue
+    colour: "#2E6FB0"
+    pose: {x: -95.0, y: 6.0, z: 0.0, yaw: 0.0}
+    dimensions:
+      length: {value: 0.55, unit: m, source: "Measured, car #1, 2026-07-21"}
+      width:  {value: 0.30, unit: m, source: "Measured, car #1, 2026-07-21"}
+      height: {value: 0.20, unit: m, source: "Measured, car #1, 2026-07-21"}
+    performance: {max_speed: {value: 1.5, unit: m/s, source: "Indoor safety"}}
+    on_link_loss: hold
+    sensors:
+      - {id: imu, type: generic_imu, mount: {offset: {x: 0.0, y: 0.0, z: 0.05}}}

@@ -5,7 +5,7 @@ THIS IS WHERE A RESEARCHER'S CODE GOES. The node is a wrapper and nothing more:
 it subscribes to this agent's sensors, calls a plain Python function, and
 publishes a drive command. The function knows nothing about ROS.
 
-    ros2 run deadband_ros controller --ros-args \
+    ros2 run commsev_ros controller --ros-args \
         -p agent:=car3 -p mission:=missions/example_pursuit.py
 
 Run it against this simulator today; run the identical mission file on a real
@@ -37,7 +37,7 @@ def yaw_from_quaternion(q):
 
 class ControllerNode(Node):
     def __init__(self):
-        super().__init__("deadband_controller")
+        super().__init__("commsev_controller")
         self.declare_parameter("agent", "car3")
         self.declare_parameter("scenario", default_scenario())
         self.declare_parameter("mission", "missions/example_pursuit.py")

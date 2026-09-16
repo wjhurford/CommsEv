@@ -1,4 +1,4 @@
-# DEADBAND — Console command reference
+# CommsEv — Console command reference
 
 Every command you can type into a Console terminal, and which cell may type it.
 

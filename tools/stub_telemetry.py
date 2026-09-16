@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deadband — stub telemetry source.
+CommsEv — stub telemetry source.
 
 Publishes correctly-shaped telemetry for a scenario, with no ROS, no Gazebo and
 no robotics stack: just Python. That means the Console can be built and tested
@@ -293,6 +293,91 @@ def _base_path(kind, ref):
     return cand if cand.exists() else (REPO_ROOT / "maps" / p)
 
 
+_PLATFORM_CACHE = {}
+
+
+def _on_platform(task):
+    """Stand an agent on agents/<platform>.yaml, if that file exists.
+
+    THE HARDWARE HAS ONE HOME. `platform: roboracer` was a label and nothing
+    more: every fleet re-typed the vehicle's dimensions and performance
+    inline, so agents/roboracer.yaml - which records a MEASURED 0.6 m minimum
+    turn radius, car #1, 2026-07-21 - was read by nothing. The lab fleet left
+    that field blank, so every car in it drove with no turn limit at all,
+    which quietly flatters every formation result: a vehicle that can pivot on
+    the spot holds a shape a real Ackermann car cannot.
+
+    So the platform file becomes the base and the fleet overlays it. The
+    fleet still wins wherever it states a value - a fleet is allowed to fit a
+    different radio or a different sensor - and only its BLANKS fall through
+    to the measured figure underneath (see _merge_spec). This is the same
+    scene < fleet < mission layering the repo already runs on, applied one
+    level lower, and it is the layer the Agent builder will write into.
+    """
+    if not isinstance(task, dict):
+        return task
+    plat = task.get("platform")
+    if not plat:
+        return task
+    if plat not in _PLATFORM_CACHE:
+        path = REPO_ROOT / "agents" / f"{plat}.yaml"
+        try:
+            base = _load_yaml(path) if path.exists() else None
+        except Exception as exc:                            # noqa: BLE001
+            print(f"platform '{plat}': {exc}", file=sys.stderr)
+            base = None
+        # Only the hardware. A platform file must not smuggle in an id, a
+        # network, a pose or a mission - those belong to the fleet that
+        # fields the vehicle, not to the vehicle.
+        _PLATFORM_CACHE[plat] = None if not isinstance(base, dict) else {
+            k: v for k, v in base.items()
+            if k in ("dimensions", "performance", "radio", "radios",
+                     "sensors", "jammer")}
+    body = _PLATFORM_CACHE[plat]
+    return task if not body else _merge_spec(body, task)
+
+
+def _blank_quantity(v):
+    """A {value, unit, source} block with nothing in `value`.
+
+    The repo's rule is that an unknown figure is left BLANK rather than
+    guessed, which is right - a blank is visible and a guess is not. But a
+    blank must not travel: it is the absence of a claim, not a claim of
+    absence, and overwriting a measured number with one is the worst of both
+    worlds.
+    """
+    return (isinstance(v, dict) and "value" in v
+            and v.get("value") in (None, "")
+            and _qty(v) is None)
+
+
+def _merge_spec(base, upper):
+    """Upper layer wins, EXCEPT where it is only a blank placeholder.
+
+    Found the hard way. fleets/3_roboracer.yaml carries
+
+        min_turn_radius: {value: , unit: m, source: ""}
+
+    as an honest "not filled in yet" - and it was silently erasing the 0.6 m
+    that agents/roboracer.yaml records as MEASURED, car #1, 2026-07-21. Every
+    car in the lab fleet was therefore driving with no turn limit at all,
+    which quietly flatters every formation result: a vehicle that can pivot
+    on the spot holds a shape a real Ackermann car cannot.
+
+    So a blank quantity is skipped and the lower layer's measured value
+    survives, and dicts are merged rather than replaced so one filled-in
+    field does not take the rest of the block with it.
+    """
+    if isinstance(base, dict) and isinstance(upper, dict):
+        if _blank_quantity(upper):
+            return base if not _blank_quantity(base) else upper
+        out = dict(base)
+        for k, v in upper.items():
+            out[k] = _merge_spec(out.get(k), v)
+        return out
+    return upper
+
+
 def _overlay(base, doc):
     """Overlay one layer (`doc`) onto a resolved base dict.
 
@@ -348,6 +433,8 @@ def _overlay(base, doc):
         block.setdefault("type", "static")
         doc_agents.setdefault(aid, {"id": aid})["mission"] = block
 
+    doc_agents = {aid: _on_platform(task)
+                  for aid, task in doc_agents.items()}
     out_agents = []
     seen = set()
     for aid, body in base_agents.items():
@@ -357,7 +444,7 @@ def _overlay(base, doc):
             for k, v in task.items():
                 if k == "id":
                     continue
-                agent[k] = v
+                agent[k] = _merge_spec(agent.get(k), v)
         out_agents.append(agent)
         seen.add(aid)
     for aid, task in doc_agents.items():
@@ -442,6 +529,19 @@ def load_scenario(path):
         # Sets how far the lidar reaches against a wall. Was being ignored,
         # which is why every beam ran to the geometric wall regardless.
         "surface_reflectivity": arena.get("surface_reflectivity", "high"),
+        # WALLS INSIDE THE ROOM. A list of segments, each with a material and
+        # a thickness, from the SCENE - because a wall is world, not fleet and
+        # not mission. `rf_db` and `reflectance` may be given per wall to
+        # override the material, which is how a scene says "this partition is
+        # a real stud wall, not a single board" without inventing a material.
+        "walls": [{"x1": _num(w.get("x1")), "y1": _num(w.get("y1")),
+                   "x2": _num(w.get("x2")), "y2": _num(w.get("y2")),
+                   "material": w.get("material", DEFAULT_MATERIAL),
+                   "height": _num(w.get("height"), 3.0),
+                   "thickness": _num(w.get("thickness"), 0.1),
+                   "rf_db": w.get("rf_db"),
+                   "reflectance": w.get("reflectance")}
+                  for w in (arena.get("walls") or [])],
         # Named points of interest the MAP defines, e.g. {A: {x, y}, B: {x, y}}.
         # An objective says "shuttle between A and B"; the map says where A is.
         # This is what lets one mission run on many maps.
@@ -797,8 +897,8 @@ def _call_mission(mod, agent, world):
     except (TypeError, ValueError):
         n = 2
     if n >= 4:
-        if not getattr(mod, "_deadband_warned", False):
-            mod._deadband_warned = True
+        if not getattr(mod, "_commsev_warned", False):
+            mod._commsev_warned = True
             print(f"mission {mod.__name__}: target(agent, t, poses, arena) is "
                   f"deprecated - use target(agent, world); see "
                   f"docs/writing-a-mission.md", file=sys.stderr)
@@ -1150,6 +1250,37 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
         gy = sum(_fleet_targets[i][1] for i in ids) / n
         tol = max(info[i][4] for i in ids)
         ready[k] = math.hypot(cx - gx, cy - gy) <= tol
+        # WITH A VIRTUAL LEADER, "THE FLEET IS ON ITS STATIONS" IS NOT
+        # ARRIVAL. The stations follow the leader, which sits just ahead of
+        # the fleet, so that test is satisfied on the first tick of every leg
+        # and the plan runs through its whole circuit in a couple of seconds -
+        # measured, the legs flipped P1 P2 P3 P2 P3 twice a second.
+        #
+        # What arrives is the LEADER, at the waypoint. The fleet still has to
+        # be on station for it to count, so both conditions are required: the
+        # reference has reached the corner AND the shape is around it.
+        lead = info[ids[0]][0]
+        vl = lead.get("_vl")
+        if vl is not None:
+            pts_ = (arena or {}).get("points") or {}
+            ok_, wx_, wy_, _z_, _e_ = resolve_waypoint(
+                (lead.get("mission") or {}).get("to"), pts_)
+            if ok_:
+                near = (math.hypot(vl[0] - wx_, vl[1] - wy_) <= tol
+                        or bool(lead.get("_leg_captured")))
+                # AND THE FLEET IS AT THE CORNER - measured against the
+                # WAYPOINT, not against its own stations. Against its
+                # stations it is a formation-quality test wearing an arrival
+                # test's clothes: a fleet swirling round the right corner
+                # fails it, and the leg never completes however long it
+                # waits. Measured in the maze, the fleet sat at the corner
+                # for four minutes on leg 0. How tidy the shape is belongs to
+                # station_err_m; whether it ARRIVED belongs here.
+                spread = max((math.hypot(*x["_slot"]) for x in
+                              (info[i][0] for i in ids)
+                              if x.get("_slot") is not None), default=0.0)
+                ready[k] = near and math.hypot(cx - wx_, cy - wy_) <= \
+                    tol * 3.0 + spread
         if ready[k]:
             # The formation is on the waypoint. Every member of it has
             # arrived as far as the mission is concerned, including one still
@@ -1237,6 +1368,12 @@ def advance_plans(agents, arena, links, poses, t, link_states=None):
         # the turn to the next waypoint, and the formation rotates onto that
         # line - once, here, rather than continuously all the way round.
         a["_leg_from"] = _fleet_centre(a, a.get("knowledge") or poses)
+        a["_leg_captured"] = False
+        # THE LEADER IS NOT RE-SEEDED AT A CORNER. It is already moving, and
+        # where it is IS the fleet's reference - dropping it back onto the
+        # fleet's centroid every leg would reintroduce exactly the jump the
+        # virtual leader exists to remove. It is seeded only once, lazily, on
+        # the first tick of the first leg (see advance_formation).
         # `_bearing` is deliberately NOT reset: it is where the shape is
         # pointing now, and the whole point is that it turns from there.
         a["phase_t0"] = t
@@ -1295,9 +1432,11 @@ def intercept(txs, agents, poses, arena, jammers=None):
                 if lp is None:
                     continue
                 interf = (jammer_rx_mw(lp, jammers or [], poses, rf["plexp"],
-                                       band, exclude=(a["id"],))
+                                       band, exclude=(a["id"],), arena=arena)
                           if jammers else 0.0)
                 link = rf_link(src_pose, lp,
+                               excess_db=wall_excess_db(src_pose, lp, arena,
+                                                        band),
                                tx_dbm=radio_tx_dbm(src) if src else DEFAULT_TX_DBM,
                                freq_mhz=band, plexp=rf["plexp"],
                                noise_dbm=rf["noise_dbm"],
@@ -1717,6 +1856,21 @@ def mission_target(agent, t, poses, arena):
             dx, dy, k = _formation_fit(agent, arena, gx, gy, bearing)
             agent["_formation_scale"] = round(k, 3)
             ox, oy = ox * k + dx, oy * k + dy
+        # THE STATION HANGS ON THE VIRTUAL LEADER, NOT ON THE GOAL.
+        #
+        # This is the whole fix. Anchored on the goal, a vehicle's station sat
+        # at the DESTINATION: it was never anywhere in between, the standing
+        # errors were large and unequal (4.9 m for the leader against 2.5 m
+        # for the trailer on an 8 m circuit), and at every corner the station
+        # teleported across the room - "get there, stop, turn 90 degrees and
+        # scramble to get back in formation".
+        #
+        # Anchored on the leader, the station is always beside the vehicle and
+        # moves at a speed the whole fleet can hold. advance_formation() drives
+        # that point along the leg and sweeps it through the corners.
+        anchor = agent.get("_vl")
+        if anchor is not None:
+            gx, gy = float(anchor[0]), float(anchor[1])
         # THE SLOT MUST BE SOMEWHERE THE VEHICLE CAN ACTUALLY GET TO.
         #
         # A formation offset applied to a goal near a wall pushes that
@@ -1771,6 +1925,16 @@ def blocked(agent, nx, ny, poses, agents, arena):
     if b.get("y_max", "solid") == "solid" and ny + r > hy:
         return "wall y_max"
 
+    # INTERIOR WALLS. The same segments the radio and the lidar use, so a
+    # maze wall cannot be solid to a car and invisible to its sensor.
+    az0 = poses[agent["id"]]["z"]
+    for w in walls_of(arena):
+        if _num(w.get("height"), 3.0) < az0:
+            continue                       # this agent is flying over it
+        dist, _u = _point_seg(nx, ny, w["x1"], w["y1"], w["x2"], w["y2"])
+        if dist < r + _num(w.get("thickness"), 0.1) / 2.0:
+            return f"wall ({w.get('material', DEFAULT_MATERIAL)})"
+
     if agent.get("ghost"):
         return None
     az = poses[agent["id"]]["z"]
@@ -1788,6 +1952,338 @@ def blocked(agent, nx, ny, poses, agents, arena):
 
 
 _ALL_AGENTS = []
+
+
+# How much of its top speed a formation holds back to keep station with. A
+# fleet cruising at its members' maximum cannot close an error, so the shape
+# it settles into is whatever it drifted to. DECLARED FREE PARAMETER - no
+# source; it trades transit speed against how tightly the shape is held.
+STATION_MARGIN = 0.80
+
+# How long a vehicle may reverse in one go, in seconds. Long enough to swing
+# the nose round, far too short to travel a leg backwards - the difference
+# between a three-point turn and driving blind to the objective. DECLARED
+# FREE: no source, and it trades how tidily a fleet turns against how much of
+# its mission it spends looking the wrong way.
+REVERSE_BURST_S = 1.2
+
+
+def _ray_free(agent, bearing, rmax, poses, agents, arena):
+    """How far this agent could travel on `bearing` before hitting something.
+
+    Marched rather than solved, because the obstacle set is not just walls:
+    the arena bounds and the other vehicles are in blocked() too, and a
+    vehicle that steers round a wall into its own neighbour has not avoided
+    anything. Using blocked() is also what keeps the avoidance honest - it
+    tests the SAME predicate the motion step will test.
+    """
+    p = poses[agent["id"]]
+    cx, cy = math.cos(bearing), math.sin(bearing)
+    step = max(_num(agent.get("radius"), 0.3), 0.15)
+    r = step
+    while r <= rmax:
+        if blocked(agent, p["x"] + cx * r, p["y"] + cy * r,
+                   poses, agents, arena) is not None:
+            return r - step
+        r += step
+    return rmax
+
+
+def steer_around(agent, desired, poses, agents, arena):
+    """FOLLOW THE GAP. A bearing that goes round the obstacle, or `desired`.
+
+    Reported: "we have the problem of cars with LiDARs and cameras getting
+    stuck on walls despite being able to see the gap to the side of it."
+    Exactly right, and the reason was that NOTHING CONSUMED THE SENSORS. The
+    model published scans, drew them, and let a mission steer straight at its
+    station regardless; blocked() then stopped the vehicle dead and the
+    axis-aligned slide underneath it could follow a wall but could not choose
+    a side. A fleet with lidar behaved identically to a fleet without one,
+    which quietly made every sensor in the model decorative.
+
+    THE ALGORITHM IS FOLLOW-THE-GAP, and it is chosen because it is the
+    standard method on this exact platform - F1TENTH / RoboRacer - and
+    because it is the one that matches the complaint: find the widest opening
+    the vehicle actually fits through and drive at the middle of it.
+
+      * sample the sensor's own field of view, at its own range
+      * a bearing is OPEN if the vehicle could travel at least a body length
+        along it
+      * take the widest run of open bearings, and steer at the bearing in it
+        closest to where the mission wants to go
+
+    WHAT THIS IS AND IS NOT. It is purely LOCAL: one step, no map, no memory,
+    no plan. It will round an isolated obstacle and it will NOT solve a maze -
+    a local method walks into concave traps and sits there, which is a
+    property of the method and not a bug to be tuned out. A real planner is
+    still the missing piece; this is what a vehicle can do with one sensor
+    and no map.
+
+    AND ONLY A VEHICLE WITH A RANGING SENSOR GETS IT. That is the whole
+    point: the difference between a fleet that can see and one that cannot is
+    now a difference in BEHAVIOUR that a mission outcome can measure, which
+    is what experiments/penetration.yaml's sensor-fit axis was always for.
+
+    SOURCE: Sezer & Gokasan, "A novel obstacle avoidance algorithm: Follow
+    the Gap Method", Robotics and Autonomous Systems, 2012. CITED FROM
+    MEMORY - the volume and pages are on the sourcing list to verify before
+    any result of this is quoted. The parameters below (how many bearings are
+    sampled, the body-length clearance) are DECLARED FREE, not from the paper.
+    """
+    # The GEOMETRY comes from sensor_spec(), the same datasheet block the
+    # scan itself is built from - an agent's sensor entry carries only an id,
+    # a type and a mount, so reading range off it found nothing and every
+    # vehicle silently behaved as though it were blind.
+    specs = [sensor_spec((s or {}).get("type"))
+             for s in (agent.get("sensors") or [])]
+    ranging = [sp for sp in specs if sp and _num(sp.get("range_max")) > 0]
+    if not ranging:
+        return desired, False          # no sensor, no avoidance - the control
+    # The best instrument it carries: furthest range, and its own field of
+    # view. A 3 m depth camera genuinely cannot plan round a wall 4 m away,
+    # and that limitation is the finding, not something to paper over.
+    best = max(ranging, key=lambda sp: _num(sp.get("range_max")))
+    rmax = _num(best.get("range_max"), 10.0)
+    fov = math.radians(_num(best.get("fov_deg"), 180.0))
+    fov = min(max(fov, math.radians(20.0)), 2.0 * math.pi)
+
+    # YOUR OWN FORMATION IS NOT AN OBSTACLE. blocked() counts every body,
+    # which is right for driving and wrong for this: a vehicle whose station
+    # sits behind a neighbour saw "blocked", steered round its own wingman,
+    # and the shape came apart in an EMPTY ROOM - measured, median spacing
+    # error went from 28 cm to 45 cm on the open lab circuit with not a wall
+    # in sight. You keep station on your own formation and you avoid the
+    # world; the pace logic is what keeps you off your neighbour.
+    peers = {x["id"] for x in _fleet_peers(agent)} - {agent["id"]}
+    world_only = [x for x in agents if x["id"] not in peers]
+
+    clear = max(2.0 * _num(agent.get("radius"), 0.3), 0.4)
+    look = min(rmax, max(clear * 3.0, 2.0))
+    if _ray_free(agent, desired, look, poses, world_only, arena) >= look - 1e-6:
+        return desired, False          # the way ahead is open; do not meddle
+
+    n = 25
+    offs = [(-0.5 + i / float(n - 1)) * fov for i in range(n)]
+    yaw = _num(poses[agent["id"]].get("yaw"))
+    open_ = [ _ray_free(agent, yaw + o, look, poses, world_only, arena) >= clear
+              for o in offs ]
+    # The widest run of open bearings.
+    best_run, run = (0, 0, 0), None
+    for i, ok in enumerate(open_ + [False]):
+        if ok and run is None:
+            run = i
+        elif not ok and run is not None:
+            if i - run > best_run[0]:
+                best_run = (i - run, run, i - 1)
+            run = None
+    if best_run[0] == 0:
+        return desired, False          # boxed in: nothing to steer at
+    lo, hi = best_run[1], best_run[2]
+    # Inside the gap, the bearing closest to where the mission wants to go -
+    # so the vehicle gives away as little progress as the opening allows.
+    want = wrap_pi(desired - yaw)
+    pick = min(range(lo, hi + 1), key=lambda i: abs(offs[i] - want))
+    return wrap_pi(yaw + offs[pick]), True
+
+
+def _plan_next_waypoint(agent):
+    """The waypoint AFTER the one currently being flown, or None.
+
+    What makes a sweep possible. A fleet that only ever knows its current
+    waypoint has no choice but to arrive at it and then turn; knowing the next
+    one lets it start the turn early and carry its speed through the corner,
+    which is what a formation actually does.
+    """
+    pl = agent.get("_plan") or {}
+    wps = list(pl.get("waypoints") or ())
+    if len(wps) < 2:
+        return None
+    leg = int(_num(pl.get("leg"), 0))
+    laps = int(_num(pl.get("laps"), 1))
+    if leg + 1 < len(wps):
+        return wps[leg + 1]
+    # End of the circuit: if there is another lap to fly, the next waypoint is
+    # the first one again - which is exactly why a lap should sweep through
+    # the last corner rather than stopping dead at it.
+    if int(_num(pl.get("laps_done"), 0)) + 1 < laps:
+        return wps[0]
+    return None
+
+
+def advance_formation(agents, poses, arena, dt):
+    """Move the VIRTUAL LEADER, and turn the shape with it.
+
+    THE REFERENCE THE FORMATION HUNG ON USED TO BE THE GOAL ITSELF. Every
+    vehicle steered at `goal + its rotated slot`, so its station was at the
+    DESTINATION and never anywhere in between. Three consequences, all of them
+    reported:
+
+      * the standing errors are huge and UNEQUAL - measured 4.9 m for the
+        leader against 2.5 m for the trailer on an 8 m circuit - so any pace
+        that scales with remaining distance pulls the shape apart
+      * the target TELEPORTS at the corner. The leg changes, the goal changes,
+        and every station jumps across the room at once: "get there, stop,
+        turn 90 degrees and scramble to get back in formation"
+      * nothing could sweep, because there was no reference in motion to
+        sweep anything
+
+    So the formation now hangs on a VIRTUAL LEADER: a point that starts at the
+    fleet's centre when the leg begins and drives the leg itself, at a speed
+    the whole fleet can hold, turning as a vehicle turns. Each member's
+    station is that point plus its rotated slot. The station is therefore
+    always beside the vehicle, the errors are small and comparable, and the
+    shape is rigid because the stations move rigidly.
+
+    AND IT SWEEPS. Within one turn radius of the waypoint the leader starts
+    aiming at the NEXT waypoint instead, so it arcs through the corner without
+    stopping. The radius is the formation's own: the widest slot, never less
+    than a vehicle's minimum turn radius, because that is the arc the
+    outermost member actually has to fly.
+
+    THE SPEED IS NOT A TUNING KNOB EITHER. A rigid body turning at w needs its
+    outermost member to travel v + w*r, so the leader is capped by whichever
+    member is working hardest. That is what makes the fleet ease into a corner
+    and pick up again coming out of it, instead of one car sprinting while the
+    others are told to dawdle.
+
+    `turn:` on the mission chooses the style, for comparing them:
+        pivot (default)  slew, as described
+        snap             a step change at the corner
+        none             no rotation at all - the shape is translated
+                         (`rotate: false` is the older spelling of this)
+    """
+    pts = (arena or {}).get("points") or {}
+    groups = {}
+    for a in agents:
+        m = a.get("mission") or {}
+        if (m.get("type") != "advance" or a.get("_slot") is None
+                or not a.get("armed")):
+            continue
+        groups.setdefault((a.get("network"), m.get("to")), []).append(a)
+
+    for (_net, spec), members in groups.items():
+        ok, gx, gy, _gz, _e = resolve_waypoint(spec, pts)
+        if not ok:
+            continue
+        lead = members[0]
+        # WHERE THE LEADER IS. Seeded from the fleet's centre at the start of
+        # the leg, then carried forward - it is a state, not a derivation,
+        # because a point re-derived every tick cannot have momentum, and it
+        # is the momentum that makes a corner sweep instead of snapping.
+        vl = lead.get("_vl")
+        if vl is None:
+            # SEEDED FROM WHERE THE FLEET ACTUALLY IS, not from _leg_from.
+            # _leg_from is recorded when a leg is ASSIGNED, which can be long
+            # before the fleet is launched and somewhere else entirely - and
+            # seeding the leader there put it beyond its own leash on tick
+            # one, so it never moved and the fleet never left the line.
+            vl = tuple(_fleet_centre(lead, poses)
+                       or lead.get("_leg_from") or (0.0, 0.0))
+        vx, vy = float(vl[0]), float(vl[1])
+
+        radius = max((math.hypot(*x["_slot"]) for x in members
+                      if x.get("_slot") is not None), default=0.0)
+        vmin = min((max(_num(x.get("speed")), 0.05) for x in members),
+                   default=1.0)
+        turn_r = max(radius,
+                     max((_num(x.get("turn_radius"), 0.0) for x in members),
+                         default=0.0), 0.25)
+
+        # WHAT TO AIM AT. The goal - unless the corner is close enough that a
+        # vehicle would already be turning into it, in which case aim at what
+        # comes after and let the leader cut the corner. That one branch is
+        # the difference between arrive-stop-turn and sweep.
+        aim_x, aim_y = gx, gy
+        to_goal = math.hypot(gx - vx, gy - vy)
+        nxt = _plan_next_waypoint(lead)
+        sweeping = False
+        if nxt is not None and to_goal <= turn_r:
+            ok2, nx2, ny2, _z2, _e2 = resolve_waypoint(nxt, pts)
+            if ok2 and math.hypot(nx2 - gx, ny2 - gy) > 1e-6:
+                aim_x, aim_y, sweeping = nx2, ny2, True
+                # THE CORNER IS CAPTURED THE MOMENT THE TURN STARTS. A
+                # sweeping leader deliberately never lands on the waypoint -
+                # it arcs past it - so "within tolerance of the goal" can
+                # never fire and the leg would run forever. Beginning the
+                # turn IS the arrival: the formation is at the corner and
+                # going round it, which is what the waypoint asked for.
+                for x in members:
+                    x["_leg_captured"] = True
+
+        mis = lead.get("mission") or {}
+        style = (mis.get("turn")
+                 or ("none" if mis.get("rotate") is False else "pivot"))
+        want = (math.atan2(aim_y - vy, aim_x - vx)
+                if math.hypot(aim_x - vx, aim_y - vy) > 1e-9
+                else _num(lead.get("_bearing")))
+        cur = lead.get("_bearing")
+        if cur is None or style == "snap":
+            bearing = want
+        elif style == "none":
+            bearing = _num(lead.get("_bearing"), want)
+        else:
+            w_max = (vmin / radius) if radius > 1e-6 else math.pi
+            d = (want - cur + math.pi) % (2.0 * math.pi) - math.pi
+            bearing = cur + max(-w_max * dt, min(w_max * dt, d))
+        # WRAPPED, not accumulated. Turning the same way for eight laps ran
+        # the stored bearing past -500 degrees: harmless to cos and sin, but
+        # it is a heading, and headings live on a circle.
+        bearing = (bearing + math.pi) % (2.0 * math.pi) - math.pi
+
+        w_now = 0.0
+        if cur is not None and style not in ("snap", "none"):
+            w_now = abs((bearing - cur + math.pi) % (2.0 * math.pi)
+                        - math.pi) / max(dt, 1e-9)
+        # The outermost member has to fly v + w*r, so the leader gives that
+        # back out of its own speed. And it never cruises at the members'
+        # maximum: a formation running flat out has no margin left to CLOSE a
+        # station error, so any vehicle that falls behind stays behind and the
+        # shape settles into a wrong one and stays there - measured, a 2.00 m
+        # spacing drifted to 2.76 m and held. STATION_MARGIN is the headroom
+        # that lets the shape recover; it is a declared free parameter, not a
+        # measured figure.
+        v_lead = max(0.15 * vmin,
+                     min(vmin - w_now * radius, STATION_MARGIN * vmin))
+        step = v_lead * dt
+        # Do not sail past the waypoint on the LAST leg. Arrival is judged on
+        # the formation reaching it, so a leader that overshoots takes the
+        # whole fleet past the corner before the leg can complete. While
+        # sweeping the leader is deliberately allowed past - that IS the arc.
+        if not sweeping and step > to_goal:
+            step = to_goal
+        # THE LEASH. A reference that runs away from its formation is not a
+        # formation reference, it is a ghost. Found in the maze: the fleet was
+        # stopped dead against a wall by blocked(), the leader sailed on
+        # through it - it is a point and nothing collides with it - and then
+        # circled the waypoint forever while the cars thrashed behind the
+        # wall and the leg never completed.
+        #
+        # So the leader waits for its fleet. Beyond two slot radii of lead it
+        # stops advancing, which makes a fleet that CANNOT follow visible as
+        # exactly that: everyone halts where the obstruction is, instead of
+        # chasing a station on the far side of a wall. The model has no path
+        # planner, and this is what that honestly looks like.
+        centre = _fleet_centre(lead, poses)
+        leash = max(2.0 * radius, 2.0)
+        # A FLEET PICKING ITS WAY ROUND OBSTACLES IS OFF STATION ON PURPOSE.
+        # Holding it to the tight leash while steer_around() is working means
+        # the leader stops the moment anybody dodges, and the fleet never
+        # gets anywhere - measured in the maze, 5.7 m in 200 s. How far the
+        # shape has opened up is reported by station_err_m, which is where
+        # that belongs; the leash is only there to stop the reference running
+        # away from a fleet that CANNOT follow at all.
+        if any(x.get("_avoiding") for x in members):
+            leash *= 3.0
+        if math.hypot(centre[0] - vx, centre[1] - vy) > leash:
+            step = 0.0
+            v_lead = 0.0
+        lead_v = (vx + step * math.cos(bearing), vy + step * math.sin(bearing))
+
+        for x in members:
+            x["_vl"] = lead_v
+            x["_bearing"] = bearing
+            x["_lead_speed"] = v_lead
+            x["_lead_omega"] = w_now
 
 
 def slew_formation(agents, poses, arena, dt):
@@ -1842,7 +2338,13 @@ def slew_formation(agents, poses, arena, dt):
                    default=1.0)
         w_max = (vmin / radius) if radius > 1e-6 else math.pi
         d = (want - cur + math.pi) % (2.0 * math.pi) - math.pi
-        a["_bearing"] = cur + max(-w_max * dt, min(w_max * dt, d))
+        nxt = cur + max(-w_max * dt, min(w_max * dt, d))
+        # WRAPPED, not accumulated. Turning the same way for eight laps ran
+        # the stored bearing past -500 degrees: harmless to cos and sin, but
+        # it is a heading, headings live on a circle, and anything that reads
+        # this number to REPORT it (or subtracts two of them) would have been
+        # told the fleet had spun round twice more than it had.
+        a["_bearing"] = (nxt + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def formation_pace(agents, poses, t, arena):
@@ -1864,6 +2366,30 @@ def formation_pace(agents, poses, t, arena):
 
     Nothing here is invented - it is the ratio of the distances the geometry
     already produces, and the slowest vehicle's own performance figure.
+
+    EACH MEMBER NEEDS A DIFFERENT SPEED, AND THAT IS THE POINT. A rigid body
+    turning at w about its own centre requires member i to travel
+
+        v_i = | v_lead * h  +  w x r_i |
+
+    where r_i is its rotated slot offset. On a straight leg every v_i is the
+    same; in a corner the outside member has to go FASTER than the leader and
+    the inside member slower - which is exactly what a real formation does,
+    and exactly what Will asked for: "I want them to vary their speed so that
+    they stay in formation and sweep around the points."
+
+    advance_formation() has already chosen a leader speed that leaves no
+    member over its own limit, so these are all achievable; this function just
+    hands each vehicle the fraction of its own cap that its place in the shape
+    requires. A member that has drifted off station gets a little extra on top
+    to close the gap, capped so one straggler cannot demand the impossible.
+
+    THE OLD VERSION SCALED BY REMAINING DISTANCE, and that was wrong the
+    moment stations started moving. A vehicle standing exactly on its station
+    has no gap left, so it was told to travel at nothing while its station
+    drove off at fleet speed; a vehicle whose station was rotating toward it
+    dropped out of the turn entirely. Measured on a two-lap patrol: a nominal
+    2.00 m spacing collapsed to 0.86 m and opened to 2.43 m.
     """
     groups = {}
     for a in agents:
@@ -1877,18 +2403,33 @@ def formation_pace(agents, poses, t, arena):
             continue
         b = a.get("belief") or poses.get(a["id"]) or {}
         d = math.hypot(tx - _num(b.get("x")), ty - _num(b.get("y")))
-        groups.setdefault((a.get("network"), m.get("to")), []).append(
-            (a["id"], d, max(_num(a.get("speed")), 0.05)))
+        groups.setdefault((a.get("network"), m.get("to")), []).append((a, d))
+
+    # How long a vehicle is given to close a station error it already carries.
+    # Short enough that the shape recovers promptly, long enough that a small
+    # error does not demand an impossible speed.
+    TAU = 1.5
     pace = {}
     for members in groups.values():
         if len(members) < 2:
             continue                      # one vehicle is not a formation
-        dmax = max(d for _i, d, _v in members)
-        vmin = min(v for _i, _d, v in members)
-        if dmax <= 1e-6:
-            continue
-        for aid, d, v in members:
-            pace[aid] = max(0.0, min(1.0, (vmin * d / dmax) / v))
+        lead = members[0][0]
+        v_lead = _num(lead.get("_lead_speed"), _num(lead.get("speed"), 1.0))
+        w = _num(lead.get("_lead_omega"))
+        bearing = _num(lead.get("_bearing"))
+        hx_, hy_ = math.cos(bearing), math.sin(bearing)
+        cb, sb = math.cos(bearing - _num(lead.get("_slot_ref"))), \
+            math.sin(bearing - _num(lead.get("_slot_ref")))
+        for a, d in members:
+            sx, sy = a.get("_slot") or (0.0, 0.0)
+            # The slot in world axes, then the rigid-body velocity at it:
+            # translation along the heading plus w x r.
+            rx, ry = sx * cb - sy * sb, sx * sb + sy * cb
+            vx = v_lead * hx_ - w * ry
+            vy = v_lead * hy_ + w * rx
+            need = math.hypot(vx, vy) + d / TAU
+            cap = max(_num(a.get("speed")), 0.05)
+            pace[a["id"]] = max(0.0, min(1.0, need / cap))
     return pace
 
 
@@ -1929,7 +2470,7 @@ def step(agents, poses, t, dt, arena, unreachable=None,
     contacts = []
     # STATION KEEPING, computed for the whole fleet before anyone moves - it
     # is a property of the formation, not of one vehicle. See formation_pace.
-    slew_formation(agents, poses, arena, dt)
+    advance_formation(agents, poses, arena, dt)
     pace = formation_pace(agents, poses, t + dt, arena)
     for a in agents:
         p = poses[a["id"]]
@@ -1987,6 +2528,13 @@ def step(agents, poses, t, dt, arena, unreachable=None,
         v = max(0.0, min(v, vmax))
 
         desired = math.atan2(dy, dx)
+        # ...UNLESS SOMETHING IS IN THE WAY AND THE VEHICLE CAN SEE IT.
+        # steer_around() returns the mission bearing untouched when the path
+        # is clear or when this vehicle carries no ranging sensor, so a fleet
+        # with no sensors behaves exactly as it always did - which is what
+        # makes the comparison between sensor fits a measurement.
+        desired, avoiding = steer_around(a, desired, poses, agents, arena)
+        a["_avoiding"] = avoiding
         reversing = False
         if a.get("motion") == "holonomic":
             # A quadcopter translates in any direction; yaw is free, so point
@@ -1998,11 +2546,57 @@ def step(agents, poses, t, dt, arena, unreachable=None,
             # heading changes no faster than v / turn_radius.
             yaw = _num(p.get("yaw"))
             err = wrap_pi(desired - yaw)
-            if abs(err) > math.radians(120.0) and a.get("can_reverse", True):
-                # Too sharp to turn into - back up along the current heading
-                # instead. The lidar now faces AWAY from travel.
+            # REVERSING IS A RECOVERY, NOT A SHORTCUT.
+            #
+            # This used to back up whenever the target was more than 120
+            # degrees behind, which on a circuit is most corners - so the car
+            # spent much of its mission driving backwards. That is wrong for
+            # a reason beyond looking odd: the vehicle's ranging sensor faces
+            # FORWARD, so a reversing car is navigating blind, and every
+            # obstacle-avoidance decision it makes is made on a view of where
+            # it has already been. Reported: "the car needs to be driving
+            # using its LiDAR so must always go through objectives forward
+            # facing."
+            #
+            # An Ackermann vehicle cannot turn on the spot, but it can turn:
+            # at a 0.6 m minimum radius it comes about inside 1.2 m. So it
+            # turns, and it reverses only when it is genuinely stuck - forward
+            # is blocked AND the turn cannot be made - which is what reversing
+            # is for.
+            # REVERSE TO TURN, NEVER TO TRAVEL.
+            #
+            # The old rule reversed whenever the target was more than 120
+            # degrees behind and then KEPT reversing, because the error stays
+            # large all the way there - so a car spent whole legs driving
+            # backwards. That matters beyond looking wrong: the ranging
+            # sensor faces FORWARD, so a reversing vehicle navigates blind and
+            # every avoidance decision it takes is made on a view of where it
+            # has already been. Reported: "the car was reversing through a lot
+            # of the objectives... must always go through objectives forward
+            # facing."
+            #
+            # Forbidding it outright was worse, and measured so: an Ackermann
+            # car cannot turn on the spot, so in a small room it wallows
+            # instead. Formation drift went 0.31 m -> 0.69 m on the lab
+            # circuit and a shuttling vehicle stopped covering enough ground
+            # to drift at all.
+            #
+            # What a real car does is back up to GET ROUND, then drive: a
+            # three-point turn. So reversing is capped at REVERSE_BURST_S -
+            # long enough to swing the nose, too short to travel a leg. After
+            # that the vehicle must go forward, sensor first, and complete the
+            # turn on the move.
+            can_rev = a.get("can_reverse", True)
+            spent = _num(a.get("_reverse_s"))
+            if can_rev and abs(err) > math.radians(120.0) \
+                    and spent < REVERSE_BURST_S:
                 reversing = True
+                a["_reverse_s"] = spent + dt
                 err = wrap_pi(err - math.pi)
+            elif abs(err) < math.radians(90.0):
+                # Facing roughly the right way again: the turn is done, and
+                # the next one gets a fresh burst.
+                a["_reverse_s"] = 0.0
             radius = max(_num(a.get("turn_radius"), 0.6), 0.05)
             max_rate = max(v, 0.05) / radius        # rad/s
             yaw = wrap_pi(yaw + max(-max_rate * dt,
@@ -2293,6 +2887,7 @@ def scan_for(agent, sensor, poses, agents, arena, rng):
     frac_sigma = spec.get("accuracy_frac")
     wall_limit = (effective_range(arena.get("surface_reflectivity"))
                   if spec is LIDAR else spec["range_max"])
+    interior = walls_of(arena)
 
     ranges = []
     for i in range(n):
@@ -2305,6 +2900,25 @@ def scan_for(agent, sensor, poses, agents, arena, rng):
         # from the arena and NEEDS A MEASUREMENT for any real room.
         r_wall = _ray_box(ox, oy, dx, dy, hx, hy) if walls_in_plane else float("inf")
         best = r_wall if r_wall <= wall_limit else float("inf")
+
+        # INTERIOR WALLS, EACH WITH ITS OWN REFLECTIVITY. This is the reason
+        # the material table carries a reflectance at all: a beam that reaches
+        # a white plasterboard partition at 8 m gets a return, and the same
+        # beam onto glass at 3 m does not. The datasheet's two anchor points
+        # (10 m white, 4 m at 10% diffuse) turn a reflectance into a range in
+        # effective_range(); this just asks that question per wall instead of
+        # once for the whole room.
+        for w in interior:
+            if _num(w.get("height"), 3.0) < plane_z:
+                continue                        # the beam passes over it
+            r = _seg_ray(ox, oy, dx, dy, w["x1"], w["y1"], w["x2"], w["y2"])
+            if r == float("inf"):
+                continue
+            rho = w.get("reflectance")
+            if rho is None:
+                rho = material_spec(w.get("material")).get("reflectance")
+            if r <= min(effective_range(rho), spec["range_max"]):
+                best = min(best, r)
         # Agents carry higher-reflectivity bodywork: the full range applies.
         for cx, cy, rad in obstacles:
             r = _ray_circle(ox, oy, dx, dy, cx, cy, rad)
@@ -2331,6 +2945,7 @@ def scan_for(agent, sensor, poses, agents, arena, rng):
         "range_max": spec["range_max"],           # datasheet best case
         "range_effective": round(wall_limit, 2),  # what it actually reaches here
         "surface_reflectivity": arena.get("surface_reflectivity"),
+        "walls_in_scene": len(interior),
         "steps_true": spec.get("steps", spec["n_display"]),
         # A DEPTH CAMERA SEES A VOLUME and this is one slice of it. Said in the
         # frame rather than left for the reader to assume, because everything
@@ -2346,7 +2961,7 @@ def publications_for(agent):
     """What this agent puts on the wire. Namespaced /<id>/* per the design."""
     out = [
         {"topic": f"/{agent['id']}/odom", "type": "nav_msgs/Odometry", "rate_hz": 50.0},
-        {"topic": f"/{agent['id']}/state", "type": "deadband/AgentState", "rate_hz": 10.0},
+        {"topic": f"/{agent['id']}/state", "type": "commsev/AgentState", "rate_hz": 10.0},
         {"topic": f"/{agent['id']}/speed", "type": "std_msgs/Float32", "rate_hz": 50.0},
     ]
     # ONE TOPIC PER SENSOR for the simple ones; a depth camera publishes a
@@ -2390,7 +3005,7 @@ def publications_for(agent):
                         "type": k[1], "rate_hz": k[2]})
     if agent["platform"] != "ground_station":
         out.append({"topic": f"/{agent['id']}/cmd",
-                    "type": "deadband/AgentCommand", "rate_hz": 20.0})
+                    "type": "commsev/AgentCommand", "rate_hz": 20.0})
     return out
 
 
@@ -2616,7 +3231,7 @@ def scene_rf(world):
     }
 
 
-def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=()):
+def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=(), arena=None):
     """Total jamming power (mW) arriving at `pos` on `band_mhz`.
 
     Each armed jammer's transmit power travels the SAME log-distance path
@@ -2625,6 +3240,14 @@ def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=()):
     (rf_link's interference_mw). Off-band jammers contribute nothing: band
     separation is a real (first-order) defence, and later frequency-hopping
     work depends on the model honouring it.
+
+    WALLS ATTENUATE A JAMMER TOO, and that is the point of passing `arena`.
+    Terrain and structure masking is a real technique: put a wall between
+    yourself and the emitter and it costs the emitter exactly what it would
+    cost a friendly transmitter, because there is nothing special about the
+    physics of an unwanted signal. Dead ground is dead ground. Omitting the
+    arena keeps the old behaviour, so every caller that has no geometry to
+    offer is unaffected.
     """
     total = 0.0
     for j in jammers:
@@ -2647,6 +3270,8 @@ def jammer_rx_mw(pos, jammers, poses, plexp, band_mhz, exclude=()):
             continue
         pl_d0 = 20.0 * math.log10(jband) + 20.0 * math.log10(0.001) + 32.44
         rx_dbm = tx - (pl_d0 + 10.0 * plexp * math.log10(d))
+        if arena is not None:
+            rx_dbm -= wall_excess_db(jp, pos, arena, jband)
         total += mu * 10.0 ** (rx_dbm / 10.0)
     return total
 
@@ -2896,7 +3521,7 @@ def command_load(agents, arena, links, poses, networks, link_states=None):
     return load, depth
 
 
-def gnss_denied(agent, poses, jammers, plexp):
+def gnss_denied(agent, poses, jammers, plexp, arena=None):
     """Is this agent's GNSS fix denied right now by a GNSS-band jammer?
 
     Only a jammer ON the GNSS band counts (a comms-band jammer denies the
@@ -2909,7 +3534,7 @@ def gnss_denied(agent, poses, jammers, plexp):
     if not gnss_jams:
         return False
     mw = jammer_rx_mw(poses[agent["id"]], gnss_jams, poses, plexp,
-                      GNSS_BAND_MHZ, exclude=(agent["id"],))
+                      GNSS_BAND_MHZ, exclude=(agent["id"],), arena=arena)
     if mw <= 0:
         return False
     return 10.0 * math.log10(mw) > GNSS_DENIAL_DBM
@@ -3036,9 +3661,9 @@ def apply_routing(links, agents, networks, poses, world=None):
         if _jam:
             interf = max(
                 jammer_rx_mw(poses[a], _jam, poses, _rf["plexp"], band,
-                             exclude=(a, b)),
+                             exclude=(a, b), arena=world),
                 jammer_rx_mw(poses[b], _jam, poses, _rf["plexp"], band,
-                             exclude=(a, b)))
+                             exclude=(a, b), arena=world))
         # A LINK HAS TWO DIRECTIONS AND THEY ARE NOT THE SAME. The ground
         # station may reach a car easily while the car struggles to reply, so
         # the link is scored from the WEAKER direction - the one that decides
@@ -3047,11 +3672,29 @@ def apply_routing(links, agents, networks, poses, world=None):
         _by = {x["id"]: x for x in agents}
         tx_a = radio_tx_dbm(_by.get(a))
         tx_b = radio_tx_dbm(_by.get(b))
+        # WHAT IS IN THE WAY. Computed once for the pair - it is a property
+        # of the geometry, not of the direction of travel.
+        wall_db = wall_excess_db(poses[a], poses[b], world, band)
         st_ab = rf_link(poses[a], poses[b], tx_dbm=tx_a, plexp=_rf["plexp"],
-                        noise_dbm=_rf["noise_dbm"], interference_mw=interf)
+                        noise_dbm=_rf["noise_dbm"], interference_mw=interf,
+                        excess_db=wall_db)
         st_ba = rf_link(poses[b], poses[a], tx_dbm=tx_b, plexp=_rf["plexp"],
-                        noise_dbm=_rf["noise_dbm"], interference_mw=interf)
+                        noise_dbm=_rf["noise_dbm"], interference_mw=interf,
+                        excess_db=wall_db)
         state = st_ab if st_ab["sinr_db"] <= st_ba["sinr_db"] else st_ba
+        # AND THE LINK SAYS WHICH DIRECTION IS HOLDING IT BACK. Reported:
+        # "TXPOWER gcs 60 - why did that not over power a JAM jam1 power 8?"
+        # Because it raised gcs->car1 from +13.9 to +43.9 dB while car1->gcs
+        # stayed at +3.9, and the weaker direction is the one that decides.
+        # The physics was right and the application said nothing, which is
+        # the worse failure of the two: an operator turned a knob to its stop
+        # and got no feedback at all. Now the link carries both numbers and
+        # names the limiting end, so the answer is on screen.
+        state = dict(state,
+                     sinr_ab_db=round(st_ab["sinr_db"], 2),
+                     sinr_ba_db=round(st_ba["sinr_db"], 2),
+                     limited_by=(f"{a}->{b}" if st_ab["sinr_db"]
+                                 <= st_ba["sinr_db"] else f"{b}->{a}"))
 
         # CONTENTION: every other agent sharing this band and within earshot of
         # the receiver competes for airtime. Each costs a little delivered
@@ -3410,8 +4053,221 @@ def radio_tx_dbm(agent, default=DEFAULT_TX_DBM):
     return _qty(node.get("tx_power"), default)
 
 
+# ---------------------------------------------------------------------------
+# WALLS: geometry that blocks light, radio and vehicles
+# ---------------------------------------------------------------------------
+# Until now a scene was an empty box. Every radio link was line-of-sight by
+# assumption, because there was nothing that could interrupt one, and the only
+# thing a lidar could see was the outer wall. That is the single largest
+# fidelity gap in the model and it cannot be closed without geometry inside
+# the room.
+#
+# A wall is a LINE SEGMENT with a material and a thickness. Three things use
+# it, and they are the three things that make an indoor scene interesting:
+#
+#   RADIO    a wall between two agents costs the link some dB, and if the
+#            material is opaque enough the signal has to go round the end
+#            instead. This is where NLoS comes from.
+#   LIDAR    a wall is what the beam hits, and how far it can be seen depends
+#            on what it is made of - the datasheet quotes 10 m against white
+#            paper and 4 m against a 10% diffuse surface.
+#   MOVEMENT you cannot drive through it.
+#
+# One definition, three consumers, so a maze wall cannot be solid to a car and
+# invisible to its lidar.
+# ---------------------------------------------------------------------------
+
+# MATERIALS. Two properties per material, and they come from different places
+# with very different confidence - which is why they are in one table with the
+# provenance written down rather than scattered as literals.
+#
+# `rf_db` is MEASURED: transmission loss at 2.3 GHz through a sample of the
+# material, from Robert Wilson, "Propagation Losses Through Common Building
+# Materials: 2.4 GHz vs 5 GHz", Magis Networks report E10589, August 2002,
+# Table 3. Anechoic chamber, two horns 16 ft apart, network analyser, time-
+# domain gated. THREE CAVEATS, all of which matter:
+#   * measured at 2.3 GHz, not 2.4
+#   * these are single thin SAMPLES at normal incidence, not built walls. A
+#     real partition is two boards, studs, cabling and a cavity, and runs
+#     several dB where the board alone runs half of one. So these are
+#     MATERIAL coefficients, not WALL coefficients, and a scene that wants a
+#     realistic partition should say so in `rf_db` directly
+#   * an industry report, not peer reviewed
+# The standards route to a computed figure is Recommendation ITU-R P.2040-3
+# (08/2023) Table 3 plus eq (43b), which gives permittivity and conductivity
+# per material and a slab transmission coefficient. Worth doing if a result
+# ever turns on the exact number; Wilson is the sanity check either way.
+#
+# `reflectance` is a DECLARED FREE PARAMETER. No source was found that
+# tabulates diffuse reflectance of interior finishes at the ~905 nm these
+# lidars use. What IS sourced is how reflectance maps to range: the UST-10LX
+# is specified to 10 m against white paper and 4 m against a 10% diffuse
+# target (Hokuyo specification, sections 2-2 and 4), and effective_range()
+# already interpolates between those two anchors. So the mapping is measured
+# and the input to it is a guess, and it is labelled as one.
+MATERIALS = {
+    "plasterboard": {"rf_db": 0.49, "reflectance": 0.70,
+                     "source": "Wilson 2002 E10589 Table 3 (drywall 12.8 mm, "
+                               "2.3 GHz); reflectance FREE"},
+    "glass":        {"rf_db": 0.50, "reflectance": 0.08,
+                     "source": "Wilson 2002 E10589 Table 3; reflectance FREE "
+                               "- and a specular surface is badly served by "
+                               "any single diffuse number"},
+    "wood":         {"rf_db": 2.79, "reflectance": 0.45,
+                     "source": "Wilson 2002 E10589 Table 3 (fir lumber); "
+                               "reflectance FREE"},
+    "brick":        {"rf_db": 4.44, "reflectance": 0.35,
+                     "source": "Wilson 2002 E10589 Table 3 (dry red brick); "
+                               "reflectance FREE"},
+    "concrete":     {"rf_db": 6.71, "reflectance": 0.30,
+                     "source": "Wilson 2002 E10589 Table 3 (dry cinder "
+                               "block); reflectance FREE"},
+    # METAL IS NOT A MEASUREMENT. Wilson's table has no metal row and a
+    # conducting sheet does not transmit in any useful sense, so this is a
+    # declared "opaque" rather than a number anybody measured. The diffraction
+    # path round the end is then the only way through, which is the correct
+    # physical picture and is exactly what makes a metal wall interesting.
+    "metal":        {"rf_db": 200.0, "reflectance": 0.60,
+                     "source": "OPAQUE by declaration - no measured value. "
+                               "Diffraction round the edge is the only path"},
+}
+DEFAULT_MATERIAL = "plasterboard"
+
+
+def material_spec(name):
+    return MATERIALS.get(str(name or DEFAULT_MATERIAL).lower()) \
+        or MATERIALS[DEFAULT_MATERIAL]
+
+
+def _seg_ray(ox, oy, dx, dy, x1, y1, x2, y2):
+    """Distance along a ray to a line segment, or inf. Standard 2-D solve."""
+    ex, ey = x2 - x1, y2 - y1
+    den = dx * ey - dy * ex
+    if abs(den) < 1e-12:
+        return float("inf")                       # parallel
+    t = ((x1 - ox) * ey - (y1 - oy) * ex) / den   # along the ray
+    u = ((x1 - ox) * dy - (y1 - oy) * dx) / den   # along the segment
+    if t < 0.0 or u < 0.0 or u > 1.0:
+        return float("inf")
+    return t
+
+
+def _point_seg(px, py, x1, y1, x2, y2):
+    """Shortest distance from a point to a segment, and where on it."""
+    ex, ey = x2 - x1, y2 - y1
+    L2 = ex * ex + ey * ey
+    if L2 < 1e-12:
+        return math.hypot(px - x1, py - y1), 0.0
+    u = max(0.0, min(1.0, ((px - x1) * ex + (py - y1) * ey) / L2))
+    cx, cy = x1 + u * ex, y1 + u * ey
+    return math.hypot(px - cx, py - cy), u
+
+
+def walls_of(arena):
+    return (arena or {}).get("walls") or []
+
+
+def walls_between(ax, ay, bx, by, arena, z=None, za=None, zb=None):
+    """Every wall the straight line A-B crosses, with where it crossed.
+
+    Returns a list of (wall, distance_from_A, depth_into_the_wall) where the
+    depth is how far along the wall the crossing is from its NEARER END. That
+    third number is what the diffraction model needs: a path that clips the
+    very end of a wall is barely obstructed, and one that crosses its middle
+    has to get through the material or go a long way round.
+
+    HEIGHT. Pass za and zb - the two ends' altitudes - and the path's height
+    is interpolated AT the crossing, so a link that rises over a half-height
+    partition is only obstructed if it is still below the wall when it gets
+    there. Passing a single `z` instead applies one height to the whole path,
+    which is the conservative reading and what a level link deserves.
+    """
+    out = []
+    d = math.hypot(bx - ax, by - ay)
+    if d < 1e-9:
+        return out
+    dx, dy = (bx - ax) / d, (by - ay) / d
+    for w in walls_of(arena):
+        if z is not None and _num(w.get("height"), 3.0) < z:
+            continue                       # the link passes over the top
+        t = _seg_ray(ax, ay, dx, dy, w["x1"], w["y1"], w["x2"], w["y2"])
+        if (za is not None and zb is not None and t != float("inf")
+                and 0.0 <= t <= d
+                and _num(w.get("height"), 3.0)
+                < za + (zb - za) * (t / d)):
+            continue                       # over the top at the crossing
+        if t == float("inf") or t > d:
+            continue
+        px, py = ax + dx * t, ay + dy * t
+        L = math.hypot(w["x2"] - w["x1"], w["y2"] - w["y1"])
+        _dist, u = _point_seg(px, py, w["x1"], w["y1"], w["x2"], w["y2"])
+        out.append((w, t, min(u, 1.0 - u) * L))
+    return out
+
+
+def knife_edge_db(v):
+    """Single knife-edge diffraction loss, Recommendation ITU-R P.526-16 §4.1.
+
+    J(v) = 6.9 + 20 log10( sqrt((v-0.1)^2 + 1) + v - 0.1 ), equation (31),
+    the approximation the Recommendation gives for v greater than -0.78. Below
+    that the loss is negligible and is taken as zero.
+
+    WHAT THIS IS AND IS NOT. P.526 §4.1 is explicitly an "extremely idealized"
+    single, isolated, perfectly absorbing knife edge in free space. A wall
+    corner in a maze is thick, finite, reflective and surrounded by other
+    surfaces throwing multipath. Using it here is a FIRST-ORDER SOFTENING of a
+    binary line-of-sight test - which is far better than a cliff - and it is
+    not a claim of accuracy. At 2.4 GHz with the metre-scale geometry of a
+    small maze the Fresnel zone is comparable to the obstacle, which is
+    precisely where the single-edge idealisation is weakest.
+    """
+    if v < -0.78:
+        return 0.0
+    return 6.9 + 20.0 * math.log10(math.sqrt((v - 0.1) ** 2 + 1.0) + v - 0.1)
+
+
+def wall_excess_db(pa, pb, arena, freq_mhz=2400.0):
+    """How much worse a link is for the walls between its ends, in dB.
+
+    TWO PATHS, AND THE SIGNAL TAKES THE BETTER ONE.
+
+      THROUGH   sum the penetration loss of every wall crossed. This is the
+                multi-wall picture indoor propagation models use, and with
+                per-material figures it is the honest one: three plasterboard
+                partitions cost about 1.5 dB, one cinder-block wall costs 6.7.
+      AROUND    diffract past the end of the shallowest obstruction, at the
+                loss ITU-R P.526 gives for a knife edge. A path that clips a
+                corner costs about 6 dB whatever the wall is made of, which is
+                why a metal wall is not the end of the conversation.
+
+    Taking the minimum is the physical statement: energy arrives by whichever
+    route attenuates it least. It is also what stops a metal wall producing an
+    absurd 200 dB link when the two agents can plainly see each other round
+    the corner.
+    """
+    hits = walls_between(_num(pa.get("x")), _num(pa.get("y")),
+                         _num(pb.get("x")), _num(pb.get("y")), arena,
+                         za=_num(pa.get("z")), zb=_num(pb.get("z")))
+    if not hits:
+        return 0.0
+    through = sum(_num(material_spec(w.get("material")).get("rf_db"))
+                  if w.get("rf_db") is None else _num(w.get("rf_db"))
+                  for w, _t, _depth in hits)
+    lam = 299.792458 / max(_num(freq_mhz, 2400.0), 1.0)      # metres
+    total = math.hypot(_num(pb.get("x")) - _num(pa.get("x")),
+                       _num(pb.get("y")) - _num(pa.get("y")))
+    around = float("inf")
+    for _w, t, depth in hits:
+        d1 = max(t, 1e-3)
+        d2 = max(total - t, 1e-3)
+        v = depth * math.sqrt(2.0 / lam * (d1 + d2) / (d1 * d2))
+        around = min(around, knife_edge_db(v))
+    return round(min(through, around), 3)
+
+
 def rf_link(pa, pb, tx_dbm=DEFAULT_TX_DBM, freq_mhz=2400.0, plexp=2.8,
-            noise_dbm=-95.0, interference_mw=0.0, sensitivity_dbm=-85.0):
+            noise_dbm=-95.0, interference_mw=0.0, sensitivity_dbm=-85.0,
+            excess_db=0.0):
     """Signal-to-interference-plus-noise for one pair, and what it implies.
 
     SINR is the single currency. Distance, walls and jamming all reduce to
@@ -3435,6 +4291,10 @@ def rf_link(pa, pb, tx_dbm=DEFAULT_TX_DBM, freq_mhz=2400.0, plexp=2.8,
     # Friis at 1 m: 20log10(f_MHz) + 20log10(d_km) + 32.44, with d = 0.001 km
     pl_d0 = 20.0 * math.log10(freq_mhz) + 20.0 * math.log10(0.001) + 32.44
     path_loss = pl_d0 + 10.0 * plexp * math.log10(d)
+    # EXCESS LOSS FROM GEOMETRY. Everything the straight line has to get
+    # through or around - see wall_excess_db. Zero in an empty room, which is
+    # every scene that predates walls, so nothing changes for them.
+    path_loss += max(_num(excess_db), 0.0)
     rx_dbm = tx_dbm - path_loss
 
     # Noise plus any interference, summed in linear power then back to dB.
@@ -3450,6 +4310,11 @@ def rf_link(pa, pb, tx_dbm=DEFAULT_TX_DBM, freq_mhz=2400.0, plexp=2.8,
     pdr = 1.0 / (1.0 + math.exp(-0.8 * margin))
     state = "up" if pdr > 0.85 else ("degraded" if pdr > 0.25 else "down")
     return {"distance_m": round(d, 3), "rx_dbm": round(rx_dbm, 2),
+            # SAID OUT LOUD. A link degraded by walls and one degraded by
+            # distance look identical in SINR, and they are not the same
+            # problem: you can walk round a wall.
+            "excess_db": round(max(_num(excess_db), 0.0), 2),
+            "los": _num(excess_db) <= 0.0,
             "sinr_db": round(sinr_db, 2), "pdr": round(pdr, 3),
             "quality": round(pdr, 3), "state": state,
             "latency_ms": round(8.0 + 40.0 * (1.0 - pdr), 2)}
@@ -3529,6 +4394,350 @@ def update_knowledge(agents, poses, links_out, t):
         a.setdefault("knowledge", {})[a["id"]] = reported(a["id"])
 
 
+def band_emitters(arena, agents, poses, only=None):
+    """Everything radiating, as one list. ONE definition of "an emitter".
+
+    Every armed jammer at its jamming power, and every agent carrying a radio
+    at its transmit power. A vehicle that happens not to be transmitting this
+    instant is still here, because these views answer "what does this band
+    look like when this fleet is working", not "what is on the air this tick".
+
+    A jammer is not a special case; it is a loud transmitter that belongs to a
+    side. That is the whole reason the wavefront view can be drawn at all.
+
+    `only` filters to one network, which is what turns "how much power is
+    here" into "whose power is here".
+    """
+    want = str(only).lower() if only else None
+    out = []
+    for a in agents:
+        p = poses.get(a["id"])
+        if p is None:
+            continue
+        net = a.get("network")
+        if want and str(net).lower() != want:
+            continue
+        j = a.get("jammer")
+        if j and a.get("armed"):
+            out.append({"id": a["id"], "pose": p, "network": net,
+                        "jammer": True,
+                        "tx_dbm": _qty(j.get("tx_power"), 20.0),
+                        "band_mhz": _qty(j.get("band"), 2400.0),
+                        "bandwidth": j.get("bandwidth")})
+            continue
+        if a.get("radio") or a.get("radios"):
+            netdoc = (arena.get("networks") or {}).get(net) or {}
+            out.append({"id": a["id"], "pose": p, "network": net,
+                        "jammer": False,
+                        "tx_dbm": radio_tx_dbm(a),
+                        "band_mhz": _qty(netdoc.get("band"), 2400.0),
+                        "bandwidth": None})
+    return out
+
+
+def spectrum_field(arena, agents, poses, band_mhz=2400.0, nx=72, ny=72,
+                   plane="top", at=0.2, only=None):
+    """Received power in dBm at every point on ONE PLANE, on ONE frequency.
+
+    THE MAP AS A PLACE RATHER THAN A TABLE. Everything else in this model
+    answers "what is the link between A and B"; this answers "what would a
+    receiver standing HERE measure", which is a different question and the one
+    a spectrum display actually shows. It is a scalar field - one number per
+    point - which is why it can be drawn as a contour map at all.
+
+    WHAT IS SUMMED. Every transmitter on the band, friendly and hostile alike,
+    at the power it actually radiates, through the same path loss and the same
+    walls as any other signal. A jammer is not special: it is a loud
+    transmitter, and on this map it looks like one. Off-band emitters leak in
+    by aci_mu() exactly as they do into a link, so tuning to 5.8 GHz makes a
+    2.4 GHz jammer fade rather than vanish - which is the honest picture and
+    the thing frequency agility will be measured against.
+
+    WHAT IT IS NOT. It is not SINR: SINR needs a transmitter AND a receiver,
+    so it belongs to a link and not to a place. What this gives you is the
+    total power on the air, and the useful contour on it is the receiver
+    sensitivity - the line past which there is not enough signal to decode
+    whatever is out there. Read it as coverage, not as quality.
+
+    A PLANE, NOT A VOLUME. The field is three-dimensional and cannot be drawn
+    as such, so this cuts one flat section through it - exactly the section
+    plane of a CAD drawing - and the caller says which:
+
+      plane="top"    a horizontal slice at height `at`; axes x and y
+      plane="front"  a vertical slice at y = `at`;      axes x and z
+      plane="side"   a vertical slice at x = `at`;      axes y and z
+
+    The names are the viewport's own view names, so a slice always belongs to
+    the view that can honestly draw it.
+
+    WHY THE HEIGHT MATTERS RATHER THAN BEING A DETAIL. Walls have heights, and
+    wall_excess_db already refuses to count a wall the path passes over. So a
+    slice at 0.2 m is the world a ground vehicle's antenna lives in - full of
+    obstructions - and a slice at 2.5 m in the same room is nearly open, with
+    only full-height walls left casting shadows. That difference IS the
+    argument for putting a relay on a mast or flying the drone higher, and
+    before this it was invisible: one hard-coded 0.2 m and no way to ask.
+
+    Costs O(nx * ny * emitters * walls), so it is computed ON DEMAND and
+    cached by the caller, never once per frame.
+    """
+    ext = arena.get("extent") or {}
+    hx = _num(ext.get("x"), 8.0) / 2.0
+    hy = _num(ext.get("y"), 8.0) / 2.0
+    hz = _num(ext.get("z"), 3.0)
+    plane = str(plane or "top").lower()
+    at = _num(at, 0.2)
+    # The two axes this plane spans, and the fixed coordinate. Written once,
+    # here, so the sampling loop below does not care which plane it is on and
+    # the drawing code can ask the field itself rather than re-deriving it.
+    if plane == "front":                       # x across, z up, at fixed y
+        u0, u1, v0, v1 = -hx, hx, 0.0, hz
+        uaxis, vaxis, faxis = "x", "z", "y"
+        at = max(-hy, min(hy, at))
+    elif plane == "side":                      # y across, z up, at fixed x
+        u0, u1, v0, v1 = -hy, hy, 0.0, hz
+        uaxis, vaxis, faxis = "y", "z", "x"
+        at = max(-hx, min(hx, at))
+    else:
+        plane = "top"                          # x across, y up, at fixed z
+        u0, u1, v0, v1 = -hx, hx, -hy, hy
+        uaxis, vaxis, faxis = "x", "y", "z"
+        at = max(0.0, min(hz, at))
+    rf = scene_rf(arena)
+    plexp = rf["plexp"]
+    band = _num(band_mhz, 2400.0)
+
+    emitters = [(e["pose"], e["tx_dbm"], e["band_mhz"], e["bandwidth"],
+                 e["network"], e["jammer"])
+                for e in band_emitters(arena, agents, poses, only=only)]
+    shape = {"nx": nx, "ny": ny, "hx": hx, "hy": hy, "hz": hz,
+             "band_mhz": band, "plane": plane, "at": round(at, 3),
+             "u0": u0, "u1": u1, "v0": v0, "v1": v1,
+             "uaxis": uaxis, "vaxis": vaxis, "faxis": faxis}
+    if not emitters:
+        return dict(shape, dbm=[[None] * nx for _ in range(ny)], emitters=0)
+
+    pl_d0 = 20.0 * math.log10(band) + 20.0 * math.log10(0.001) + 32.44
+    grid = []
+    for iy in range(ny):
+        v = v0 + (v1 - v0) * (iy + 0.5) / ny
+        row = []
+        for ix in range(nx):
+            u = u0 + (u1 - u0) * (ix + 0.5) / nx
+            if plane == "front":
+                here = {"x": u, "y": at, "z": v}
+            elif plane == "side":
+                here = {"x": at, "y": u, "z": v}
+            else:
+                here = {"x": u, "y": v, "z": at}
+            mw = 0.0
+            for pos, tx, ebands, bw, _net, _jam in emitters:
+                mu = aci_mu(ebands - band, bw) if band else 1.0
+                if mu < 1e-9:
+                    continue
+                d = max(0.25, math.dist((pos["x"], pos["y"], pos["z"]),
+                                        (here["x"], here["y"], here["z"])))
+                loss = pl_d0 + 10.0 * plexp * math.log10(d)
+                loss += wall_excess_db(pos, here, arena, band)
+                mw += mu * 10.0 ** ((tx - loss) / 10.0)
+            row.append(round(10.0 * math.log10(mw), 2) if mw > 0 else None)
+        grid.append(row)
+    return dict(shape, dbm=grid, emitters=len(emitters))
+
+
+WAVEFRONT_STEP_DB = 6.0          # one ring per halving of received power
+WAVEFRONT_FLOOR_DBM = -85.0      # the outermost ring is receiver sensitivity
+
+
+def wavefront_rings(arena, agents, poses, band_mhz=2400.0, z=0.2,
+                    step_db=WAVEFRONT_STEP_DB, floor_dbm=WAVEFRONT_FLOOR_DBM,
+                    levels=8, rays=96):
+    """Each emitter's reach as a set of equal-power rings, by side.
+
+    WHY RINGS AND NOT A SECOND HEAT MAP. spectrum_field() is deliberately
+    side-blind: it sums everything on the band, because that is what a
+    receiver standing there would measure. It therefore cannot answer the
+    question an operator actually asks first - WHOSE signal is this - and
+    colouring it by side would break the one-hue rule that keeps magnitude
+    readable. So the two views are different questions on the same physics:
+    the field says how much power is here, the wavefront says whose.
+
+    WHAT A RING IS, AND WHAT IT IS NOT. Each ring is a contour of received
+    power from ONE emitter, at an absolute dBm level: -85, -79, -73 and so on
+    upward. Absolute rather than relative to each emitter, so a blue ring and
+    a red ring at the same level mean the same thing and their crossing point
+    is a real statement about the two signals rather than a coincidence of
+    scaling.
+
+    It is NOT a wave crest. Crest spacing is wavelength, which does not change
+    with power - a quiet radio and a loud one on 2.4 GHz have identical 12.5 cm
+    spacing, so drawing spacing as strength would look like physics and be a
+    lie. What comes out instead is honest and gives the same read: because
+    path loss is logarithmic, equal-dB rings crowd near the source and spread
+    as they go, and a loud emitter's rings sweep much further across the room
+    than a quiet one's.
+
+    WALLS ARE IN IT. Each ring is traced along `rays` bearings, marching out
+    until the level is crossed, paying wall_excess_db on the way - so a ring
+    dents inward behind a wall and reaches round its end. A perfect circle
+    would contradict every other part of this model.
+    """
+    hx = _num((arena.get("extent") or {}).get("x"), 8.0) / 2.0
+    hy = _num((arena.get("extent") or {}).get("y"), 8.0) / 2.0
+    rmax = math.hypot(2 * hx, 2 * hy)
+    plexp = scene_rf(arena)["plexp"]
+    band = _num(band_mhz, 2400.0)
+    pl_d0 = 20.0 * math.log10(band) + 20.0 * math.log10(0.001) + 32.44
+
+    # The radial samples. Log-spaced, because the thing being measured is
+    # logarithmic in distance: linear samples would waste most of them far
+    # out where nothing changes and resolve the near field worst.
+    ns = 56
+    radii = [0.3 * (rmax / 0.3) ** (i / float(ns - 1)) for i in range(ns)]
+
+    # ---- PASS ONE: sample every ray, and find out what this ROOM contains --
+    #
+    # THE LADDER HAS TO FIT THE ROOM. Fixing the levels at sensitivity and
+    # working up assumed a scene big enough for a signal to die in it. In a
+    # 20 m lab with 30 dBm radios NOTHING is near -85 dBm, so every level was
+    # off the end of the room and an emitter drew no rings at all - which is
+    # true but useless, and it looked broken. The rungs stay on the same
+    # absolute ladder (multiples of step_db from the sensitivity floor, so
+    # blue and red remain comparable), but only the rungs that actually fall
+    # inside the range of power present are drawn.
+    samples, lo, hi = [], None, None
+    for e in band_emitters(arena, agents, poses):
+        mu = aci_mu(e["band_mhz"] - band, e["bandwidth"]) if band else 1.0
+        if mu < 1e-9:
+            continue                        # not on this band in any real way
+        off = 10.0 * math.log10(mu)
+        px, py = _num(e["pose"].get("x")), _num(e["pose"].get("y"))
+        here = {"x": px, "y": py, "z": _num(e["pose"].get("z"), z)}
+        rays_out = []
+        for k in range(int(rays)):
+            th = 2.0 * math.pi * k / float(rays)
+            cx, sy = math.cos(th), math.sin(th)
+            line = []
+            for r in radii:
+                qx, qy = px + cx * r, py + sy * r
+                if abs(qx) > hx or abs(qy) > hy:
+                    break                   # the ray has left the room
+                q = {"x": qx, "y": qy, "z": z}
+                v = (e["tx_dbm"] + off
+                     - (pl_d0 + 10.0 * plexp * math.log10(max(r, 0.25)))
+                     - wall_excess_db(here, q, arena, band))
+                line.append((r, v))
+                lo = v if lo is None else min(lo, v)
+                hi = v if hi is None else max(hi, v)
+            rays_out.append((cx, sy, line))
+        samples.append((e, px, py, rays_out))
+
+    if lo is None:
+        return {"band_mhz": band, "z": z, "step_db": step_db,
+                "floor_dbm": floor_dbm, "levels": [], "emitters": []}
+
+    # Rungs of the absolute ladder that lie inside the room's own range. The
+    # bottom is clamped at sensitivity: one cell deep inside a metal wall's
+    # shadow can sit 30 dB below anything a receiver could use, and letting it
+    # set the scale spends every rung on ground nobody can hear from. The cap
+    # then keeps a very loud room from drawing forty contours nobody can read.
+    lo = max(lo, floor_dbm)
+    k0 = int(math.ceil((lo - floor_dbm) / step_db))
+    k1 = int(math.floor((hi - floor_dbm) / step_db))
+    steps = [floor_dbm + step_db * k for k in range(k0, k1 + 1)]
+    keep = 1
+    if len(steps) > int(levels):
+        keep = max(1, len(steps) // int(levels) + 1)
+        steps = steps[::keep][:int(levels)]
+    step_used = step_db * keep
+
+    # ---- PASS TWO: pull the contours off the samples ----------------------
+    out = []
+    for e, px, py, rays_out in samples:
+        rings = {lev: [] for lev in steps}
+        real = {lev: 0 for lev in steps}     # points that are a real crossing
+        for cx, sy, line in rays_out:
+            prev_r, prev_v = None, None
+            crossed, above = set(), set()
+            for r, v in line:
+                above |= {lev for lev in steps if v >= lev}
+                if prev_v is not None:
+                    for lev in steps:
+                        # The FIRST outward crossing is the edge of that ring.
+                        # Behind a wall the level can come back - that is a
+                        # reflection this model does not have, so taking the
+                        # first crossing states the shadow rather than
+                        # inventing what is in it.
+                        if lev in crossed:
+                            continue
+                        if prev_v >= lev > v:
+                            f = (prev_v - lev) / max(prev_v - v, 1e-9)
+                            rr = prev_r + (r - prev_r) * f
+                            rings[lev].append((round(px + cx * rr, 3),
+                                               round(py + sy * rr, 3)))
+                            real[lev] += 1
+                            crossed.add(lev)
+                prev_r, prev_v = r, v
+            # THE RAY LEFT THE ROOM STILL LOUD. A ring that has not closed by
+            # the wall is not a missing ring - it is an emitter that covers
+            # everything this way, so it is clipped to the wall and drawn.
+            # Only levels this ray was ever above qualify; the rest were
+            # never reached at all.
+            if prev_r is not None:
+                for lev in above - crossed:
+                    rings[lev].append((round(px + cx * prev_r, 3),
+                                       round(py + sy * prev_r, 3)))
+        out.append({
+            "id": e["id"], "network": e["network"], "jammer": e["jammer"],
+            "x": round(px, 3), "y": round(py, 3),
+            "tx_dbm": round(_num(e["tx_dbm"]), 2),
+            # Only rings that closed AND that are mostly a real contour. A
+            # level an emitter never falls below inside the room clips to the
+            # wall on every ray, and drawing six of those gives six copies of
+            # the room outline - noise that says nothing. A level it never
+            # reaches at all has no ring, which is the honest way to say "it
+            # is not that loud" rather than drawing a ring of radius zero.
+            "rings": [{"dbm": lev, "pts": rings[lev],
+                       "clipped": len(rings[lev]) - real[lev]}
+                      for lev in sorted(rings, reverse=True)
+                      if len(rings[lev]) >= int(rays) * 0.5
+                      and real[lev] >= int(rays) * 0.6],
+        })
+    return {"band_mhz": band, "z": z, "step_db": step_used,
+            "floor_dbm": floor_dbm, "levels": steps,
+            "lo_dbm": round(lo, 2), "hi_dbm": round(hi, 2), "emitters": out}
+
+
+def advantage_field(arena, agents, poses, band_mhz=2400.0, nx=48, ny=48,
+                    at=0.2, mine="blue", theirs="red"):
+    """Blue power minus red power, in dB, at every point. WHO OWNS THIS SPOT.
+
+    The one number that says whether a place is contested. It is not SINR -
+    it has no intended transmitter and no wanted signal - but it is the term
+    that decides SINR's outcome once there is one: where this goes negative,
+    the loudest thing on the band belongs to the other side, and any link
+    crossing that ground is fighting for it.
+
+    Two calls to spectrum_field() filtered by network, subtracted. Same path
+    loss, same walls, same off-band leakage - so the comparison is like for
+    like by construction rather than by care.
+    """
+    a = spectrum_field(arena, agents, poses, band_mhz, nx, ny, "top", at,
+                       only=mine)
+    b = spectrum_field(arena, agents, poses, band_mhz, nx, ny, "top", at,
+                       only=theirs)
+    grid = []
+    for j in range(ny):
+        row = []
+        for i in range(nx):
+            va, vb = a["dbm"][j][i], b["dbm"][j][i]
+            row.append(None if va is None or vb is None
+                       else round(va - vb, 2))
+        grid.append(row)
+    return dict(a, dbm=grid, mine=mine, theirs=theirs,
+                emitters=a["emitters"] + b["emitters"])
+
+
 def frame(t, dt, seq, arena, agents, links, poses, rng):
     """One telemetry frame. THIS DICTIONARY IS THE CONTRACT."""
     _nets0 = arena.get("networks") or {}
@@ -3560,7 +4769,8 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         aid = a["id"]
         aided = _position_aiding(a, arena, poses.get(aid))
         gnss_ok = (_gnss_present
-                   and not gnss_denied(a, poses, _jam0, _rf0["plexp"]))
+                   and not gnss_denied(a, poses, _jam0, _rf0["plexp"],
+                                       arena=arena))
         if gnss_ok:
             # An absolute fix: the estimate tracks truth exactly.
             _drift_rates[aid] = 0.0
@@ -3625,7 +4835,8 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
         # scene's baseline is jamming, as a number, per agent.
         band = _qty((_nets.get(a["network"]) or {}).get("band"), 2400.0)
         interf = jammer_rx_mw(poses[a["id"]], _jam, poses, _rf["plexp"],
-                              band, exclude=(a["id"],)) if _jam else 0.0
+                              band, exclude=(a["id"],),
+                              arena=arena) if _jam else 0.0
         eff_dbm = 10.0 * math.log10(_noise_mw + interf)
         rf_out = {"noise_floor_dbm": round(eff_dbm, 1),
                   "baseline_dbm": round(_rf["noise_dbm"], 1),
@@ -3701,7 +4912,20 @@ def frame(t, dt, seq, arena, agents, links, poses, rng):
             # The radio, so the Console can draw this agent's own reach beside
             # the jammer rings. Hardware, and until now invisible - which left
             # "why did that link drop" with no answer you could see.
-            "radio": dict(a.get("radio") or {}),
+            #
+            # RESOLVED, not raw. It used to be handed over as the {value,
+            # unit, source} block straight off the agent, which meant every
+            # reader had to know the quantity grammar to find out what the
+            # radio was doing - and the Contested tab could not list a
+            # friendly transmitter beside a jammer because the two had
+            # different shapes. tx_dbm and band_mhz here are the same numbers
+            # the link budget itself used.
+            "radio": dict(
+                a.get("radio") or {},
+                tx_dbm=round(radio_tx_dbm(a), 2),
+                band_mhz=_qty(((arena.get("networks") or {})
+                               .get(a.get("network")) or {}).get("band"),
+                              2400.0)),
             "pose": poses[a["id"]],
             "scan": (scan_for(a, ranging[0], poses, agents, arena, rng)
                      if ranging else None),
@@ -4135,6 +5359,10 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
                                     tune a running jammer's emission live, in
                                     ONE line so band and power never disagree
                                     (on/off is LAUNCH/HALT, e.g. red launch)
+        TXPOWER <id|network|all> <dBm>
+                                    the same knob for a friendly radio, so
+                                    "speak up" and "go quiet" are decisions
+                                    either side can take
     """
     changed = []
     if not retask_dir.exists():
@@ -4267,6 +5495,57 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
             print("JAM: " + jid + " " +
                   ", ".join(f"{w} -> {v:g}" for w, v in pairs),
                   file=sys.stderr)
+            continue
+
+        if verb0 == "TXPOWER" and len(head) == 2:
+            # TXPOWER <id|network|all> <dBm> - the blue half of JAM.
+            #
+            # Red's emission has been tunable live since the Console could
+            # double-click a jammer; blue's was fixed at whatever the fleet
+            # file said, which quietly made "turn it up" an adversary-only
+            # move. It is not: EMCON is a friendly decision, and the whole
+            # power-control question - can blue talk QUIETER and still be
+            # heard, or should it shout over the jammer - cannot be asked at
+            # all if only one side has a volume knob.
+            #
+            # It edits the same radio block rf_link() already reads through
+            # radio_tx_dbm(), so nothing downstream needs to know this
+            # happened.
+            toks = head[1].split()
+            if len(toks) != 2:
+                print("TXPOWER: usage TXPOWER <id|network|all> <dBm>   "
+                      "e.g. TXPOWER blue 10", file=sys.stderr)
+                continue
+            who, valtxt = toks
+            try:
+                val = float(valtxt)
+            except ValueError:
+                print(f"TXPOWER: '{valtxt}' is not a number", file=sys.stderr)
+                continue
+            lo, hi = -30.0, 60.0
+            if not (lo <= val <= hi):
+                print(f"TXPOWER: {val:g} dBm is outside {lo:g}..{hi:g}",
+                      file=sys.stderr)
+                continue
+            targets = [a for a in agents_by_id.values()
+                       if (who.lower() == "all"
+                           or str(a.get("network", "")).lower() == who.lower()
+                           or a["id"] == who)
+                       and (a.get("radio") or a.get("radios"))]
+            if not targets:
+                print(f"TXPOWER: nothing with a radio matches '{who}'",
+                      file=sys.stderr)
+                continue
+            for a in targets:
+                node = a.setdefault("radio", {})
+                cur = node.get("tx_power")
+                if isinstance(cur, dict):
+                    cur["value"] = val
+                else:
+                    node["tx_power"] = {"value": val, "unit": "dBm",
+                                        "source": "set live from the Console"}
+            print(f"TXPOWER: {who} -> {val:g} dBm ({len(targets)} radio"
+                  f"{'s' if len(targets) != 1 else ''})", file=sys.stderr)
             continue
 
         if verb0 == "SETPLAN" and len(head) == 2:
@@ -4458,7 +5737,7 @@ def stream(arena, agents, links, duration=None, out=sys.stdout, seed=1,
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Deadband stub telemetry source")
+    ap = argparse.ArgumentParser(description="CommsEv stub telemetry source")
     ap.add_argument("--scenario", default=str(DEFAULT_SCENARIO))
     ap.add_argument("--record", type=float, metavar="SECONDS")
     ap.add_argument("--seed", type=int, default=1,

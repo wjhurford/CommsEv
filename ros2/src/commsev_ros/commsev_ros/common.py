@@ -1,12 +1,12 @@
 """
-Shared plumbing for the Deadband ROS 2 nodes.
+Shared plumbing for the CommsEv ROS 2 nodes.
 
 The simulation core — missions, motion, collision, the lidar raycast — lives in
 tools/stub_telemetry.py and is imported here rather than reimplemented. One
 physics implementation means the no-ROS stub and the ROS nodes can never quietly
 disagree about where a car is.
 
-TODO: when the interfaces settle, move that core into the `deadband` package
+TODO: when the interfaces settle, move that core into the `commsev` package
 proper and have both import it from there. Reaching into tools/ is honest but
 temporary.
 """
@@ -20,11 +20,11 @@ from pathlib import Path
 # parent directories: colcon copies these files into install/.../site-packages/
 # and any fixed count is then wrong. Look for the repo's own landmarks instead,
 # and let an environment variable override for an unusual layout.
-MARKERS = ("scenarios", "tools", "console")
+MARKERS = ("scenes", "fleets", "tools", "console")
 
 
 def find_repo_root():
-    override = os.environ.get("DEADBAND_ROOT")
+    override = os.environ.get("COMMSEV_ROOT")
     if override:
         return Path(override).expanduser().resolve()
 
@@ -34,8 +34,8 @@ def find_repo_root():
             if all((parent / m).is_dir() for m in MARKERS):
                 return parent
     raise FileNotFoundError(
-        "Cannot find the Deadband repository. Set DEADBAND_ROOT, e.g.\n"
-        "  export DEADBAND_ROOT=/mnt/c/Users/will-/Documents/repos/deadband")
+        "Cannot find the CommsEv repository. Set COMMSEV_ROOT, e.g.\n"
+        "  export COMMSEV_ROOT=/mnt/c/Users/<you>/Documents/repos/commsev")
 
 
 REPO_ROOT = None
@@ -53,9 +53,9 @@ def load_sim_core():
     path = repo_root() / "tools" / "stub_telemetry.py"
     if not path.exists():
         raise FileNotFoundError(f"simulation core not found at {path}")
-    spec = importlib.util.spec_from_file_location("deadband_sim_core", path)
+    spec = importlib.util.spec_from_file_location("commsev_sim_core", path)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["deadband_sim_core"] = mod
+    sys.modules["commsev_sim_core"] = mod
     spec.loader.exec_module(mod)
     return mod
 

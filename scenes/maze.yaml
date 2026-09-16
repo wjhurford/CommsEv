@@ -1,0 +1,122 @@
+# =============================================================================
+# CommsEv SCENE — maze
+# =============================================================================
+# AN INDOOR MAZE: the first scene with anything inside it.
+#
+# Until now every scene was an empty box, which meant every radio link in the
+# model was line-of-sight BY ASSUMPTION - there was nothing that could
+# interrupt one - and the only thing a lidar could ever see was the outside
+# wall. This scene exists to break both of those, and to make three questions
+# askable that could not be asked before:
+#
+#   CAN THE FLEET FIND ITS WAY?      A wall between you and the objective is
+#                                    the smallest test of whether a sensor fit
+#                                    buys you anything. A camera that reaches
+#                                    3 m cannot see a wall 4 m away.
+#   CAN IT STILL BE COMMANDED?       A wall between two agents costs the link
+#                                    dB. Round a corner from the ground
+#                                    station is a different place from far
+#                                    from it, and until now the model could
+#                                    not tell them apart.
+#   WHERE CAN A JAMMER HIDE?         Structure attenuates an emitter exactly
+#                                    as it attenuates a friendly radio. A
+#                                    jammer round a corner is quieter - and
+#                                    harder to locate. Dead ground, indoors.
+#
+# THE MATERIAL IS THE VARIABLE. Every wall names one, and the material sets
+# both its radio penetration loss and how well a lidar sees it. Those two are
+# not correlated in nature and they are not correlated here: glass is nearly
+# transparent to 2.4 GHz AND nearly invisible to a lidar, metal is opaque to
+# radio and bright to a lidar. A fleet can be blind to a wall it can talk
+# straight through, and stopped by one it can see perfectly.
+#
+# Layout: a 20 x 20 m hall, walls on a 5 m pitch, one route from the entrance
+# at the south-west to the objective at the north-east. Deliberately small -
+# the point is the mechanism, not the puzzle.
+#
+#     +-------------------------------+   N
+#     |         |                     |
+#     |    +----+     +----------+    |
+#     |    |          |          |    |
+#     |    |    +-----+     +----+    |
+#     |         |glass|     |         |
+#     |    +----+     +-----+   metal |
+#     |    |                     |    |
+#     |    |    +-----------+    |    |
+#     | S  |    |                     |
+#     +-------------------------------+
+# =============================================================================
+
+spec_version: 0.1
+name: maze
+kind: scene
+
+description: >
+  A 20 x 20 m indoor maze with interior walls of mixed material. Built to make
+  line-of-sight a fact rather than an assumption: walls block vehicles, return
+  lidar according to what they are made of, and cost radio links dB or force
+  them round a corner.
+
+arena:
+  type: box
+  extent: {x: 20.0, y: 20.0, z: 3.0}
+  boundaries: {x_min: solid, x_max: solid, y_min: solid, y_max: solid}
+
+  # THE OUTER SHELL'S reflectivity, unchanged from every other scene - it is
+  # what a lidar beam gets back from the perimeter. Interior walls carry their
+  # own, per material.
+  surface_reflectivity: high
+
+  # ---------------------------------------------------------------------------
+  # THE WALLS. Each is a segment with a material, a height and a thickness.
+  #
+  #   material     picks radio penetration loss and lidar reflectance from the
+  #                MATERIALS table in tools/stub_telemetry.py, which carries
+  #                the provenance of both. Wilson (2002) E10589 Table 3 for
+  #                the dB; the reflectance is a declared free parameter.
+  #   height       a wall lower than an agent's altitude does not block it.
+  #                That is how a drone flies over a partition a car must go
+  #                round, and it is the whole reason height is here at all.
+  #   thickness    used for collision only. The radio model treats a wall as a
+  #                single traversal at the material's loss, not as a slab.
+  #
+  # A wall may override the material with its own `rf_db` or `reflectance` -
+  # for a real stud partition, which is several dB rather than the half a dB
+  # a single board measures.
+  # ---------------------------------------------------------------------------
+  walls:
+    # --- the spine: plasterboard, the ordinary case -------------------------
+    - {x1: -6.0, y1:  8.0, x2: -6.0, y2:  0.0, material: plasterboard, height: 3.0, thickness: 0.12}
+    - {x1: -6.0, y1:  0.0, x2:  0.0, y2:  0.0, material: plasterboard, height: 3.0, thickness: 0.12}
+    - {x1:  0.0, y1:  0.0, x2:  0.0, y2: -6.0, material: plasterboard, height: 3.0, thickness: 0.12}
+    - {x1: -2.0, y1:  6.0, x2:  6.0, y2:  6.0, material: plasterboard, height: 3.0, thickness: 0.12}
+
+    # --- GLASS: nearly transparent to radio, nearly invisible to lidar ------
+    # A vehicle with a lidar and no map will drive into this. That is the
+    # point of it being here.
+    - {x1: -2.0, y1:  6.0, x2: -2.0, y2:  1.0, material: glass, height: 3.0, thickness: 0.01}
+
+    # --- METAL: opaque to radio, bright to lidar ---------------------------
+    # The only way past this for a signal is round the end - see
+    # knife_edge_db(). Easy to see, impossible to talk through.
+    - {x1:  6.0, y1:  6.0, x2:  6.0, y2: -4.0, material: metal, height: 3.0, thickness: 0.05}
+
+    # --- a HALF-HEIGHT partition, for the ground/air distinction ------------
+    # 1.2 m: a car must go round it, a drone at 2 m does not know it is there.
+    - {x1: -8.0, y1: -6.0, x2:  4.0, y2: -6.0, material: brick, height: 1.2, thickness: 0.2}
+
+    # --- concrete, closing the north-east room -----------------------------
+    - {x1:  2.0, y1: 10.0, x2:  2.0, y2:  6.0, material: concrete, height: 3.0, thickness: 0.25}
+
+# THE ROOM'S RF BASELINE. Indoor multipath, so a higher path-loss exponent
+# than open ground - and note that this is now doing LESS work than it was:
+# some of what an indoor exponent used to stand in for (walls) is explicit
+# geometry in this scene. Both are still unsourced and on the measurements
+# list.
+background:
+  propagation:
+    path_loss_exponent: {value: 2.8, unit: "", source: ""}   # <-- measure
+  spectrum:
+    noise_floor: {value: -95, unit: dBm, source: ""}         # <-- measure
+  gnss:
+    availability: denied      # indoors, no sky view. Dead reckoning only.

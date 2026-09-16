@@ -1,7 +1,7 @@
 from glob import glob
 from setuptools import setup
 
-package_name = "deadband_ros"
+package_name = "commsev_ros"
 
 setup(
     name=package_name,
@@ -16,13 +16,13 @@ setup(
     zip_safe=True,
     maintainer="Will Hurford",
     maintainer_email="hurfwj@gmail.com",
-    description="Deadband agents as ROS 2 nodes, and a bridge to the Console.",
+    description="CommsEv agents as ROS 2 nodes, and a bridge to the Console.",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
-            "world = deadband_ros.world_node:main",
-            "bridge = deadband_ros.bridge_node:main",
-            "controller = deadband_ros.controller_node:main",
+            "world = commsev_ros.world_node:main",
+            "bridge = commsev_ros.bridge_node:main",
+            "controller = commsev_ros.controller_node:main",
         ],
     },
 )

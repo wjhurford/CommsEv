@@ -192,7 +192,7 @@ echo "LAUNCH blue" > runs/retask/queue
 **As a real ROS 2 node** — the same file, driving a car over ROS topics:
 
 ```bash
-ros2 run deadband_ros controller --ros-args \
+ros2 run commsev_ros controller --ros-args \
     -p agent:=car3 \
     -p mission:=missions/my_first.py
 ```

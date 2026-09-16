@@ -1,5 +1,5 @@
 @echo off
-REM Deadband Console launcher. Double-click this file.
+REM CommsEv Console launcher. Double-click this file.
 REM Tries the windowed Python launcher first so no black terminal appears.
 setlocal
 cd /d "%~dp0.."

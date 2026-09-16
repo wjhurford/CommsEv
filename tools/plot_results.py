@@ -1,5 +1,5 @@
 # =============================================================================
-# Deadband — plot a sweep's results. NO DEPENDENCIES AT ALL.
+# CommsEv — plot a sweep's results. NO DEPENDENCIES AT ALL.
 # =============================================================================
 # Writes an SVG (open it in any browser) and prints the numbers as a table.
 #

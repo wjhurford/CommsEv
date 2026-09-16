@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>deadband_ros</name>
+  <name>commsev_ros</name>
   <version>0.1.0</version>
-  <description>Deadband agents as ROS 2 nodes, and a bridge to the Console.</description>
+  <description>CommsEv agents as ROS 2 nodes, and a bridge to the Console.</description>
   <maintainer email="hurfwj@gmail.com">Will Hurford</maintainer>
   <license>Apache-2.0</license>
 

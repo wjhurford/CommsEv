@@ -1,5 +1,5 @@
 # =============================================================================
-# Deadband EXPERIMENT — intercept
+# CommsEv EXPERIMENT — intercept
 # =============================================================================
 # HEARING BLUE'S COMMANDS ON THE RED CHANNEL, and what it costs red to try.
 #
@@ -138,7 +138,16 @@ spawns:
   car1:     {x: -89.0, y:   0.0}
   car2:     {x: -93.0, y:   3.0}
   car3:     {x: -93.0, y:  -3.0}
-  jam1:     {x:  95.0, y:   0.0}
+  jam1:     {x:  95.0, y:  10.0}
+  # THE JAMMER IS 10 m OFF THE CENTRELINE, and it has to be. It used to sit at
+  # (95, 0) - the same coordinate as FAR, the goal. A jammer is a BODY, so the
+  # fleet was being sent to drive into it: the lead vehicle stopped a metre
+  # short against the emitter's hull, the formation's mean position never came
+  # within tolerance of its mean target, and the final leg never completed. A
+  # decentralized fleet - which cannot lose command at all - scored 0% at every
+  # jamming power including none, which is how the fault was found. Ten metres
+  # to the side leaves the jamming geometry essentially unchanged and stops the
+  # emitter being an obstacle on the objective.
   ear_near: {x: -60.0, y:  12.0}
   ear_mid:  {x: -20.0, y:  12.0}
   ear_far:  {x:  40.0, y:  12.0}

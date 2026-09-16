@@ -1,7 +1,7 @@
 """
 Command line entry point.
 
-    python3 -m deadband validate default_run.yaml
+    python3 -m commsev validate default_run.yaml
 
 Exit code 0 if the file is structurally valid, 1 if not. Unsourced parameters
 are reported but do NOT fail the check — an honest empty source is a legitimate
@@ -17,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
     if len(argv) != 2 or argv[0] != "validate":
-        print("usage: python3 -m deadband validate <scenario.yaml>", file=sys.stderr)
+        print("usage: python3 -m commsev validate <scenario.yaml>", file=sys.stderr)
         return 2
 
     report = spec.load(argv[1])

@@ -1,5 +1,5 @@
 # =============================================================================
-# Deadband EXPERIMENT — penetration
+# CommsEv EXPERIMENT — penetration
 # =============================================================================
 # HOW FAR CAN A FLEET ADVANCE INTO CONTESTED SPECTRUM BEFORE IT LOSES COMMAND,
 # AND DOES ITS ARCHITECTURE CHANGE THE ANSWER?
@@ -36,8 +36,52 @@ description: >
   jamming, across all nine authority x routing combinations and three jammer
   power ratios. Measures how far it got.
 
+# =============================================================================
+# FIRST RUN OF THIS VERSION, 2026-09-11 (36 cells, 506 s). Reproduce before
+# quoting. penetration_m, centralized, spacing 4.0 m, 8 cars:
+#
+#     formation  routing     0 dB    10 dB    20 dB
+#     column     star        47.0     23.5     10.0
+#     column     mesh        49.4     27.6     15.6
+#     abreast    star        47.0     23.5      9.6
+#     abreast    mesh        49.7     25.9     13.7
+#     wedge      star        47.0     23.5      9.7
+#     wedge      mesh        49.6     29.8     17.6
+#     echelon    star        47.0     23.5      9.9
+#     echelon    mesh        49.7     28.9     17.1
+#     diamond    star        47.0     23.5      9.6
+#     diamond    mesh        49.7     25.9     13.2
+#     circle     star        47.0     23.5      9.6
+#     circle     mesh        49.7     25.9     11.8
+#
+# THE RESULT, and it is worth stating carefully:
+#
+#   IN A STAR, THE SHAPE BUYS NOTHING. All six shapes land within 0.4 m of
+#   each other at every jammer power - six curves lying on top of one another.
+#   A star sends every order direct to the vehicle, so the only thing that
+#   counts is distance from the ground station, and all six shapes advance
+#   from the same start line at the same pace.
+#
+#   IN A MESH IT BUYS A GREAT DEAL, AND MORE THE HARDER YOU ARE JAMMED. At
+#   20 dB the shapes spread from 11.8 m (circle) to 17.6 m (wedge) - the best
+#   shape penetrates 49% further than the worst. A mesh can relay, so the
+#   geometry becomes relay depth: a wedge and an echelon leave vehicles strung
+#   back toward the ground station to carry orders forward, while a circle
+#   bunches all eight at one radius with nobody behind them.
+#
+#   So: FORMATION IS NOT A COMMS DECISION UNTIL YOUR ROUTING CAN USE IT. That
+#   is a claim about the interaction of two axes, which is the kind of thing
+#   this framework exists to make measurable - and it is the reason routing is
+#   swept here rather than pinned.
+#
+# NOT YET CHECKED: whether this survives indoors. Ding et al. (arXiv:1503.04251,
+# see SOURCES.md) warn that densifying a network can REDUCE coverage once the
+# interference is line-of-sight too, which would make a mesh worse in a maze
+# than in an open corridor. The model can now express that and nobody has run it.
+# =============================================================================
+
 scene: corridor_200m
-blue_fleet: 3_roboracer_no_lidar
+blue_fleet: 8_roboracer_no_lidar
 red_fleet: red_comms
 mission: advance
 
@@ -55,20 +99,64 @@ stall_grace_s: 5.0
 # the first to lose command, and the first to become a relay.
 spawns:
   gcs:  {x: -95.0, y:  0.0}
-  car1: {x: -89.0, y:  0.0}
-  car2: {x: -93.0, y:  3.0}
-  car3: {x: -93.0, y: -3.0}
-  jam1: {x:  95.0, y:  0.0}     # far end of the corridor
+  # A starting arrangement only. The `formation` axis re-places the whole
+  # fleet for every cell (apply_formation), so these coordinates decide
+  # nothing except where they stand before the first shape is applied.
+  car1: {x: -89.0, y:  1.5}
+  car2: {x: -89.0, y: -1.5}
+  car3: {x: -91.0, y:  3.0}
+  car4: {x: -91.0, y: -3.0}
+  car5: {x: -93.0, y:  4.5}
+  car6: {x: -93.0, y: -4.5}
+  car7: {x: -95.0, y:  6.0}
+  car8: {x: -95.0, y: -6.0}
+  jam1: {x:  95.0, y: 10.0}     # far end, OFF the centreline - see below
+  # OFF THE CENTRELINE, deliberately. At (95, 0) the jammer occupied the goal
+  # itself, and a jammer is a body: the fleet was driving into the emitter
+  # rather than reaching the objective, which capped penetration at whatever
+  # the collision allowed rather than at whatever the jamming allowed. Ten
+  # metres to the side changes the link budget by a fraction of a dB and
+  # removes the obstacle.
 
 doctrine: hold                  # every vehicle. Lose command -> stop.
 
 # --- what is varied ----------------------------------------------------------
 axes:
-  authority: [centralized, decentralized, hierarchical]
-  routing:   [star, mesh, tiered]
+  # THE SHAPE IS THE POINT OF THIS VERSION. With three cars a wedge, a line
+  # and an echelon differ by a couple of metres and every architecture scores
+  # the same; with eight the shape decides how far the rearmost vehicle is
+  # from the ground station, how long the relay chain is, and how much of the
+  # fleet is inside the jammer's burn-through range at once. Each shape is a
+  # separate line on the chart, which is what makes the chart worth reading.
+  # NOT `line`: the model builds `line` and `column` from the same branch
+  # (nose to tail), so putting both on the axis draws two identical curves
+  # and makes a correct chart look broken. These six are geometrically
+  # distinct, and the contrast that matters most is column against abreast -
+  # a column is a 21 m relay chain, abreast is a 21 m frontage where every
+  # vehicle is the same distance from the ground station.
+  formation: [column, abreast, wedge, echelon, diamond, circle]
+  # PINNED to centralized, and that is the whole point of this version.
+  # A decentralized fleet needs no orders, so it penetrates the full 165.6 m
+  # in every shape at every jammer power - six identical flat lines that say
+  # nothing about shape. The question here is whether the SHAPE YOU FLY
+  # changes how far a fleet that must be commanded can get.
+  authority: [centralized]
   # P_j / P_t in dB. 0 = the jammer is exactly as loud as a fleet radio;
   # +20 dB = a hundred times the power.
   jam_rel_db: [0, 10, 20]
+  # SWEPT, because it is the mechanism by which shape can matter at all.
+  # Measured: with routing pinned to star every shape scored within 0.4 m of
+  # every other, because a star sends every order direct and only distance
+  # from the ground station counts - and all six shapes advance from the same
+  # start line. In a MESH a column is a 28 m relay chain whose rear vehicles
+  # can carry orders forward, and an abreast rank is eight vehicles all the
+  # same distance out with nobody behind to relay. That is where the shape
+  # should pay, and the two routings side by side are what shows it.
+  routing: [star, mesh]
+  # PINNED. Crossing six shapes with two spacings is 24 series on one chart,
+  # which is not a chart. Sweep it instead of formation when the question is
+  # "how spread out", rather than "what shape".
+  spacing: [4.0]
 
 # ONE SEED, MEASURED NOT ASSUMED. Across 27 cells x 3 seeds, not a single
 # cell's penetration differed between seeds - because nothing in THIS
@@ -83,7 +171,8 @@ axes:
 seeds: [1]
 
 squads:
-  alpha: {leader: car1, members: [car2, car3]}
+  alpha: {leader: car1, members: [car2, car3, car4]}
+  bravo: {leader: car5, members: [car6, car7, car8]}
 coordinator: gcs
 leader_loss: fallback
 

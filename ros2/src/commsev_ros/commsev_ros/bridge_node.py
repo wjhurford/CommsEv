@@ -38,7 +38,7 @@ def yaw_from_quaternion(q):
 
 class BridgeNode(Node):
     def __init__(self):
-        super().__init__("deadband_bridge")
+        super().__init__("commsev_bridge")
         self.declare_parameter("scenario", default_scenario())
         self.declare_parameter("port", 8765)
         self.declare_parameter("rate_hz", 10.0)

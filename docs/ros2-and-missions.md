@@ -96,13 +96,13 @@ crosses the WSL boundary without special setup.
   Gazebo / f1tenth_gym / real cars
         |  ROS 2 topics
         v
-  deadband_bridge  ---- JSON frames over ws ---->  Deadband Console
+  commsev_bridge  ---- JSON frames over ws ---->  CommsEv Console
         ^                                          (draws, records, plots)
         |  ROS 2 topics
   your controller nodes
 ```
 
-`deadband_bridge` is one node: it subscribes to every agent's topics, packs them
+`commsev_bridge` is one node: it subscribes to every agent's topics, packs them
 into the frame shape `tools/stub_telemetry.py` already emits, and writes them to
 a WebSocket. Nothing in the Console changes — `start_run()` points at the bridge
 instead of the stub.
@@ -189,7 +189,7 @@ link, then run the identical file on hardware.
 
 ## Still to build
 
-- `deadband_bridge` — the ROS 2 node described above
+- `commsev_bridge` — the ROS 2 node described above
 - A VESC model, so a command becomes motion through the same limits the real
   controller imposes (current, ERPM, servo travel) and reports odometry with
   the same quantisation

@@ -1,5 +1,5 @@
 # =============================================================================
-# Deadband SWEEP — headless parameter sweep over scene + fleet + mission
+# CommsEv SWEEP — headless parameter sweep over scene + fleet + mission
 # =============================================================================
 # Runs the same composition many times with one or more parameters varied, and
 # writes one CSV row per run. Nothing is drawn and nothing waits on a clock:
@@ -291,7 +291,22 @@ def run_one(args):
 
     prev = {i: (poses[i]["x"], poses[i]["y"]) for i in blue_ids}
     acc = {"cmd": [], "held": [], "dist": 0.0, "track": [], "belief": [],
-           "sinr": [], "pdr": []}
+           "sinr": [], "pdr": [],
+           # FORMATION COHERENCE. Two numbers, and they answer a question the
+           # pass rate cannot: is the fleet still a fleet?
+           #
+           #   station   how far each vehicle is from the place the formation
+           #             wants it, on ground truth
+           #   centre    how wrong each vehicle's idea of the FLEET'S CENTRE
+           #             is - which is built from peer position reports, and
+           #             those travel the same jammed link as everything else
+           #
+           # Measured because a decentralized fleet's centre error was found
+           # to climb to 59 m under jamming while its mission score stayed at
+           # 100%: the picture degrades and nothing in the model charges it
+           # anything. Scoring it is the honest first step - a penalty would
+           # be an invention, a measurement is not.
+           "station": [], "centre": []}
     # INTERCEPTION. Every reassignment is a transmission, so the other side
     # can hear it - and whether it does is the same link budget as everything
     # else, jammer included. `ears` are the red agents that are not jamming:
@@ -389,6 +404,33 @@ def run_one(args):
                 if heard[e]["first"] is None:
                     heard[e]["first"] = round(t, 2)
 
+        if len(blue_ids) > 1:
+            tcx = sum(poses[i]["x"] for i in blue_ids) / len(blue_ids)
+            tcy = sum(poses[i]["y"] for i in blue_ids) / len(blue_ids)
+            for i in blue_ids:
+                a_ = by[i]
+                # OFF STATION IS A SHAPE ERROR, NOT A PROGRESS ERROR. Measured
+                # as distance to `mission_target` it starts at the length of
+                # the corridor and shrinks, so its mean over a run says how
+                # far the fleet travelled, not how well it held formation.
+                # The quantity that means what it says is the vehicle's
+                # offset from the fleet's TRUE centre, against the slot it was
+                # supposed to be holding, rotated onto the leg.
+                sl = a_.get("_slot")
+                if sl:
+                    br = st._num(a_.get("_bearing"))
+                    cb, sb = math.cos(br), math.sin(br)
+                    wx = sl[0] * cb - sl[1] * sb
+                    wy = sl[0] * sb + sl[1] * cb
+                    acc["station"].append(
+                        math.hypot((poses[i]["x"] - tcx) - wx,
+                                   (poses[i]["y"] - tcy) - wy))
+                try:
+                    bx, by_ = st._fleet_centre(a_, a_.get("knowledge") or poses)
+                    acc["centre"].append(math.hypot(bx - tcx, by_ - tcy))
+                except Exception:                          # noqa: BLE001
+                    pass
+
         w = f.get("worst_link")
         if w:
             acc["sinr"].append(w["sinr_db"])
@@ -470,6 +512,13 @@ def run_one(args):
         "belief_err_m": mean(acc["belief"]),
         "worst_sinr_db": mean(acc["sinr"]),
         "worst_pdr": mean(acc["pdr"]),
+        # IS THE FLEET STILL A FLEET? See acc["station"] above.
+        "station_err_m": mean(acc["station"]),
+        "station_err_max_m": round(max(acc["station"]), 4)
+        if acc["station"] else None,
+        "centre_err_m": mean(acc["centre"]),
+        "centre_err_max_m": round(max(acc["centre"]), 4)
+        if acc["centre"] else None,
         # WHAT RED HEARD. `orders_sent` is the denominator - a fleet that is
         # fully jammed issues no orders at all, so a low interception fraction
         # can mean "could not hear" or "there was nothing to hear", and the
@@ -533,7 +582,7 @@ def key_of(cell, names):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Deadband headless sweep")
+    ap = argparse.ArgumentParser(description="CommsEv headless sweep")
     ap.add_argument("experiment", help="path to an experiment YAML")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2)),
                     help="parallel worker processes (default: every core)")
@@ -608,6 +657,8 @@ def main(argv=None):
                        "held_fraction", "distance_m", "track_err_m",
                        "belief_err_m", "worst_sinr_db", "worst_pdr",
                        "orders_sent", "orders_heard_any", "intercept_frac",
+                       "station_err_m", "station_err_max_m",
+                       "centre_err_m", "centre_err_max_m",
                        "wall_s", "error"])
     fields = fields + [k for k in extra if k not in fields]
     csv_path = outdir / "results.csv"

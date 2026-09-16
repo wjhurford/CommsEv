@@ -21,7 +21,7 @@ now the **fleet**. This section describes the result as it stands.)
   `scene:` (alias `map:`) and `fleet:` references recursively and overlays the
   file on top; factored into `_base_path` / `_overlay`. A file naming no base
   is self-contained (the old shape) and loads unchanged.
-- **`deadband/spec.py`** — validation is now layer-aware: a scene owes an
+- **`commsev/spec.py`** — validation is now layer-aware: a scene owes an
   arena, a fleet owes agents, a mission owes neither (they arrive through the
   chain); a file with no `kind` and no reference still owes everything.
 - **The canonical trio** — the working set is now exactly one of each:
@@ -57,7 +57,7 @@ now the **fleet**. This section describes the result as it stands.)
    `REOBJECTIVE car1 pursue car3` should behave exactly as before.
 4. **In the Console:** open `scenes/lab_box.yaml` alone — an empty room, no
    agents (that is correct: a scene is the world only), no validation errors.
-5. `python3 -m deadband validate missions/test.yaml` — OK; then validate
+5. `python3 -m commsev validate missions/test.yaml` — OK; then validate
    `fleets/3_roboracer.yaml` — OK (a fleet owes agents, not an arena).
 
 ### Known gaps (closed in later steps)

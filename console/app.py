@@ -1,8 +1,8 @@
 """
-Deadband Console — the application.
+CommsEv Console — the application.
 
 This is the thing you double-click. Everything else runs behind it: the scenario
-file is loaded and checked by deadband.spec, and the telemetry source is a
+file is loaded and checked by commsev.spec, and the telemetry source is a
 background process whose output feeds the views. No terminal, ever.
 
 Structure of this file:
@@ -43,7 +43,7 @@ def _wsl_path(p):
 REPO_WSL_PATH = _wsl_path(REPO_ROOT)
 
 # Where the bag recorder writes its own pid, inside WSL. See stop_ros_stack.
-BAG_PIDFILE = "/tmp/deadband_bag.pid"
+BAG_PIDFILE = "/tmp/commsev_bag.pid"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -51,8 +51,8 @@ from PySide6.QtCore import (
     QMimeData, QPointF, QProcess, QRectF, Qt, QThread, Signal,
 )
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QDrag, QFont, QPainter, QPen, QPixmap,
-    QPolygonF,
+    QAction, QBrush, QColor, QDrag, QFont, QImage, QPainter, QPen,
+    QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -65,7 +65,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from deadband import spec
+from commsev import spec
 
 # The Console shows the same merged map+mission the simulator runs, so a split
 # mission (agents in the map, objectives in the mission file) displays its
@@ -153,6 +153,116 @@ C_OK = "#6FAE7E"
 # for state meant a degraded blue link and a healthy red one would eventually be
 # the same hue, which stops working the moment adversarial agents arrive.
 NETWORK_COLOURS = {"blue": "#4FA3D1", "red": "#C4685A", "green": "#6FAE7E"}
+
+# The sentinel an experiment writes for jam_rel_db when the jammer is SILENT.
+# It has to match tools/sweep.py's JAM_OFF; it is repeated rather than
+# imported because the Console must still draw a results CSV when the sweep
+# module is not importable, and a wrong axis is worse than a missing plot.
+JAM_OFF_DB = -999.0
+
+
+# ---------------------------------------------------------------------------
+# WHAT EVERY NUMBER MEANS - one glossary, used everywhere a metric is shown
+# ---------------------------------------------------------------------------
+# Reported: "can I have when I hover over bits in the results page a brief
+# description such as the sinr_db". Right, and the fix is not a tooltip per
+# widget - it is ONE definition per quantity, read by the results table, the
+# metric chooser and anything added later. A metric that gains a tooltip in
+# one place and not another is how a reader ends up with two ideas of what a
+# column means.
+#
+# Each entry says what the number IS, and where it is easy to misread, what
+# it is NOT. Anything without an entry falls back to its own name, which is
+# a visible prompt to come and write one.
+METRIC_HELP = {
+    # --- what was configured -----------------------------------------------
+    "authority": "WHO DECIDES. centralized: one coordinator tasks everyone. "
+                 "decentralized: each vehicle decides for itself. "
+                 "hierarchical: leaders decide for their squads. Independent "
+                 "of routing - that is the framework's whole point.",
+    "routing": "HOW THE MESSAGE TRAVELS. star: everything through the "
+               "coordinator. mesh: any peer to any peer. tiered: up and down "
+               "the command tree. A star can carry decentralized authority "
+               "and a mesh can carry centralized.",
+    "jam_rel_db": "THE JAMMER'S ADVANTAGE, P_j / P_t in dB - its transmit "
+                  "power minus the fleet's. Dimensionless on purpose: the "
+                  "absolute powers cancel, so the result is not about one "
+                  "particular radio. 'off' is the silent-jammer control.",
+    "formation": "The shape the fleet holds - a function of the fleet size "
+                 "and spacing, not a list of coordinates.",
+    "spacing": "Metres between adjacent slots in the formation. Held rigid "
+               "through turns: the shape pivots, it does not squash.",
+    "seed": "The random seed. Anything that differs between seeds is noise, "
+            "not a finding.",
+    # --- the outcome --------------------------------------------------------
+    "mission_pass_frac": "Fraction of the fleet that COMPLETED the mission - "
+                         "every waypoint, every lap. The outcome measure.",
+    "mission_awaiting_orders": "Fraction of the fleet sitting still because "
+                               "it could not reach its decider. Distinguishes "
+                               "'beaten' from 'stuck': a fleet awaiting "
+                               "orders was not out-driven, it was cut off.",
+    "mission_drifted": "Fraction whose position belief drifted beyond "
+                       "tolerance - they may be moving confidently to the "
+                       "wrong place.",
+    "penetration_m": "How far the fleet advanced along the axis of advance, "
+                     "in metres. Measured along the axis, not as distance "
+                     "travelled, so wandering sideways earns nothing.",
+    "penetration_frac": "The same as a fraction of the full distance to the "
+                        "objective. 1.0 is arrival.",
+    "arrived": "How many vehicles reached the goal within their own arrival "
+               "tolerance - which is the vehicle's own length, not a shared "
+               "constant.",
+    "commanded_fraction": "Fraction of ticks on which a vehicle could reach "
+                          "whoever decides for it. Blue's side of the "
+                          "interception coin: this is the link WORKING.",
+    "ended_s": "Simulated seconds to the end of the run.",
+    # --- the radio ----------------------------------------------------------
+    "sinr_db": "SIGNAL TO INTERFERENCE PLUS NOISE, in dB. Wanted signal "
+               "power divided by (every other same-band emitter + the noise "
+               "floor). The single currency: distance, walls and jamming all "
+               "reduce to this, and this becomes packet delivery, which "
+               "becomes whether the link is up.",
+    "worst_sinr_db": "The lowest SINR any link in the fleet saw. A fleet is "
+                     "as commandable as its worst link, so the mean hides "
+                     "exactly the thing that breaks it.",
+    "pdr": "PACKET DELIVERY RATIO, 0 to 1 - the share of packets that "
+           "arrive. Derived from SINR, not set directly.",
+    "latency_ms": "One-way delay on the link, in milliseconds.",
+    "quality": "Link quality, 0 to 1 - a display convenience derived from "
+               "SINR. Never an input to anything.",
+    "excess_db": "Extra path loss from WALLS, in dB, beyond free space: the "
+                 "cheaper of going through the material or diffracting round "
+                 "the end of it.",
+    # --- interception -------------------------------------------------------
+    "orders_sent": "How many orders blue transmitted. The denominator - "
+                   "intercept_frac alone is misleading without it, because a "
+                   "fleet that sends nothing is never overheard.",
+    "orders_heard_any": "How many of those orders at least one red listener "
+                        "decoded.",
+    "intercept_frac": "Fraction of blue's orders that red heard. A LOWER "
+                      "BOUND: the listener is omni, unaided and no better "
+                      "than the intended receiver, where a real intercept "
+                      "post would have gain and a quieter front end.",
+    "first_intercept_s": "When red first learned anything, in simulated "
+                         "seconds. Zero means it heard the opening order.",
+    # --- position -----------------------------------------------------------
+    "belief_error_m": "How far each vehicle's BELIEF about its own position "
+                      "is from the truth, in metres. What GNSS denial costs, "
+                      "and what missions actually steer on.",
+    "station_err_m": "Formation SHAPE error: how far each vehicle is from "
+                     "its rotated slot relative to the fleet's true centre. "
+                     "Not transit error - a fleet moving as one rigid shape "
+                     "scores zero however far it is from the waypoint.",
+    "centre_err_m": "How wrong the fleet's idea of its own centre is. Built "
+                    "from peer reports, so it degrades over the jammed link "
+                    "even when every vehicle knows exactly where IT is.",
+}
+
+
+def metric_help(key):
+    """One line saying what a metric is. Falls back to the bare name, which
+    is a visible prompt that a definition is owed."""
+    return METRIC_HELP.get(str(key), str(key))
 
 
 def network_colour(name):
@@ -354,6 +464,32 @@ class Viewport(QWidget):
         # picture. The button is one click away.
         self.show_c2 = False
         self.selected_points = set()
+        # Indices into arena["walls"]. Walls are selected by index rather than
+        # by identity because a wall has no id - it is geometry, not an actor.
+        self.selected_walls = set()
+        # THE SPECTRUM FIELD. Off by default and computed ON DEMAND - it costs
+        # a third of a second for a 72x72 grid and there is no version of
+        # "every frame" that is acceptable. Held as the raw grid plus a
+        # rendered image, because the contours need the numbers and the fill
+        # does not.
+        self.spectrum = None
+        self._spec_img = None
+        self._spec_poses = None
+        self.show_spectrum = False
+        # THE OTHER QUESTION ON THE SAME PHYSICS. The spectrum field says how
+        # much power is at a place; the wavefront says whose. Two toggles
+        # rather than one view doing both, because colour cannot carry
+        # magnitude and side at once without lying about one of them.
+        self.wavefront = None
+        self.advantage = None
+        self._adv_img = None
+        self.show_wavefront = False
+        # THE THREE SECTION PLANES, and whether the scene is opened on them.
+        # They belong to the SCENE, not to the camera: all three are live in
+        # every view, which is what lets you cut into a building and then
+        # walk round the cut in ISO.
+        self.slice = {"x": 0.0, "y": 0.0, "z": 0.2}
+        self.cut_away = False
         self._band = None         # rubber-band rectangle, screen coords
         self.scan_overlay = None   # (agent_id, scan) drawn in world coordinates
         self.scan_extras = []      # every OTHER ranging sensor on that agent
@@ -508,6 +644,46 @@ class Viewport(QWidget):
                     names.add(name)
         return aids, names
 
+    def wall_at(self, pt, radius_px=7.0):
+        """The index of the wall under this screen position, or None.
+
+        Distance to the SEGMENT, not to its ends, because a wall is a line and
+        a click lands on the middle of one far more often than on a corner.
+        """
+        walls = (self.arena or {}).get("walls") or []
+        best, bestd = None, radius_px
+        for i, w in enumerate(walls):
+            a = self.to_screen(_num(w.get("x1")), _num(w.get("y1")), 0.0)
+            b = self.to_screen(_num(w.get("x2")), _num(w.get("y2")), 0.0)
+            ex, ey = b.x() - a.x(), b.y() - a.y()
+            L2 = ex * ex + ey * ey
+            if L2 < 1e-9:
+                d = math.hypot(pt.x() - a.x(), pt.y() - a.y())
+            else:
+                u = max(0.0, min(1.0, ((pt.x() - a.x()) * ex
+                                       + (pt.y() - a.y()) * ey) / L2))
+                d = math.hypot(pt.x() - (a.x() + u * ex),
+                               pt.y() - (a.y() + u * ey))
+            if d <= bestd:
+                best, bestd = i, d
+        return best
+
+    def walls_in(self, rect):
+        """Indices of every wall with any part inside a screen rect.
+
+        Both ends OR the midpoint, so a long wall crossing the box is caught
+        even when neither end is in it - which is the usual case when you
+        sweep a corridor to re-material the lot.
+        """
+        out = set()
+        for i, w in enumerate((self.arena or {}).get("walls") or []):
+            a = self.to_screen(_num(w.get("x1")), _num(w.get("y1")), 0.0)
+            b = self.to_screen(_num(w.get("x2")), _num(w.get("y2")), 0.0)
+            mid = QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
+            if rect.contains(a) or rect.contains(b) or rect.contains(mid):
+                out.add(i)
+        return out
+
     def agent_body_at(self, pt, radius_px=18.0):
         """The agent DICT under this point, for dragging.
 
@@ -549,6 +725,8 @@ class Viewport(QWidget):
     # the status bar what is now under the mouse.
     on_point_moved = None
     on_selection = None
+    # Called with the set of selected wall indices when it changes.
+    on_wall_pick = None
     # True while Setup is placing a fleet: a press grabs a vehicle instead of
     # panning the view.
     placing = False
@@ -575,7 +753,28 @@ class Viewport(QWidget):
         # Only before a run - moving an agent mid-run would be teleporting it,
         # which is not something the physics should have to explain.
         if getattr(self, "placing", False) and self.mode != self.ISO:
+            # WALLS ARE PICKED BEFORE VEHICLES ONLY WHEN NOTHING ELSE IS
+            # THERE. An agent standing against a wall is the common case in a
+            # maze, and grabbing the wall instead of the car it is touching
+            # would make the fleet unplaceable exactly where placement is
+            # hardest.
             hit = self.agent_body_at(ev.position())
+            if hit is None and self.point_at(ev.position()) is None:
+                wi = self.wall_at(ev.position())
+                if wi is not None:
+                    add = bool(ev.modifiers()
+                               & (Qt.ShiftModifier | Qt.ControlModifier))
+                    sel = set(self.selected_walls) if add else set()
+                    sel.symmetric_difference_update({wi}) if add else \
+                        sel.update({wi})
+                    self.selected_walls = sel
+                    self.selected, self.selected_points = set(), set()
+                    self._drag = None
+                    self._press_at = None
+                    if self.on_wall_pick:
+                        self.on_wall_pick(self.selected_walls)
+                    self.update()
+                    return
             pname = None if hit is not None else self.point_at(ev.position())
             if hit is not None or pname is not None:
                 # GRABBING A MEMBER OF THE SELECTION MOVES THE WHOLE
@@ -657,12 +856,26 @@ class Viewport(QWidget):
             if band.width() > 3 and band.height() > 3:
                 self.selected, self.selected_points = self.bodies_in(
                     band, with_points=bool(ev.modifiers() & Qt.ShiftModifier))
+                # A BAND THAT CAUGHT NO VEHICLES IS A BAND MEANT FOR WALLS.
+                # Sweeping a corridor to re-material eight partitions at once
+                # is the whole reason multi-select exists here, and making it
+                # a separate mode would be one more thing to remember.
+                walls = self.walls_in(band)
+                if walls and not self.selected and not self.selected_points:
+                    self.selected_walls = walls
+                    if self.on_wall_pick:
+                        self.on_wall_pick(self.selected_walls)
+                elif self.selected or self.selected_points:
+                    self.selected_walls = set()
                 if self.on_selection:
                     self.on_selection(self.selected, self.selected_points)
             else:
                 # A click on empty space clears the selection, so there is an
                 # obvious way out of a group without picking members off.
                 self.selected, self.selected_points = set(), set()
+                self.selected_walls = set()
+                if self.on_wall_pick:
+                    self.on_wall_pick(self.selected_walls)
                 if self.on_selection:
                     self.on_selection(self.selected, self.selected_points)
             self.update()
@@ -705,8 +918,12 @@ class Viewport(QWidget):
             p.fillRect(self.rect(), QColor(C_BG))
             if self.arena:
                 self._floor(p)
+                self._spectrum(p)
+                self._contested(p)
                 self._grid(p)
                 self._bounds(p)
+                self._walls(p)
+                self._wavefront(p)
             self._scan_fan(p)
             self._range_rings(p)
             self._jammer_affect_lines(p)
@@ -716,13 +933,25 @@ class Viewport(QWidget):
             if self.show_c2:
                 self._authority_arrows(p)
             for a in self.agents:
+                # GHOSTED, NOT DELETED. An agent on the far side of a cut is
+                # drawn at a fifth strength rather than removed: you asked to
+                # see INSIDE something, and a vehicle that vanishes entirely
+                # reads as a bug or a loss, which is exactly the wrong signal
+                # in an app whose subject is losing contact with vehicles.
+                faint = self.cut_away and self._past_cut(a)
+                if faint:
+                    p.setOpacity(0.2)
                 self._agent(p, a)
+                if faint:
+                    p.setOpacity(1.0)
             if self.show_c2:
                 self._rank_glyphs(p)
                 self._link_loads(p)
             if self.show_axes:
                 self._axes(p)
             self._overlay(p)
+            self._spectrum_key(p)
+            self._wavefront_key(p)
             self._selection_box(p)
         except Exception as exc:
             if Viewport._paint_error is None:
@@ -898,7 +1127,16 @@ class Viewport(QWidget):
         p.drawRect(self._band)
 
     def _grid(self, p):
-        """One line per metre across the arena footprint."""
+        """One line per metre across the arena footprint.
+
+        SUPPRESSED WHILE THE SPECTRUM IS UP. Twenty grid lines over a
+        continuous field is two lattices fighting, and the one that loses is
+        the data - the contours are the structure worth reading there, and the
+        metre grid is what the scale bar is for.
+        """
+        if getattr(self, "show_spectrum", False) and self.mode == self.TOP \
+                and self.spectrum:
+            return
         e = self.arena.get("extent", {})
         hx, hy = _num(e.get("x"), 8) / 2, _num(e.get("y"), 8) / 2
         p.setPen(QPen(QColor(C_GRID), 1))
@@ -921,6 +1159,442 @@ class Viewport(QWidget):
         p.setBrush(QBrush(QColor(37, 42, 46)))
         p.setPen(Qt.NoPen)
         p.drawPolygon(QPolygonF([self.to_screen(*c) for c in quad]))
+
+    # MATERIAL, AS A LINE STYLE. Colour is the SIDE everywhere else on this
+    # map and it stays that way; a wall is not on anybody's side. So the
+    # material is carried by weight and dash instead, and the wall's own
+    # greyish tone separates structure from agents without competing with them.
+    WALL_STYLE = {
+        # material:      (width, dash,          tone)
+        "plasterboard": (3.0, Qt.SolidLine,   "#7E8A90"),
+        "brick":        (4.5, Qt.SolidLine,   "#8A6F63"),
+        "concrete":     (5.5, Qt.SolidLine,   "#6E7276"),
+        "wood":         (3.5, Qt.SolidLine,   "#8A7A5E"),
+        # Glass is drawn thin and dashed because that is what it IS to this
+        # model: nearly transparent to radio and nearly invisible to a lidar.
+        # A vehicle with no map will drive into it, and the drawing should
+        # make that look plausible rather than like a mistake.
+        "glass":        (1.6, Qt.DashLine,    "#5FA9C4"),
+        # Metal gets the heaviest line: opaque to radio, and the only way past
+        # it for a signal is round the end.
+        "metal":        (5.0, Qt.SolidLine,   "#B9C2C8"),
+    }
+
+    def set_spectrum(self, field):
+        """Hand the viewport a freshly computed field, or None to clear it."""
+        self.spectrum = field
+        self._spec_img = None
+        # WHERE EVERYTHING WAS WHEN THIS WAS COMPUTED. The field costs a third
+        # of a second, so it is a SNAPSHOT and not a live layer - and a
+        # snapshot that silently goes on being drawn after the fleet has moved
+        # (or after a replay has been rewound) is worse than no picture, since
+        # it looks current. Remembering the poses lets the key say so.
+        self._spec_poses = {a.get("id"): (round(_num((a.get("pose") or {}).get("x")), 2),
+                                          round(_num((a.get("pose") or {}).get("y")), 2))
+                            for a in (self.agents or [])}
+        self.update()
+
+    def spectrum_is_stale(self):
+        """Has anything moved since the field was computed?"""
+        if not self.spectrum or self._spec_poses is None:
+            return False
+        now = {a.get("id"): (round(_num((a.get("pose") or {}).get("x")), 2),
+                             round(_num((a.get("pose") or {}).get("y")), 2))
+               for a in (self.agents or [])}
+        return now != self._spec_poses
+
+    def _spectrum_image(self):
+        """The field as a small QImage, scaled up at draw time.
+
+        One pixel per grid cell and let Qt smooth it: a 72 x 72 image
+        stretched over the arena is exactly the resolution the data has, and
+        drawing six thousand rectangles to pretend otherwise would be slower
+        AND a lie about how finely this was computed.
+        """
+        f = self.spectrum
+        if not f:
+            return None
+        if self._spec_img is not None:
+            return self._spec_img
+        nx, ny = f["nx"], f["ny"]
+        lo, hi = spectrum_range(f)
+        self._spec_lo, self._spec_hi = lo, hi
+        img = QImage(nx, ny, QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        for j in range(ny):
+            for i in range(nx):
+                c = spectrum_colour(f["dbm"][j][i], lo, hi)
+                if c is None:
+                    continue
+                c.setAlpha(210)
+                img.setPixelColor(i, ny - 1 - j, c)   # world y up, image y down
+        self._spec_img = img
+        return img
+
+    # Which view is allowed to draw which slice. A field of x and y drawn on
+    # an elevation would be claiming a section this has not computed, so the
+    # pairing is enforced rather than trusted: the toolbar recomputes the
+    # field when the view changes, and until it has, nothing is drawn.
+    SPECTRUM_VIEW = {"top": "TOP", "front": "FRONT", "side": "SIDE"}
+
+    def _field_point(self, f, iu, iv):
+        """Grid cell centre -> the world point it was sampled at.
+
+        The one place the plane's geometry is decoded. Everything that draws
+        the field - the image rectangle, every contour segment - goes through
+        here, so adding a plane is a change in the model and one line here,
+        not a new special case in each drawing routine.
+        """
+        u = f["u0"] + (f["u1"] - f["u0"]) * (iu + 0.5) / f["nx"]
+        v = f["v0"] + (f["v1"] - f["v0"]) * (iv + 0.5) / f["ny"]
+        return self._field_world(f, u, v)
+
+    def _field_world(self, f, u, v):
+        plane = f.get("plane", "top")
+        at = _num(f.get("at"), 0.2)
+        if plane == "front":
+            return (u, at, v)
+        if plane == "side":
+            return (at, u, v)
+        return (u, v, at)
+
+    def _spectrum(self, p):
+        """The field, then its contours."""
+        f = self.spectrum
+        if not self.show_spectrum or not f:
+            return
+        if self.mode != self.SPECTRUM_VIEW.get(f.get("plane", "top"), "TOP"):
+            return
+        img = self._spectrum_image()
+        if img is None:
+            return
+        # The image spans the plane's own two axes, whatever they are: its
+        # corners are the corners of the sampled rectangle, projected.
+        tl = self._field_world(f, f["u0"], f["v1"])
+        br = self._field_world(f, f["u1"], f["v0"])
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(self.to_screen(*tl), self.to_screen(*br)), img)
+
+        # CONTOURS AT 10 dB, with the sensitivity line picked out. The steps
+        # are what make it a map rather than a smear; the sensitivity contour
+        # is the one that MEANS something - inside it there is enough power to
+        # decode what is out there, outside it there is not.
+        grid = f["dbm"]
+        vals = [v for row in grid for v in row if v is not None]
+        if not vals:
+            return
+        lo, hi = min(vals), max(vals)
+        levels = [SPECTRUM_SENSITIVITY_DBM]
+        v = math.ceil(lo / 10.0) * 10.0
+        while v <= hi:
+            if abs(v - SPECTRUM_SENSITIVITY_DBM) > 1e-6:
+                levels.append(v)
+            v += 10.0
+        for lev in levels:
+            key = abs(lev - SPECTRUM_SENSITIVITY_DBM) < 1e-6
+            pen = QPen(QColor(232, 238, 242, 200 if key else 85),
+                       1.6 if key else 0.9)
+            if not key:
+                pen.setStyle(Qt.DotLine)
+            p.setPen(pen)
+            for (ax, ay), (bx, by) in contour_segments(grid, lev):
+                p.drawLine(self.to_screen(*self._field_point(f, ax, ay)),
+                           self.to_screen(*self._field_point(f, bx, by)))
+
+    def _spectrum_key(self, p):
+        """The ramp with numbers on it. A field with no scale is a picture."""
+        f = self.spectrum
+        if not self.show_spectrum or not f:
+            return
+        if self.mode != self.SPECTRUM_VIEW.get(f.get("plane", "top"), "TOP"):
+            return
+        self._spectrum_image()          # ensures the range is computed
+        x, y0, w, h = 12, 58, 14, 150
+        bot_v = getattr(self, "_spec_lo", SPECTRUM_RAMP[0][0])
+        top_v = getattr(self, "_spec_hi", SPECTRUM_RAMP[-1][0])
+        for k in range(h):
+            u = k / float(h - 1)
+            p.setPen(QPen(spectrum_colour(top_v + (bot_v - top_v) * u,
+                                          bot_v, top_v)))
+            p.drawLine(x, y0 + k, x + w, y0 + k)
+        p.setPen(QPen(QColor(C_LINE)))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(x, y0, w, h)
+        p.setFont(QFont("Consolas", 7))
+        marks = [top_v, bot_v]
+        if bot_v < SPECTRUM_SENSITIVITY_DBM < top_v:
+            marks.insert(1, SPECTRUM_SENSITIVITY_DBM)
+        for dbm in marks:
+            u = (top_v - dbm) / max(top_v - bot_v, 1e-9)
+            yy = y0 + u * (h - 1)
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(QPointF(x + w + 4, yy + 3), f"{dbm:.0f}")
+            if abs(dbm - SPECTRUM_SENSITIVITY_DBM) < 1e-6:
+                p.setPen(QPen(QColor(232, 238, 242, 200)))
+                p.drawLine(QPointF(x, yy), QPointF(x + w, yy))
+                p.drawText(QPointF(x + w + 28, yy + 3), "sensitivity")
+        band = _num(f.get("band_mhz"))
+        p.setPen(QPen(QColor(C_TEXT)))
+        p.setFont(QFont("Consolas", 8))
+        p.drawText(QPointF(x, y0 - 8),
+                   f"{band/1000:.1f} GHz" if band >= 1000 else f"{band:.0f} MHz")
+        p.setPen(QPen(QColor(C_DIM)))
+        p.setFont(QFont("Consolas", 7))
+        p.drawText(QPointF(x, y0 + h + 14), "dBm on the air (fixed scale)")
+        # THE NUMBER THAT MOVES. dB are a ratio and hard to feel; the share of
+        # the floor a receiver could actually work on is not, and it is what
+        # changes when the fleet turns its power up or down.
+        cov = spectrum_coverage(f)
+        p.setPen(QPen(QColor(C_TEXT)))
+        p.drawText(QPointF(x, y0 + h + 50),
+                   f"{cov*100:.0f}% above sensitivity")
+        p.setPen(QPen(QColor(C_DIM)))
+        # WHERE THE SECTION WAS CUT. A contour map with no stated section
+        # plane is the commonest way to mislead with one: the same room at
+        # 0.2 m and at 2.5 m are different pictures, and only one of them is
+        # about the vehicles on the floor.
+        p.drawText(QPointF(x, y0 + h + 26),
+                   f"{f.get('faxis','z')} = {_num(f.get('at')):.2f} m")
+        # AND WHETHER IT STILL DESCRIBES THE SCENE IN FRONT OF YOU.
+        if self.spectrum_is_stale():
+            p.setPen(QPen(QColor(C_WARN)))
+            p.drawText(QPointF(x, y0 + h + 38),
+                       "STALE - click \u25a6 to refresh")
+
+    def _past_cut(self, a):
+        """Is this agent on the far side of any section plane?
+
+        The kept half is the LOW side of each plane, which is the convention
+        a cut-away drawing uses: you remove the material between you and the
+        thing you want to look at. Z is the exception in spirit but not in
+        form - an agent above the horizontal section is above the storey you
+        are looking at, and goes faint for the same reason a wall below it
+        disappears.
+        """
+        pose = (a.get("pose") or a.get("start") or {})
+        s = self.slice
+        return (_num(pose.get("x")) > s["x"] + 1e-6
+                or _num(pose.get("y")) > s["y"] + 1e-6
+                or _num(pose.get("z")) > s["z"] + 1e-6)
+
+    def set_wavefront(self, rings, advantage=None):
+        """Hand the viewport a fresh set of rings, or None to clear them."""
+        self.wavefront = rings
+        self.advantage = advantage
+        self._adv_img = None
+        self.update()
+
+    def _contested(self, p):
+        """The ground where the other side is the loudest thing on the band.
+
+        Drawn UNDER the walls and the rings, as ground rather than as a mark,
+        because that is what it is: an area, not an object. Only the negative
+        half of the field is painted - where blue is winning there is nothing
+        to say, and shading it too would turn a statement into wallpaper.
+        """
+        f = self.advantage
+        if not self.show_wavefront or not f or self.mode != self.TOP:
+            return
+        if self._adv_img is None:
+            nx, ny = f["nx"], f["ny"]
+            img = QImage(nx, ny, QImage.Format_ARGB32)
+            img.fill(Qt.transparent)
+            for j in range(ny):
+                for i in range(nx):
+                    v = f["dbm"][j][i]
+                    if v is None or v >= 0.0:
+                        continue
+                    # Full strength by 20 dB down: past that the point is made
+                    # and more ink only hides the room.
+                    k = min(1.0, -v / 20.0)
+                    c = QColor(NETWORK_COLOURS["red"])
+                    c.setAlpha(int(30 + 90 * k))
+                    img.setPixelColor(i, ny - 1 - j, c)
+            self._adv_img = img
+        hx, hy = f["hx"], f["hy"]
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(self.to_screen(-hx, hy, 0.0),
+                           self.to_screen(hx, -hy, 0.0)), self._adv_img)
+
+    def _wavefront(self, p):
+        """Equal-power rings, one colour per side.
+
+        PLAN VIEW ONLY: the rings are traced on a horizontal plane, and drawn
+        on an elevation they would be claiming a section nobody cut.
+
+        Each ring is an absolute dBm level, so a blue ring and a red ring of
+        the same level mean the same thing and where they cross is a real
+        statement about two signals. Inner rings are drawn more strongly than
+        outer ones - the fade is the strength, and it is the same fade for
+        both sides so neither looks louder for being drawn harder.
+        """
+        wf = self.wavefront
+        if not self.show_wavefront or not wf or self.mode != self.TOP:
+            return
+        floor = _num(wf.get("floor_dbm"), -85.0)
+        for e in wf.get("emitters") or []:
+            col = QColor(network_colour(e.get("network") or "blue"))
+            for ring in e.get("rings") or []:
+                pts = ring.get("pts") or []
+                if len(pts) < 8:
+                    continue
+                # How far above the sensitivity floor this ring is, 0 to 1.
+                k = min(1.0, max(0.0, (_num(ring.get("dbm")) - floor) / 30.0))
+                c = QColor(col)
+                c.setAlpha(int(60 + 150 * k))
+                pen = QPen(c, 1.0 + 1.6 * k)
+                # A jammer's rings are dashed. It is the same physics and the
+                # same scale - the dash says the intent is denial, not
+                # traffic, which colour alone cannot carry once both sides
+                # have transmitters.
+                if e.get("jammer"):
+                    pen.setStyle(Qt.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.NoBrush)
+                poly = QPolygonF([self.to_screen(x, y, 0.0) for x, y in pts])
+                p.drawPolygon(poly)
+
+    def _wavefront_key(self, p):
+        """Who is who, and what one ring is worth."""
+        wf = self.wavefront
+        if not self.show_wavefront or not wf or self.mode != self.TOP:
+            return
+        x, y = 12, self.height() - 74
+        p.setFont(QFont("Consolas", 8))
+        p.setPen(QPen(QColor(C_TEXT)))
+        band = _num(wf.get("band_mhz"))
+        p.drawText(QPointF(x, y),
+                   f"{band/1000:.1f} GHz" if band >= 1000 else f"{band:.0f} MHz")
+        p.setFont(QFont("Consolas", 7))
+        rows = [("blue", "friendly", Qt.SolidLine),
+                ("red", "hostile", Qt.SolidLine),
+                ("red", "jammer", Qt.DashLine)]
+        for i, (side, label, style) in enumerate(rows):
+            yy = y + 12 + i * 11
+            pen = QPen(QColor(NETWORK_COLOURS[side]), 2.0)
+            pen.setStyle(style)
+            p.setPen(pen)
+            p.drawLine(QPointF(x, yy - 3), QPointF(x + 18, yy - 3))
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(QPointF(x + 24, yy), label)
+        p.setPen(QPen(QColor(C_DIM)))
+        # The step is whatever the ROOM needed - a loud small room gets
+        # coarser rungs so the picture does not become forty contours - so
+        # the key reports the step that was used, never the one asked for.
+        p.drawText(QPointF(x, y + 12 + len(rows) * 11),
+                   f"one ring = {_num(wf.get('step_db'), 6):.0f} dB, "
+                   f"{_num(wf.get('lo_dbm'), -85):.0f} to "
+                   f"{_num(wf.get('hi_dbm'), 0):.0f} dBm in this room")
+        if self.advantage:
+            p.drawText(QPointF(x, y + 23 + len(rows) * 11),
+                       "shaded: hostile signal is the louder one here")
+
+    def _walls(self, p):
+        """Interior walls, with their material legible at a glance.
+
+        Drawn under everything else because a wall is the room, not an actor
+        in it. A wall lower than the arena is drawn dotted as well as styled -
+        a half-height partition is something a drone flies over and a car goes
+        round, and that distinction is invisible from above unless the drawing
+        says it.
+        """
+        walls = (self.arena or {}).get("walls") or []
+        if not walls:
+            return
+        top = _num((self.arena.get("extent") or {}).get("z"), 3.0)
+        if self.mode in (self.FRONT, self.SIDE):
+            self._walls_in_section(p, walls, top)
+            return
+        for i, w in enumerate(walls):
+            # CUT AWAY. A wall shorter than the Z plane is BELOW the cut - you
+            # are looking down from above it, so it is not there. This is the
+            # same rule the radio already obeys (a link passes over a wall it
+            # is higher than), which is the point: what you see is what the
+            # signal sees.
+            if self.cut_away and _num(w.get("height"), top) < self.slice["z"]:
+                continue
+            width, dash, tone = self.WALL_STYLE.get(
+                str(w.get("material", "")).lower(), (3.0, Qt.SolidLine, "#7E8A90"))
+            h = _num(w.get("height"), top)
+            low = h < top - 1e-6
+            a = self.to_screen(_num(w.get("x1")), _num(w.get("y1")), 0.0)
+            b = self.to_screen(_num(w.get("x2")), _num(w.get("y2")), 0.0)
+            # SELECTED WALLS GET A HALO, not a colour change. The line's own
+            # colour and weight are carrying the MATERIAL, which is the thing
+            # you are about to edit - recolouring it to show selection would
+            # hide the very property the dialog is about to ask you for.
+            if i in (self.selected_walls or ()):
+                halo = QPen(QColor(224, 138, 60, 150), width + 6)
+                halo.setCapStyle(Qt.RoundCap)
+                p.setPen(halo)
+                p.drawLine(a, b)
+            pen = QPen(QColor(tone), width)
+            pen.setStyle(Qt.DotLine if low else dash)
+            pen.setCapStyle(Qt.FlatCap)
+            p.setPen(pen)
+            p.drawLine(a, b)
+            if low:
+                # Say the height, because "you can fly over this" is the whole
+                # information content of a low wall and a dotted line alone
+                # does not carry a number.
+                p.setFont(QFont("Consolas", 7))
+                p.setPen(QPen(QColor(C_DIM)))
+                p.drawText(QPointF((a.x() + b.x()) / 2 + 4,
+                                   (a.y() + b.y()) / 2 - 3), f"{h:.1f} m")
+
+    def _walls_in_section(self, p, walls, top):
+        """Walls as a section drawing, in the elevations.
+
+        In plan a wall is a line and drawing it as one is right. In an
+        elevation it is not: projecting the same line puts every wall flat on
+        the floor, which is worse than useless next to a vertical slice of the
+        field, because the shadow has nothing casting it.
+
+        So each wall the section plane CROSSES is drawn as what a section
+        drawing would show - a bar standing from the floor to its own height,
+        at the point the cut passes through it. A wall the plane misses is
+        drawn as a faint tick at its own height instead: it is in the room,
+        it is not in this cut, and pretending either way would mislead.
+        """
+        f = self.spectrum if self.show_spectrum else None
+        cut = _num(f.get("at")) if f else None
+        vertical = self.mode == self.FRONT     # front cuts at a fixed y
+        for i, w in enumerate(walls):
+            width, dash, tone = self.WALL_STYLE.get(
+                str(w.get("material", "")).lower(),
+                (3.0, Qt.SolidLine, "#7E8A90"))
+            h = _num(w.get("height"), top)
+            x1, y1 = _num(w.get("x1")), _num(w.get("y1"))
+            x2, y2 = _num(w.get("x2")), _num(w.get("y2"))
+            # Where the cut crosses it, in the axis this elevation shows
+            # across the screen. FRONT shows x and cuts at a y; SIDE shows y
+            # and cuts at an x - so the roles of the two coordinates swap.
+            a0, a1 = (y1, y2) if vertical else (x1, x2)     # cut axis
+            s0, s1 = (x1, x2) if vertical else (y1, y2)     # screen axis
+            hit = cut is not None and min(a0, a1) - 1e-6 <= cut <= max(a0, a1) + 1e-6
+            if hit and abs(a1 - a0) > 1e-9:
+                s = s0 + (s1 - s0) * (cut - a0) / (a1 - a0)
+            elif hit:
+                s = s0
+            else:
+                s = (s0 + s1) / 2.0
+            def _pt(sv, zv):
+                return (self.to_screen(sv, cut if cut is not None else 0.0, zv)
+                        if vertical else
+                        self.to_screen(cut if cut is not None else 0.0, sv, zv))
+            pen = QPen(QColor(tone), (width + 2) if hit else 1.0)
+            pen.setStyle(Qt.SolidLine if hit else Qt.DotLine)
+            pen.setCapStyle(Qt.FlatCap)
+            if i in (self.selected_walls or ()):
+                halo = QPen(QColor(224, 138, 60, 150), width + 8)
+                p.setPen(halo)
+                p.drawLine(_pt(s, 0.0), _pt(s, h))
+            p.setPen(pen)
+            p.drawLine(_pt(s, 0.0), _pt(s, h))
+            if hit:
+                p.setFont(QFont("Consolas", 7))
+                p.setPen(QPen(QColor(C_DIM)))
+                p.drawText(_pt(s, h) + QPointF(4, -3), f"{h:.1f} m")
 
     def _bounds(self, p):
         """Arena walls. Solid boundaries are drawn as real surfaces; open ones
@@ -1874,8 +2548,15 @@ class ScanView(QWidget):
         strip_h = 46 if cam else 0
         plot_h = self.height() - top - strip_h - 18
         cx = self.width() / 2
-        cy = top + plot_h * 0.78
-        radius = min(self.width() / 2, plot_h * 0.78) - 14
+        # ANCHORED TO THE TOP, not to a fraction of whatever height the panel
+        # happens to have. Placing the vehicle at 78% of the available height
+        # was fine while the panel was short; in a tall dock it put the whole
+        # plot at the bottom with several hundred pixels of nothing above it -
+        # which is what was reported. The disc is as big as the panel allows
+        # and then sits directly under the header, wherever that leaves the
+        # bottom edge.
+        radius = min(self.width() / 2, plot_h / 1.32) - 14
+        cy = top + radius + 10
         if radius < 18:
             return
         scale = radius / rmax
@@ -2770,9 +3451,46 @@ class ShellPanel(QWidget):
             if self._cell_allows("JAM", scope=scope):
                 self._send_queue_line(cmd + "\n", cmd)
             return
+        # TXPOWER is JAM's friendly twin and is routed identically - it was
+        # added to the model and NOT to the terminal, so typing it dropped
+        # through to bash and did nothing but print "command not found".
+        # Scoped like launch/halt: a cell may only change its own side's
+        # transmitters, which is what makes it a command rather than a knob.
+        if head and head[0].upper() == "TXPOWER":
+            scope = head[1] if len(head) > 1 else None
+            if self._cell_allows("TXPOWER", scope=scope):
+                self._send_queue_line(cmd + "\n", cmd)
+                # SAY WHAT IT WILL AND WILL NOT DO. Reported: "TXPOWER gcs 60
+                # - why did that not over power a JAM jam1 power 8?" Because
+                # a link is scored on its WEAKER direction, and turning up one
+                # end leaves the other end exactly where it was. The physics
+                # was right; the application said nothing, and an operator who
+                # turns a knob to its stop and sees no change has been let
+                # down by the tool, not by the model.
+                # DEFERRED BY ONE FRAME, deliberately. Reading the last
+                # frame right now describes the power BEFORE this command,
+                # because the sim has not seen it yet - which made every
+                # report describe the previous command. The Console prints it
+                # on the next frame instead.
+                if self.console is not None:
+                    if getattr(self.console, "running", None) is None \
+                            and not (self.console.frames or []):
+                        for line in self.console.limiting_links(scope):
+                            self.out.appendPlainText("  " + line)
+                    else:
+                        self.console._power_report_for = (scope, self.out)
+            return
         if head and head[0].upper() == "LISTEN":
             if self._cell_allows("LISTEN"):
                 self._listen(head[1:])
+            return
+        # CUT is the one command that does NOT reach the model. It moves the
+        # section planes the viewport draws on, and that is all: no agent, no
+        # wall and no scene file is touched by it, which is why it is not
+        # written to the retask spool like JAM and TXPOWER are. Every cell may
+        # use it, because looking at something is not an action against a side.
+        if head and head[0].upper() == "CUT":
+            self._cut(head[1:])
             return
 
         full = (f"cd {self.cwd} 2>/dev/null; "
@@ -2793,6 +3511,58 @@ class ShellPanel(QWidget):
         if not proc.waitForStarted(3000):
             self.out.appendPlainText(
                 "[cannot start wsl.exe - is WSL installed and on PATH?]")
+
+    def _cut(self, args):
+        """CUT x|y|z <metres> | CUT on | CUT off | CUT
+
+        Move the section planes the viewport draws on, from the terminal -
+        the same grammar as JAM, so there is one way to talk to this
+        application rather than two.
+
+        IT IS A CAMERA COMMAND, NOT A WORLD ONE. Nothing it does reaches the
+        model: no agent moves, no wall changes, no file is written, and a run
+        in progress does not notice. That is why it is handled here instead
+        of being written to the retask spool - a command that only changes
+        what you can see should not travel down the same pipe as one that
+        changes what is true.
+        """
+        con = self.console
+        if con is None or not hasattr(con, "slice_sliders"):
+            self.out.appendPlainText("[CUT needs the main Console window]")
+            return
+        if not args:
+            on = getattr(con.viewport, "cut_away", False)
+            self.out.appendPlainText(
+                "cut " + ("ON" if on else "off") + "   "
+                + "  ".join(f"{a}={con.slice_at(a):.2f} m" for a in "xyz")
+                + "\n  CUT x|y|z <metres>   move a section plane"
+                  "\n  CUT on | CUT off     open or close the scene on them")
+            return
+        what = str(args[0]).lower()
+        if what in ("on", "off"):
+            con.toggle_cut(what == "on")
+            if getattr(con, "cut_button", None) is not None:
+                con.cut_button.setChecked(what == "on")
+            self.out.appendPlainText(f"cut {what}")
+            return
+        if what not in ("x", "y", "z") or len(args) < 2:
+            self.out.appendPlainText(
+                "CUT: usage CUT x|y|z <metres>, or CUT on / CUT off")
+            return
+        try:
+            v = float(args[1])
+        except ValueError:
+            self.out.appendPlainText(f"CUT: '{args[1]}' is not a number")
+            return
+        sl = con.slice_sliders[what]
+        lo, hi = sl.minimum() / 100.0, sl.maximum() / 100.0
+        if not (lo <= v <= hi):
+            self.out.appendPlainText(
+                f"CUT: {what} = {v:g} m is outside the scene "
+                f"({lo:.2f} to {hi:.2f} m)")
+            return
+        sl.setValue(int(round(v * 100)))
+        self.out.appendPlainText(f"cut {what} = {con.slice_at(what):.2f} m")
 
     def _listen(self, args):
         """LISTEN <MHz> | LISTEN band <MHz> | LISTEN off | LISTEN
@@ -3010,6 +3780,313 @@ def _load_agent_types():
 
 
 PLATFORM_DEFAULTS = _load_agent_types()
+
+
+# ---------------------------------------------------------------------------
+# The spectrum field: dB as a place
+# ---------------------------------------------------------------------------
+# ONE HUE, LIGHT TO DARK. Sequential magnitude gets a single hue and never a
+# rainbow - and in THIS application there is a second reason for the choice
+# that is stronger than the general rule. Colour here means SIDE: blue is
+# friendly, red is hostile, orange is broken. A spectrum field painted in
+# saturated blues and reds would read as "these are the blue bits" and it
+# means nothing of the kind. So the ramp is low-chroma slate-to-pale-cyan:
+# unmistakably a magnitude, unmistakably not a team, and recessive enough to
+# sit underneath the agents without competing with them.
+SPECTRUM_RAMP = [
+    (-115.0, (16, 21, 25)),
+    (-100.0, (24, 36, 45)),
+    (-85.0,  (39, 64, 78)),      # receiver sensitivity - the interesting line
+    (-70.0,  (58, 98, 116)),
+    (-55.0,  (87, 144, 159)),
+    (-40.0,  (134, 192, 201)),
+    (-20.0,  (195, 228, 231)),
+]
+SPECTRUM_SENSITIVITY_DBM = -85.0
+
+
+def spectrum_colour(dbm, lo=None, hi=None):
+    """The ramp, stretched across the range this field actually occupies.
+
+    A FIXED ABSOLUTE SCALE LOOKED RIGHT AND WAS USELESS. Anchoring the ramp to
+    -115 .. -20 dBm is defensible on paper and produces a flat wash in
+    practice, because a 20 m room with 20 dBm radios in it is loud EVERYWHERE:
+    the whole field sat in the top two stops and every contour vanished. The
+    physics was correct and the picture said nothing.
+
+    So the ramp is stretched to the data and the KEY CARRIES THE NUMBERS, which
+    is what makes two runs comparable - not a shared colour, a shared axis you
+    can read. Clamped to the 2nd and 98th percentile so that one cell a
+    quarter-metre from a transmitter cannot compress everything else into one
+    stop.
+    """
+    if dbm is None:
+        return None
+    if lo is None or hi is None or hi - lo < 1e-6:
+        lo, hi = SPECTRUM_RAMP[0][0], SPECTRUM_RAMP[-1][0]
+    u = max(0.0, min(1.0, (dbm - lo) / (hi - lo)))
+    span = SPECTRUM_RAMP[-1][0] - SPECTRUM_RAMP[0][0]
+    v = SPECTRUM_RAMP[0][0] + u * span
+    for (a_v, a_c), (b_v, b_c) in zip(SPECTRUM_RAMP, SPECTRUM_RAMP[1:]):
+        if v <= b_v:
+            t = (v - a_v) / max(b_v - a_v, 1e-9)
+            return QColor(*[int(a_c[i] + (b_c[i] - a_c[i]) * t)
+                            for i in range(3)])
+    return QColor(*SPECTRUM_RAMP[-1][1])
+
+
+# The colour ramp's fixed span, in dBm. ABSOLUTE, and that is the whole
+# point: a magnitude scale that renormalises to its own data cannot show a
+# change in magnitude. Anchored below the -85 dBm sensitivity line so the
+# dead ground is always the dark end, and open at the top so standing next
+# to a transmitter is always the bright end.
+SPECTRUM_SCALE_DBM = (-100.0, 10.0)
+
+
+def spectrum_range(field, absolute=True):
+    """(lo, hi) dBm for the ramp.
+
+    FIXED BY DEFAULT. It used to stretch to the 2nd and 98th percentile of
+    whatever was in the field, which is right for showing STRUCTURE and
+    exactly wrong for showing LEVEL: turn the fleet's power down by 20 dB and
+    every value drops by 20 dB, the ramp re-stretches, and the picture comes
+    out looking the same. Reported, and reasonably, as "the heatmap is not
+    affected by the power of the agent" - the numbers were changing and the
+    colours were not allowed to.
+
+    On a fixed scale, quieter looks quieter. The stretch is kept for the case
+    it was right for - reading the shape of a field whose absolute level does
+    not matter - but it is no longer what you get by default.
+    """
+    if absolute:
+        return SPECTRUM_SCALE_DBM
+    vals = sorted(v for row in field["dbm"] for v in row if v is not None)
+    if not vals:
+        return (-115.0, -20.0)
+    lo = vals[int(0.02 * (len(vals) - 1))]
+    hi = vals[int(0.98 * (len(vals) - 1))]
+    return (lo, hi) if hi - lo > 1.0 else (lo - 5.0, lo + 5.0)
+
+
+def spectrum_coverage(field, sensitivity=None):
+    """Fraction of the room where a receiver could actually hear something.
+
+    THE NUMBER THAT ACTUALLY MOVES WHEN YOU CHANGE POWER. dB are a ratio and
+    hard to feel; "62% of the floor is above sensitivity" is not. It is also
+    the operational question - a wall's attenuation in dB does not change when
+    you turn the power down, but whether the far side of it is still usable
+    very much does.
+    """
+    lim = SPECTRUM_SENSITIVITY_DBM if sensitivity is None else sensitivity
+    vals = [v for row in field["dbm"] for v in row if v is not None]
+    if not vals:
+        return 0.0
+    return sum(1 for v in vals if v >= lim) / float(len(vals))
+
+
+def contour_segments(grid, level):
+    """Marching squares: the line segments where the field crosses `level`.
+
+    Returned in GRID coordinates (fractional cell indices), so the caller can
+    project them however it likes. Cells with a missing corner are skipped -
+    a contour through a hole in the data would be an invention.
+    """
+    segs = []
+    ny = len(grid)
+    nx = len(grid[0]) if ny else 0
+    for j in range(ny - 1):
+        for i in range(nx - 1):
+            c = [grid[j][i], grid[j][i + 1], grid[j + 1][i + 1], grid[j + 1][i]]
+            if any(v is None for v in c):
+                continue
+            corners = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)]
+            cross = []
+            for k in range(4):
+                v1, v2 = c[k], c[(k + 1) % 4]
+                if (v1 < level) == (v2 < level):
+                    continue
+                u = (level - v1) / (v2 - v1)
+                (x1, y1), (x2, y2) = corners[k], corners[(k + 1) % 4]
+                cross.append((x1 + (x2 - x1) * u, y1 + (y2 - y1) * u))
+            # Two crossings is the ordinary case. Four is the saddle, where
+            # the connection is genuinely ambiguous; joining them in order is
+            # the standard resolution and any error is one cell wide.
+            for k in range(0, len(cross) - 1, 2):
+                segs.append((cross[k], cross[k + 1]))
+    return segs
+
+
+class WallDialog(QDialog):
+    """What are these walls made of?
+
+    Opens on a click or a swept box, and applies to EVERY selected wall - so
+    re-materialling a corridor is one action rather than eight. A material
+    sets two things at once, and they are not correlated: what the radio pays
+    to get through it, and how well a lidar sees it. Glass is nearly
+    transparent AND nearly invisible; metal is opaque to radio and bright to a
+    lidar. That is the whole reason this dialog exists rather than a single
+    "hardness" slider.
+
+    THE FILE STILL DECIDES, and this does not overwrite it. A scene ships its
+    materials; this changes the world THIS RUN uses, the way the fleet builder
+    changes a fleet without editing agents/. Keep it with Save scene as...
+    """
+
+    # Kept in step with MATERIALS in tools/stub_telemetry.py, which carries the
+    # provenance. Shown here as a summary so the choice is informed - the dB is
+    # measured (Wilson 2002 E10589 Table 3), the reflectance is a declared free
+    # parameter, and the dialog says which is which rather than presenting two
+    # numbers of equal standing.
+    BLURB = {
+        "plasterboard": "0.49 dB   ·  reflectance 0.70   —  the ordinary "
+                        "partition. Barely there for radio, easy for a lidar",
+        "glass":        "0.50 dB   ·  reflectance 0.08   —  nearly transparent "
+                        "AND nearly invisible. A lidar car with no map drives "
+                        "into it",
+        "wood":         "2.79 dB   ·  reflectance 0.45   —  a door, a stud "
+                        "partition, furniture",
+        "brick":        "4.44 dB   ·  reflectance 0.35   —  a real internal "
+                        "wall",
+        "concrete":     "6.71 dB   ·  reflectance 0.30   —  structural. Two of "
+                        "these and a link is in trouble",
+        "metal":        "opaque    ·  reflectance 0.60   —  no way through at "
+                        "all. The signal must go round the end (ITU-R P.526 "
+                        "diffraction), which costs about 6 dB at a graze",
+    }
+
+    def __init__(self, walls, indices, parent=None):
+        super().__init__(parent)
+        self.walls, self.indices = walls, sorted(indices)
+        n = len(self.indices)
+        self.setWindowTitle(f"Material — {n} wall{'s' if n != 1 else ''}")
+        lay = QVBoxLayout(self)
+
+        head = QLabel(self._describe())
+        head.setObjectName("hint")
+        head.setWordWrap(True)
+        lay.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Material"))
+        self.mat = QComboBox()
+        for m in self.BLURB:
+            self.mat.addItem(m)
+        cur = str((self.walls[self.indices[0]] or {}).get("material", ""))
+        i = self.mat.findText(cur.lower())
+        if i >= 0:
+            self.mat.setCurrentIndex(i)
+        self.mat.currentTextChanged.connect(self._blurb)
+        row.addWidget(self.mat, 1)
+        lay.addLayout(row)
+
+        self.note = QLabel("")
+        self.note.setObjectName("hint")
+        self.note.setWordWrap(True)
+        self.note.setMinimumHeight(48)
+        lay.addWidget(self.note)
+        self._blurb(self.mat.currentText())
+
+        # HEIGHT IS HERE because it is the ground/air distinction and nothing
+        # else expresses it: a 1.2 m partition stops a car and a link between
+        # two cars, and a drone two metres up does not know it is there.
+        hrow = QHBoxLayout()
+        hrow.addWidget(QLabel("Height"))
+        self.height = QDoubleSpinBox()
+        self.height.setRange(0.0, 50.0)
+        self.height.setDecimals(2)
+        self.height.setSuffix(" m")
+        self.height.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.height.setValue(_num((self.walls[self.indices[0]] or {})
+                                  .get("height"), 3.0))
+        self.height.setToolTip("A wall shorter than an agent's altitude does "
+                               "not block it - not its radio, not its lidar, "
+                               "not its wheels.")
+        hrow.addWidget(self.height)
+        hrow.addWidget(QLabel("Thickness"))
+        self.thick = QDoubleSpinBox()
+        self.thick.setRange(0.01, 2.0)
+        self.thick.setDecimals(3)
+        self.thick.setSuffix(" m")
+        self.thick.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.thick.setValue(_num((self.walls[self.indices[0]] or {})
+                                 .get("thickness"), 0.1))
+        self.thick.setToolTip("Collision only. The radio model treats a wall "
+                              "as one traversal at the material's loss, not "
+                              "as a slab.")
+        hrow.addWidget(self.thick)
+        hrow.addStretch(1)
+        lay.addLayout(hrow)
+
+        # THE OVERRIDE, and it is here because the honest figure often is not
+        # the material's. Wilson measured single thin SAMPLES; a built stud
+        # partition is two boards, a cavity, studs and cabling and runs several
+        # dB where one board runs half of one. Typing the real number is
+        # better than pretending a material name covers it.
+        orow = QHBoxLayout()
+        self.over = QCheckBox("Override loss")
+        orow.addWidget(self.over)
+        self.rf = QDoubleSpinBox()
+        self.rf.setRange(0.0, 300.0)
+        self.rf.setDecimals(2)
+        self.rf.setSuffix(" dB")
+        self.rf.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.rf.setEnabled(False)
+        self.over.toggled.connect(self.rf.setEnabled)
+        w0 = self.walls[self.indices[0]] or {}
+        if w0.get("rf_db") is not None:
+            self.over.setChecked(True)
+            self.rf.setValue(_num(w0.get("rf_db")))
+        orow.addWidget(self.rf)
+        orow.addStretch(1)
+        lay.addLayout(orow)
+        hint = QLabel("A material is a SAMPLE measurement, not a built wall. "
+                      "A real stud partition is several dB where a single "
+                      "board is half of one — override it and say so in the "
+                      "scene.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton(f"Apply to {n}")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        lay.addLayout(btns)
+        self.resize(520, 340)
+
+    def _describe(self):
+        mats = {str((self.walls[i] or {}).get("material", "?"))
+                for i in self.indices}
+        total = sum(math.dist(((self.walls[i] or {}).get("x1", 0),
+                               (self.walls[i] or {}).get("y1", 0)),
+                              ((self.walls[i] or {}).get("x2", 0),
+                               (self.walls[i] or {}).get("y2", 0)))
+                    for i in self.indices)
+        return (f"{len(self.indices)} selected, {total:.1f} m of wall, "
+                f"currently {', '.join(sorted(mats))}.")
+
+    def _blurb(self, name):
+        self.note.setText(self.BLURB.get(name, ""))
+
+    def apply_to(self):
+        """Write the choice into every selected wall."""
+        for i in self.indices:
+            w = self.walls[i]
+            w["material"] = self.mat.currentText()
+            w["height"] = round(self.height.value(), 3)
+            w["thickness"] = round(self.thick.value(), 4)
+            w["rf_db"] = round(self.rf.value(), 3) if self.over.isChecked() \
+                else None
+            # The reflectance follows the material unless a scene set one
+            # deliberately; clearing it here is what makes the dropdown
+            # actually take effect for the lidar as well as the radio.
+            w["reflectance"] = None
+        return len(self.indices)
 
 
 class CustomFleetDialog(QDialog):
@@ -3710,7 +4787,7 @@ def _sweep_module():
         return _SWEEP_MOD
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "deadband_sweep", str(REPO_ROOT / "tools" / "sweep.py"))
+        "commsev_sweep", str(REPO_ROOT / "tools" / "sweep.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     _SWEEP_MOD = mod
@@ -3774,16 +4851,29 @@ class ResultPlot(QLabel):
             self.render_chart()
 
     def series(self):
-        """{(authority, routing): [(x, mean y), ...]} - seeds averaged."""
-        acc = {}
+        """{(authority, routing): [(x, mean y), ...]} - seeds averaged.
+
+        THE SILENT-JAMMER CONTROL IS NOT A COORDINATE. Experiments write
+        jam_rel_db = -999 to mean "the jammer is switched off" - a control
+        condition, not a power a thousand decibels below the fleet. Plotted
+        as a number it sets the axis minimum to -999 and squashes every real
+        cell into the last two percent of the chart, which is exactly what
+        the intercept plot looked like. It is split out here and drawn as a
+        labelled control point off the left end of the axis instead.
+        """
+        acc, ctrl = {}, {}
         for r in self.rows:
             try:
                 x = float(r.get("jam_rel_db"))
                 y = float(r.get(self.metric))
             except (TypeError, ValueError):
                 continue
-            acc.setdefault((r.get("authority"), r.get("routing")), {}) \
-               .setdefault(x, []).append(y)
+            key = (r.get("authority"), r.get("routing"))
+            if x <= JAM_OFF_DB / 2:
+                ctrl.setdefault(key, []).append(y)
+                continue
+            acc.setdefault(key, {}).setdefault(x, []).append(y)
+        self.control = {k: sum(v) / len(v) for k, v in ctrl.items()}
         return {k: sorted((x, sum(v) / len(v)) for x, v in d.items())
                 for k, d in acc.items()}
 
@@ -3859,6 +4949,24 @@ class ResultPlot(QLabel):
         for x in sorted(set(xs)):
             p.setPen(QPen(QColor(C_DIM)))
             p.drawText(int(sx(x)) - 14, int(T + h + 18), f"{x:+.0f} dB")
+        # THE CONTROL, off the end of the axis and visibly detached from it.
+        # A dotted rule separates it, because "jammer off" is a different
+        # condition and not a point on the power scale - joining it to the
+        # curve would draw a line across a discontinuity that does not exist.
+        ctrl = getattr(self, "control", None)
+        if ctrl:
+            cxp = L - 26
+            p.setPen(QPen(QColor("#3A4247"), 1.0, Qt.DotLine))
+            p.drawLine(int(cxp + 12), int(T), int(cxp + 12), int(T + h))
+            p.setPen(QPen(QColor(C_DIM)))
+            p.drawText(int(cxp) - 12, int(T + h + 18), "off")
+            for (auth, route), v in sorted(ctrl.items()):
+                c = QColor("#E08A3C") if self.highlight == (auth, route) \
+                    else QColor(self.AUTH_COLOUR.get(auth, "#AAAAAA"))
+                p.setPen(QPen(c, 2.0))
+                p.setBrush(QBrush(c))
+                p.drawEllipse(QPointF(cxp, sy(v)), 3.2, 3.2)
+            p.setBrush(Qt.NoBrush)
         p.drawText(int(L), int(T + h + 38),
                    "JAMMER ADVANTAGE  P_j / P_t   (dimensionless: the "
                    "absolute powers cancel)")
@@ -3913,6 +5021,11 @@ class ExperimentWindow(QDialog):
         self.run_btn = QPushButton("Run")
         self.run_btn.clicked.connect(self.start)
         top.addWidget(self.run_btn)
+        # Subprocess state for the grid - see _start_subprocess. Held here so
+        # a dialog that never ran one still answers for them.
+        self._sweep_proc = None
+        self._sweep_tail = ""
+        self._sweep_outdir = None
         lay.addLayout(top)
 
         mrow = QHBoxLayout()
@@ -3935,12 +5048,37 @@ class ExperimentWindow(QDialog):
                 ("worst_sinr_db", "worst link SINR (dB)"),
                 ("worst_pdr", "worst link packet delivery"),
                 ("arrived", "vehicles that arrived"),
-                ("ended_s", "run length (s)")):
+                ("ended_s", "run length (s)"),
+                # WHAT RED ACTUALLY HEARD. The intercept experiment produced
+                # these and nothing plotted them, so the answer to the
+                # question it was built to ask was only ever in the CSV.
+                # `orders_sent` is here as a metric in its own right because
+                # it is the DENOMINATOR: a low intercepted fraction means
+                # "could not hear it" or "there was nothing to hear", and
+                # only the count separates the two.
+                # IS THE FLEET STILL A FLEET? Neither of these shows up in
+                # a pass rate, and both are what a formation is FOR.
+                ("station_err_m",
+                 "formation - mean distance off station (m)"),
+                ("centre_err_m",
+                 "formation - how wrong the fleet's idea of its own centre is (m)"),
+                ("intercept_frac",
+                 "intercepted - fraction of blue's orders red heard"),
+                ("orders_sent",
+                 "orders transmitted by blue (the denominator)"),
+                ("orders_heard_any",
+                 "orders heard by at least one listener")):
             self.metric_combo.addItem(lab, key)
+            # The same definition the Results table shows, on the item that
+            # chooses it - so what a metric means is legible at the moment
+            # you pick it, not only after it has been plotted.
+            self.metric_combo.setItemData(self.metric_combo.count() - 1,
+                                          metric_help(key), Qt.ToolTipRole)
         self.metric_combo.setToolTip(
             "Which metric the headline chart draws against jammer advantage. "
             "Every one of them, per architecture, is also in the Results tab "
-            "where panes can be split and series overlaid.")
+            "where panes can be split and series overlaid.\n"
+            "Hover an entry for what it measures.")
         self.metric_combo.activated.connect(
             lambda _i: self._draw_summary(getattr(self, "_shown", self.rows)))
         mrow.addWidget(self.metric_combo, 1)
@@ -4073,13 +5211,33 @@ class ExperimentWindow(QDialog):
         self.bar.setRange(0, n)
         self._cfg, self._names, self._exp_path = cfg, names, exp_path
 
+        # OUT OF THE GUI THREAD, ON EVERY CORE.
+        #
+        # This used to run the whole grid in-process, on the GUI thread, with
+        # a processEvents() every three cells. The comment justifying it said
+        # "81 runs take two seconds", and that was true of three cars on a
+        # short mission. It stopped being true: eight cars over a 200 m
+        # corridor is about fourteen seconds a cell, so the window froze for
+        # forty-two seconds at a time and Windows painted it Not Responding -
+        # reported, and correctly, as the experiment not working.
+        #
+        # tools/sweep.py already has a CLI with a worker pool, so the fix is
+        # to run the tool rather than to re-implement it here: one QProcess,
+        # every core, progress parsed from its own output, and a window that
+        # stays alive and can be cancelled. QProcess is what the Console
+        # already uses for the run and the terminals, so it is the mechanism
+        # this application is known to survive on Windows.
+        if exp_path is not None and self._start_subprocess(exp_path, n):
+            return
+        # FALLBACK: no interpreter, or the process would not start. Same work,
+        # in this thread, pumping events EVERY cell rather than every third -
+        # slow and single-cored, but it finishes and it repaints.
         rows = []
         for i, cell in enumerate(cells, 1):
             rows.append(sweep.run_one((cfg, cell, False)))
             self.bar.setValue(i)
-            self.bar.setFormat(f"%v / %m runs")
-            if i % 3 == 0 or i == n:
-                QApplication.processEvents()
+            self.bar.setFormat("%v / %m runs (single core - close nothing)")
+            QApplication.processEvents()
         rows.sort(key=lambda r: r.get("cell", ""))
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -4110,6 +5268,103 @@ class ExperimentWindow(QDialog):
         self.outdir = outdir
         self._csv_path = csv_path
         self.load_csv(csv_path)
+
+    # -- running the grid out of the GUI thread -----------------------------
+    def _start_subprocess(self, exp_path, n):
+        """Run tools/sweep.py as a child process. True if it started.
+
+        Returns immediately; _sweep_done() picks the results up when the
+        child exits. Everything the dialog needs afterwards is on disk, which
+        is the point: the child writes the same results.csv the in-process
+        path writes, so nothing downstream knows the difference.
+        """
+        import shutil
+        exe = sys.executable or shutil.which("python3") or shutil.which("python")
+        if not exe:
+            return False
+        script = REPO_ROOT / "tools" / "sweep.py"
+        if not script.exists():
+            return False
+        # Cleared, or a second run that fails would load the FIRST run's
+        # results and look as though it had succeeded.
+        self._sweep_outdir = None
+        self._sweep_tail = ""
+        self._sweep_rows_expected = n
+        self.bar.setRange(0, n)
+        self.bar.setValue(0)
+        self.bar.setFormat("starting %m runs on every core...")
+        self._sweep_proc = QProcess(self)
+        self._sweep_proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._sweep_proc.readyReadStandardOutput.connect(self._sweep_output)
+        self._sweep_proc.finished.connect(self._sweep_done)
+        self._sweep_tail = ""
+        self._sweep_proc.setWorkingDirectory(str(REPO_ROOT))
+        self._sweep_proc.start(exe, ["-u", str(script), str(exp_path)])
+        if not self._sweep_proc.waitForStarted(4000):
+            self._sweep_proc = None
+            return False
+        # CANCELLABLE, because a grid you cannot stop is a grid you cannot
+        # afford to start. The Run button becomes Stop for the duration.
+        self.run_btn.setEnabled(True)
+        self.run_btn.setText("Stop")
+        try:
+            self.run_btn.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        self.run_btn.clicked.connect(self._sweep_cancel)
+        return True
+
+    def _sweep_output(self):
+        """Parse the tool's own progress lines: '  12/36  (123.4s)'."""
+        if self._sweep_proc is None:
+            return
+        text = bytes(self._sweep_proc.readAllStandardOutput()).decode(
+            errors="replace")
+        self._sweep_tail += text
+        for line in text.splitlines():
+            line = line.strip()
+            m = re.match(r"^(\d+)\s*/\s*(\d+)\b", line)
+            if m:
+                done, total = int(m.group(1)), int(m.group(2))
+                self.bar.setRange(0, total)
+                self.bar.setValue(done)
+                self.bar.setFormat(f"%v / %m runs   {line[m.end():].strip()}")
+            elif line.startswith("->"):
+                self._sweep_outdir = line[2:].strip()
+
+    def _sweep_cancel(self):
+        if self._sweep_proc is not None:
+            self.bar.setFormat("stopping...")
+            self._sweep_proc.kill()
+
+    def _sweep_done(self, code=0, _status=None):
+        proc, self._sweep_proc = self._sweep_proc, None
+        self.run_btn.setText("Run")
+        try:
+            self.run_btn.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        self.run_btn.clicked.connect(self.start)
+        self.run_btn.setEnabled(True)
+        out = getattr(self, "_sweep_outdir", None)
+        if code != 0 and not out:
+            self.bar.setFormat(f"stopped (exit {code})")
+            if self.console is not None and self._sweep_tail.strip():
+                self.console.say("sweep output:\n" + self._sweep_tail[-2000:])
+            return
+        path = Path(out) if out else None
+        if path is not None and path.is_dir():
+            path = path / "results.csv"
+        if path is None or not path.exists():
+            self.bar.setFormat("finished, but no results file was written")
+            if self.console is not None:
+                self.console.say("sweep output:\n" + self._sweep_tail[-2000:])
+            return
+        self.outdir = path.parent
+        self._csv_path = path
+        if self.console is not None:
+            self.console.say(f"experiment finished -> {path}")
+        self.load_csv(path)
 
     # -- results -----------------------------------------------------------
     def load_csv(self, path):
@@ -4235,13 +5490,35 @@ class ExperimentWindow(QDialog):
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
         self.table.setRowCount(len(rows))
+        # EVERY COLUMN SAYS WHAT IT IS. A results table whose headings are
+        # short identifiers is only readable by whoever wrote them, and the
+        # whole point of this repo is that somebody else picks it up. The
+        # glossary lives in one place (METRIC_HELP) and is used by the header
+        # tooltips here and by the metric chooser above.
+        for c, key in enumerate(cols):
+            head = self.table.horizontalHeaderItem(c)
+            if head is not None:
+                head.setToolTip(metric_help(key))
         for r, row in enumerate(rows):
             for c, key in enumerate(cols):
                 it = QTableWidgetItem(str(row.get(key, "")))
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                it.setToolTip(metric_help(key))
                 if key == "authority":
                     it.setForeground(QBrush(QColor(
                         ResultPlot.AUTH_COLOUR.get(row.get(key), "#AAAAAA"))))
+                # The silent-jammer control reads as a nonsense power unless
+                # the cell says what it is.
+                if key == "jam_rel_db":
+                    try:
+                        if float(row.get(key)) <= JAM_OFF_DB / 2:
+                            it.setText("off")
+                            it.setToolTip("The CONTROL condition: the jammer "
+                                          "is silent. Not a power - it is "
+                                          "what this cell measures with "
+                                          "nothing attacking it.")
+                    except (TypeError, ValueError):
+                        pass
                 self.table.setItem(r, c, it)
         self.table.resizeColumnsToContents()
 
@@ -4253,6 +5530,7 @@ class ExperimentWindow(QDialog):
         if not rows or self.console is None:
             return
         try:
+            self._offer_run_metrics(rows)
             frames = self.console.sweep_frames(rows)
             self.summary.frames = frames
             self.summary.live = False
@@ -4274,6 +5552,34 @@ class ExperimentWindow(QDialog):
         except Exception as exc:                       # noqa: BLE001
             if self.console is not None:
                 self.console.say(f"summary chart: {exc}")
+
+    def _offer_run_metrics(self, rows):
+        """Add whatever THIS run produced that the fixed list cannot name.
+
+        Per-listener interception columns are named after the listener
+        (`intercept_frac_ear_near`), so they do not exist until an experiment
+        with listeners in it has been run. Discovered from the results rather
+        than hard-coded, which also means a red fleet with six ears offers six
+        curves without anyone editing this file.
+        """
+        fixed = {self.metric_combo.itemData(i)
+                 for i in range(self.metric_combo.count())}
+        pretty = {"intercept_frac": "intercepted",
+                  "intercept_sinr": "how well heard (SINR dB)",
+                  "first_intercept_s": "first heard at (s)",
+                  "heard": "orders heard"}
+        found = []
+        for r in rows:
+            for k in r:
+                if k in fixed or k in found:
+                    continue
+                for pre, lab in pretty.items():
+                    if k.startswith(pre + "_"):
+                        found.append(k)
+                        who = k[len(pre) + 1:]
+                        self.metric_combo.addItem(f"{lab} - {who}", k)
+                        break
+        return found
 
     def _light_row(self, row, _col=0):
         """Light this row's configuration on the summary chart."""
@@ -4299,7 +5605,7 @@ class ExperimentWindow(QDialog):
         try:
             import importlib.util
             spec = importlib.util.spec_from_file_location(
-                "deadband_plot", str(REPO_ROOT / "tools" / "plot_results.py"))
+                "commsev_plot", str(REPO_ROOT / "tools" / "plot_results.py"))
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             # The filter applies here too: the chart you export is the chart
@@ -4483,7 +5789,7 @@ class ExperimentWindow(QDialog):
 class Console(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Deadband Console")
+        self.setWindowTitle("CommsEv Console")
         self.resize(1420, 880)
         self.report = None
         self.doc = None          # the round-trip document we edit and save
@@ -4514,6 +5820,7 @@ class Console(QMainWindow):
         self.viewport.on_drop = self._agent_dropped
         self.viewport.on_point_moved = self._point_dragged
         self.viewport.on_selection = self._selection_changed
+        self.viewport.on_wall_pick = self._walls_picked
         self._build_centre()
         self._build_docks()
         self._build_menu()
@@ -4581,6 +5888,83 @@ class Console(QMainWindow):
         c2.clicked.connect(
             lambda on: (setattr(self.viewport, "show_c2", on),
                         self.viewport.update()))
+        spec = tool("\u25a6", "SPECTRUM: what a receiver would measure at every "
+                             "point on one frequency, as dBm.\n"
+                             "Contours every 10 dB, with the receiver "
+                             "sensitivity line picked out - inside it there is "
+                             "enough power to decode what is out there.\n"
+                             "Computed on demand, not per frame: press again "
+                             "to refresh after anything moves. The band comes "
+                             "from the Comms band strip.", None)
+        spec.setCheckable(True)
+        spec.clicked.connect(self.toggle_spectrum)
+        wave = tool("⧖", "WAVEFRONT: each transmitter's reach as equal-"
+                              "power rings, blue for friendly and red for "
+                              "hostile.\n"
+                              "One ring every 6 dB out to receiver "
+                              "sensitivity, so a blue ring and a red ring at "
+                              "the same level mean the same thing. A jammer's "
+                              "rings are dashed.\n"
+                              "Shaded ground is where the hostile signal is "
+                              "the louder one - the contested area.\n"
+                              "Computed on demand like the spectrum: press "
+                              "again to refresh.", None)
+        wave.setCheckable(True)
+        wave.clicked.connect(self.toggle_wavefront)
+
+        # THE SECTION PLANES, as a drawing office cuts them - three of them,
+        # one per axis, all live at once.
+        #
+        # One slider that changed meaning with the view was the wrong object.
+        # A section is a property of the SCENE, not of the camera looking at
+        # it: X, Y and Z are three independent cuts, and you want to set all
+        # three and then walk round the result. Tying the single slider to the
+        # active view also meant it did nothing in ISO, which is the one view
+        # where cutting into a building is most of the point.
+        #
+        # So: three sliders, always live, in every view. The spectrum reads
+        # whichever one matches the plane it is cutting; the cut toggle beside
+        # them uses all three to open the scene up.
+        cut = tool("✂", "CUT AWAY on the section planes.\n"
+                             "Hides the walls below the Z plane and ghosts "
+                             "anything past the X and Y planes, so you can "
+                             "see inside a building in any view - including "
+                             "ISO.\n"
+                             "The sliders set where the cuts are; this says "
+                             "whether the scene is opened on them.", None)
+        cut.setCheckable(True)
+        cut.clicked.connect(self.toggle_cut)
+        # Held so the CUT command can keep the button in step with itself -
+        # a toolbar that disagrees with the terminal is worse than either.
+        self.cut_button = cut
+        self.slice_sliders, self.slice_reads = {}, {}
+        for axis, lo, hi, start in (("x", -10.0, 10.0, 0.0),
+                                    ("y", -10.0, 10.0, 0.0),
+                                    ("z", 0.0, 3.0, 0.2)):
+            sl = QSlider(Qt.Horizontal)
+            sl.setFixedWidth(74)
+            sl.setRange(int(lo * 100), int(hi * 100))
+            sl.setValue(int(start * 100))
+            sl.setToolTip(
+                {"x": "The X section plane - a cut across the room, seen "
+                      "edge-on in Side view.",
+                 "y": "The Y section plane - a cut along the room, seen "
+                      "edge-on in Front view.",
+                 "z": "The Z section plane - the HEIGHT of the horizontal "
+                      "slice, floor to ceiling. A slice above a half-height "
+                      "wall does not see it at all."}[axis]
+                + "\nThe spectrum recomputes on this plane when you let go "
+                  "of the handle; Cut away opens the scene on it.")
+            sl.valueChanged.connect(self._slice_moved)
+            sl.sliderReleased.connect(self._slice_released)
+            rd = QLabel(f"{axis} {start:5.2f}")
+            rd.setObjectName("hint")
+            rd.setFont(QFont("Consolas", 8))
+            self.slice_sliders[axis] = sl
+            self.slice_reads[axis] = rd
+            row.addWidget(sl)
+            row.addWidget(rd)
+
         axes_btn = tool("\u22a2", "Show measured axes with metre ticks", None)
         axes_btn.setCheckable(True)
         axes_btn.clicked.connect(
@@ -4640,7 +6024,7 @@ class Console(QMainWindow):
         self.source_combo.setMinimumWidth(130)
         self.source_combo.setToolTip(
             "Stub: a local process, nothing to install.\n"
-            "ROS 2 bridge: connect to deadband_ros running in WSL.")
+            "ROS 2 bridge: connect to commsev_ros running in WSL.")
         row.addWidget(self.source_combo)
         row.addStretch(1)
 
@@ -4716,7 +6100,69 @@ class Console(QMainWindow):
         lay.addWidget(self.stack, 1)
         lay.addWidget(self.band_strip)
         lay.addWidget(tl)
-        self.setCentralWidget(holder)
+
+        # THE APP IS THREE APPLICATIONS THAT SHARE A SCHEMA, not three
+        # applications. Simulation is everything the Console has always been.
+        # Scene and Agent are the editors - build a world, build a vehicle -
+        # and they are stubs today, deliberately visible ones.
+        #
+        # Separate executables would mean three readers of the same YAML, and
+        # they WILL drift: one gains a field, a scene saved in the builder
+        # fails to load in the Console, and the bug looks like bad data when
+        # it is duplicated code. One window, one schema, one place a new field
+        # has to be added.
+        self.app_stack = QStackedWidget()
+        self.app_stack.addWidget(holder)
+        for name, why in (
+            ("Scene",
+             "Draw walls, set what they are made of, place the points a "
+             "mission is sent to, and save a real scenes/*.yaml.\n\n"
+             "Most of the machinery already exists in Simulation: walls are "
+             "selectable, the material dialog works, and the viewport knows "
+             "how to snap to whole metres. What is missing is DRAWING - "
+             "click-drag to create, delete, and Save scene as..."),
+            ("Agent",
+             "Build a vehicle: dimensions, performance, which sensors and "
+             "which radios, and save a real agents/*.yaml.\n\n"
+             "The fleet builder in Simulation already COMPOSES agents into a "
+             "fleet. This is the layer below it - the hardware itself, which "
+             "today is written by hand in YAML and should not be."),
+        ):
+            page = QWidget()
+            # A bare QWidget promoted into the central stack paints the
+            # platform's default window colour, not the app's. Every other
+            # surface in the Console is dark because it sits inside something
+            # the global stylesheet names; this one does not, so it says so
+            # itself. Without this the Scene page comes up white.
+            page.setObjectName("stubpage")
+            page.setAutoFillBackground(True)
+            page.setStyleSheet(
+                f"QWidget#stubpage {{ background: {C_BG}; }} "
+                f"QWidget#stubpage QLabel {{ background: transparent; }}")
+            pl = QVBoxLayout(page)
+            pl.addStretch(1)
+            t = QLabel(f"{name} builder")
+            t.setAlignment(Qt.AlignCenter)
+            t.setStyleSheet(f"font-size: 22px; color: {C_DIM};")
+            pl.addWidget(t)
+            n = QLabel("NOT BUILT YET")
+            n.setAlignment(Qt.AlignCenter)
+            n.setStyleSheet(f"font-size: 13px; letter-spacing: 3px; "
+                            f"color: {C_WARN};")
+            pl.addWidget(n)
+            d = QLabel(why)
+            d.setAlignment(Qt.AlignCenter)
+            d.setWordWrap(True)
+            d.setObjectName("hint")
+            d.setMaximumWidth(560)
+            row = QHBoxLayout()
+            row.addStretch(1)
+            row.addWidget(d)
+            row.addStretch(1)
+            pl.addLayout(row)
+            pl.addStretch(2)
+            self.app_stack.addWidget(page)
+        self.setCentralWidget(self.app_stack)
 
     def _build_docks(self):
         # Left: the three-tab workflow. Left to right is the order you build a
@@ -5041,7 +6487,7 @@ class Console(QMainWindow):
         # one you had to go looking for. The run COUNT stays down there with
         # the axes, because that is arithmetic about the axes and it belongs
         # beside them.
-        expb = QPushButton("Run the experiment...")
+        expb = QPushButton("Run an experiment...")
         expb.setToolTip("Sweep, then double-click any result to watch that "
                         "exact run play out.")
         expb.clicked.connect(self.open_experiment)
@@ -5105,7 +6551,12 @@ class Console(QMainWindow):
         self.lbl_runs.setMinimumHeight(
             3 * self.lbl_runs.fontMetrics().height() + 4)
         elay.addWidget(self.lbl_runs)
-        slay.addWidget(self.exp_box)
+        # THE EXPERIMENT PANEL GOES FIRST, above the scene and the fleet.
+        # In experiment mode the run button is the thing you came for and the
+        # composition below it is the detail; putting the panel last meant
+        # scrolling past four collapsed boxes to reach it. `insertWidget` at
+        # the row after the mode picker rather than `addWidget` at the end.
+        slay.insertWidget(slay.indexOf(self.mode_combo) + 1, self.exp_box)
         self.exp_box.setVisible(False)
 
         # The scene tree (arena + background conditions) lives under the
@@ -5339,6 +6790,23 @@ class Console(QMainWindow):
         # nothing is composed yet and pressing it can only produce a refusal.
         # The shortcut stays, as an action on the window with no menu to
         # appear in, because Ctrl+E costs nothing and skips the trip.
+        # THE THREE APPLICATIONS, as menus rather than tabs, because they are
+        # not three views of one run - they are three different jobs, and a
+        # tab strip would put them beside Setup and Results as though they
+        # were peers of a tab. Clicking one swaps the whole window.
+        self._app_menus = {}
+        for i, name in enumerate(("&Simulation", "Sc&ene", "&Agent")):
+            menu = self.menuBar().addMenu(name)
+            plain = name.replace("&", "")
+            act = QAction(f"Open {plain}", self)
+            act.triggered.connect(lambda _c=False, k=i: self.show_app(k))
+            menu.addAction(act)
+            self._app_menus[plain] = menu
+            # The menu title is itself the button: clicking it opens a
+            # one-item menu, which is a click too many. Make the menu's own
+            # press switch the app.
+            menu.aboutToShow.connect(lambda k=i: self.show_app(k))
+
         a = QAction("Run an experiment...", self)
         a.setShortcut("Ctrl+E")
         a.setShortcutContext(Qt.ApplicationShortcut)
@@ -5971,6 +7439,10 @@ class Console(QMainWindow):
     SWEEP_CONFIG_COLS = ("authority", "routing", "formation", "spacing",
                          "jam_rel_db", "seed")
 
+    # Bookkeeping, not measurement. Kept out of the plottable set so a chart
+    # cannot offer you the wall-clock time it took to compute a result.
+    NOT_A_METRIC = ("cell", "error", "wall_s", "jam_dbm", "runs_agents")
+
     @staticmethod
     def _series_id(row, varying):
         """A legend name from the configuration, short enough to read."""
@@ -5990,8 +7462,14 @@ class Console(QMainWindow):
         That one substitution is what makes every plot in this application
         work on a sweep without a line of new drawing code.
         """
+        # The silent-jammer control is dropped from the swept axis for the
+        # same reason it is off the chart's x scale: it is a condition, not a
+        # power, and -999 on an axis of decibels destroys the axis. It is
+        # still in the Results table, where it belongs and reads correctly.
         xs = sorted({float(r[xkey]) for r in rows
-                     if r.get(xkey) not in (None, "")})
+                     if r.get(xkey) not in (None, "")
+                     and not (xkey == "jam_rel_db"
+                              and float(r[xkey]) <= JAM_OFF_DB / 2)})
         # ONE SERIES PER CONFIGURATION THAT ACTUALLY VARIES. The series used
         # to be named authority_routing, which was right until formation and
         # spacing became axes: two shapes then collapsed into one line and
@@ -6019,11 +7497,20 @@ class Console(QMainWindow):
                 body = {"id": aid, "platform": "result", "network": "blue",
                         "colour": ResultPlot.AUTH_COLOUR.get(
                             r.get("authority"), "#AAAAAA")}
-                for k in self.SWEEP_METRICS:
-                    if r.get(k) in (None, ""):
+                # EVERY NUMERIC OUTPUT THIS RUN PRODUCED, not a fixed list.
+                # SWEEP_METRICS could only ever carry metrics somebody had
+                # thought to add to it, so the interception columns - which
+                # are named after the listener and cannot be listed in
+                # advance - existed in the CSV and could not be plotted. The
+                # configuration columns are excluded by name: plotting a
+                # series against how it was configured is how you fool
+                # yourself.
+                for k, v in r.items():
+                    if (k in self.SWEEP_CONFIG_COLS
+                            or k in self.NOT_A_METRIC or v in (None, "")):
                         continue
                     try:
-                        body[k] = float(r[k])
+                        body[k] = float(v)
                     except (TypeError, ValueError):
                         pass
                 agents.append(body)
@@ -6980,7 +8467,7 @@ class Console(QMainWindow):
         # one click away rather than up-a-level.
         path, _ = QFileDialog.getOpenFileName(
             self, "Open mission or scene", str(REPO_ROOT),
-            "Deadband files (*.yaml *.yml)")
+            "CommsEv files (*.yaml *.yml)")
         if path:
             self.load_scenario(Path(path))
 
@@ -7314,26 +8801,40 @@ class Console(QMainWindow):
         self.fill_comms()
 
     def on_contested_edit(self, item, _col):
-        """Double-click an active emitter to tune its transmit power live.
-        Writes a JAM command on the same channel the terminal uses, so the
-        jammer is edited from the Console, not from a file."""
+        """Double-click any emitter to tune its transmit power live.
+
+        BOTH SIDES HAVE A VOLUME KNOB. Red's power has been editable here
+        since the Contested tab existed; blue's was whatever the fleet file
+        said, which quietly made "turn it up" an adversary-only move. It is
+        not - EMCON is a friendly decision, and the whole power-control
+        question (shout over the jammer, or go quiet and stay unheard) cannot
+        be asked while only one side can change.
+
+        Both write a command into the same retask spool the terminal uses, so
+        the run is edited from the Console and not from a file.
+        """
         data = item.data(0, Qt.UserRole)
-        if not (isinstance(data, tuple) and data[0] == "jammer"):
+        if not (isinstance(data, tuple) and data[0] in ("jammer", "radio")):
             return
         if not getattr(self, "_retask_dir", None):
-            self.say("Start the run first, then double-click to tune a jammer.")
+            self.say("Start the run first, then double-click to tune a "
+                     "transmitter.")
             return
-        jid = data[1]
-        cur = 20.0
-        live = (self.latest or {}).get(jid) or {}
-        if live.get("jammer"):
-            cur = _num(live["jammer"].get("tx_dbm"), 20.0)
+        kind, aid = data[0], data[1]
+        live = (self.latest or {}).get(aid) or {}
+        if kind == "jammer":
+            cur = _num((live.get("jammer") or {}).get("tx_dbm"), 20.0)
+            title, what = "Tune jammer", "jamming power"
+        else:
+            cur = _num((live.get("radio") or {}).get("tx_dbm"), 20.0)
+            title, what = "Tune radio", "transmit power"
         val, ok = QInputDialog.getDouble(
-            self, "Tune jammer", f"{jid} transmit power (dBm):", cur,
-            -30.0, 60.0, 1)
-        if ok:
-            line = f"JAM {jid} power {val}\n"
-            self._send_queue_line_console(line, f"JAM {jid} power {val}")
+            self, title, f"{aid} {what} (dBm):", cur, -30.0, 60.0, 1)
+        if not ok:
+            return
+        line = (f"JAM {aid} power {val}" if kind == "jammer"
+                else f"TXPOWER {aid} {val}")
+        self._send_queue_line_console(line + "\n", line)
 
     def _send_queue_line_console(self, line, summary):
         """Write one command file into the running sim's retask spool - the
@@ -7349,6 +8850,33 @@ class Console(QMainWindow):
             self.say(f"[sent: {summary}]")
         except OSError as exc:
             self.say(f"[send failed: {exc}]")
+
+    def limiting_links(self, scope):
+        """Which direction is holding back each of this agent's links.
+
+        A LINK HAS TWO DIRECTIONS AND IS ONLY AS GOOD AS THE WEAKER ONE. That
+        is in the model and it is right - a ground station may reach a car
+        easily while the car cannot be heard replying - but it is invisible,
+        and invisible is how "I turned the power up and nothing happened"
+        happens. Reads the last frame, so it reports what IS rather than what
+        the command is about to change.
+        """
+        out = []
+        for l in (self.viewport.links or []):
+            if scope not in (None, "all") and scope not in (l["a"], l["b"]) \
+                    and str(scope).lower() not in (str(l.get("network") or "").lower(),):
+                continue
+            lim = l.get("limited_by")
+            if not lim:
+                continue
+            ab, ba = _num(l.get("sinr_ab_db")), _num(l.get("sinr_ba_db"))
+            out.append(f"{l['a']}<->{l['b']}  {l['a']}->{l['b']} {ab:+.1f} dB, "
+                       f"{l['b']}->{l['a']} {ba:+.1f} dB  "
+                       f"-> limited by {lim} ({l.get('state')})")
+        if out:
+            out.append("a link is only as good as its WEAKER direction - "
+                       "raising one end alone does not raise the link")
+        return out[:8]
 
     def side_of(self, token):
         """Which side ('blue'/'red') a scope token belongs to - a network
@@ -7645,7 +9173,7 @@ class Console(QMainWindow):
         for a in (self._view().get("agents") or []):
             aid = a.get("id")
             rows.append((aid, f"/{aid}/odom", "nav_msgs/Odometry", "-"))
-            rows.append((aid, f"/{aid}/state", "deadband/AgentState", "-"))
+            rows.append((aid, f"/{aid}/state", "commsev/AgentState", "-"))
             for s in a.get("sensors") or []:
                 t = {"ust10lx": ("scan", "sensor_msgs/LaserScan"),
                      "generic_imu": ("imu", "sensor_msgs/Imu"),
@@ -7779,6 +9307,18 @@ class Console(QMainWindow):
         self.viewport.agents = agents
         self.viewport.links = f.get("links", [])
         self.viewport.arena = f.get("arena") or self.viewport.arena
+        # A DEFERRED POWER REPORT LANDS HERE, on the first frame that can
+        # actually have seen the command. Reported as a one-command lag: the
+        # report was written the instant TXPOWER was typed, but it reads the
+        # LAST FRAME, which predates the command reaching the sim - so every
+        # line described the previous power. Verified against Will's own log:
+        # "TXPOWER blue 1" printed +44 dB, which is the answer for blue 3.
+        pend = getattr(self, "_power_report_for", None)
+        if pend is not None:
+            self._power_report_for = None
+            for line in self.limiting_links(pend[0]):
+                if pend[1] is not None:
+                    pend[1].appendPlainText("  " + line)
         # Points ride in the frame's arena during a live run, so the goal
         # stays drawn while the fleet advances on it.
         self.viewport.points = ((f.get("arena") or {}).get("points")
@@ -8057,6 +9597,251 @@ class Console(QMainWindow):
         self.series_tree.expandAll()
         self.series_tree.blockSignals(False)
 
+    def show_app(self, index):
+        """Swap the whole window between Simulation, Scene and Agent."""
+        if not hasattr(self, "app_stack"):
+            return
+        self.app_stack.setCurrentIndex(index)
+        name = ("Simulation", "Scene builder", "Agent builder")[index]
+        self.statusBar().showMessage(
+            name if index == 0 else f"{name} - not built yet")
+        # The docks belong to Simulation. Leaving a Properties panel and a
+        # sensor view floating beside a page that says NOT BUILT YET would be
+        # worse than blank - it would look broken rather than absent.
+        for d in self.findChildren(QDockWidget):
+            d.setVisible(index == 0)
+
+    def toggle_spectrum(self, on):
+        """Compute the field and hand it to the viewport, or clear it.
+
+        ON DEMAND, and the button is also the refresh. A 72 x 72 grid over
+        five emitters and eight walls is about a third of a second - fine to
+        wait for, impossible to do at 10 Hz - so it is computed when asked
+        and then left alone. Press it again after anything has moved.
+        """
+        # A STALE PICTURE MAKES THE FIRST CLICK A REFRESH, NOT A HIDE.
+        #
+        # The key prints "STALE - press the button" the moment anything moves
+        # or a power command lands. But the button is a TOGGLE and it is
+        # already checked, so pressing it turned the field OFF - and the
+        # honest conclusion from the outside was "the heatmap is not affected
+        # by TXPOWER", when the model was right all along and the advice on
+        # screen could not be followed. Verified in the model: 20 -> 3 -> 40
+        # dBm moves the field maximum 6.1 -> -20.2 -> 16.8 dBm.
+        #
+        # So: while what is drawn is out of date, a click REFRESHES it. The
+        # second click, on a picture that is current, hides it as before.
+        if (not on and self.viewport.show_spectrum
+                and self.viewport.spectrum_is_stale()):
+            self.viewport.show_spectrum = True
+            sender = self.sender()
+            if sender is not None and hasattr(sender, "setChecked"):
+                sender.setChecked(True)
+            self.refresh_spectrum()
+            return
+        self.viewport.show_spectrum = bool(on)
+        if not on:
+            self.viewport.set_spectrum(None)
+            return
+        self.refresh_spectrum()
+
+    def refresh_spectrum(self):
+        """Recut the section and redraw it. Called by the button, the slider
+        and the view buttons - three ways of asking the same question."""
+        if not getattr(self.viewport, "show_spectrum", False):
+            return
+        plane, axis = self.SLICE_FOR.get(self.viewport.mode, (None, None))
+        if plane is None:                      # ISO: no honest section exists
+            self.viewport.set_spectrum(None)
+            self.say("The spectrum section needs a flat view - "
+                     "choose Top, Front or Side.")
+            return
+        # THE SECTION IS THE PLANE THIS VIEW CUTS, at the position ITS OWN
+        # slider is on - so switching view swaps which of the three is being
+        # read and never loses where the other two were left.
+        at = self.slice_at(axis)
+        world = self._live_world()
+        if world is None:
+            self.viewport.show_spectrum = False
+            return
+        st, arena, agents, poses, band = world
+        try:
+            field = st.spectrum_field(arena, agents, poses, band,
+                                      plane=plane, at=at)
+        except Exception as exc:                       # noqa: BLE001
+            self.viewport.show_spectrum = False
+            self.say(f"spectrum: {exc}")
+            return
+        if not field.get("emitters"):
+            # AN EMPTY BAND IS A RESULT, and drawing a stretched picture of
+            # nothing would be a lie about it. Tuning to GNSS with no GNSS
+            # jammer in the scene is exactly this case.
+            self.viewport.set_spectrum(None)
+            self.say(f"Nothing is transmitting on {band:.0f} MHz in this "
+                     f"scene, so there is no field to draw.")
+            return
+        self.viewport.set_spectrum(field)
+        self.say(f"Spectrum at {band:.0f} MHz from {field['emitters']} "
+                 f"emitters, {field['faxis']} = {field['at']:.2f} m. "
+                 f"Press the button again to refresh it after anything moves.")
+
+    def _live_world(self):
+        """The composed scene as the MODEL sees it, at the poses on screen.
+
+        Shared by every on-demand view, so they can never disagree about
+        where anything is or which band is being looked at. Returns
+        (module, arena, agents, poses, band_mhz), or None with a message
+        already said.
+        """
+        view = getattr(self, "resolved", None) or self.doc
+        if not view:
+            self.say("Nothing composed yet - choose a scene and a fleet first.")
+            return None
+        # WHICH FREQUENCY. The Comms band strip is already the frequency
+        # selector for the whole window, so it is the one here too rather
+        # than a second control that can disagree with it.
+        bf = getattr(self.viewport, "band_filter", None)
+        band = None
+        if isinstance(bf, (int, float)):
+            band = float(bf)
+        elif bf == "gnss":
+            band = 1575.42
+        if band is None:
+            # NO BAND CHOSEN MEANS NO FIELD. Both of these views are about ONE
+            # frequency - the spectrum sums the power on it, the wavefront
+            # draws reach on it - and "ALL" is not a frequency. Summing power
+            # across bands that do not interfere would draw a picture of a
+            # radio environment nobody is in, so the honest answer to ALL is
+            # to draw nothing and say which band to pick.
+            self.say("Pick a band on the Comms strip first - the spectrum and "
+                     "the wavefront are drawn for ONE frequency, and ALL is "
+                     "not one.")
+            return None
+
+        try:
+            import stub_telemetry as st
+            arena, agents, _links = st.load_scenario(copy.deepcopy(view))
+            poses = {a["id"]: dict(a["start"], speed=0.0) for a in agents}
+            live = self.latest or {}
+            for a in agents:
+                p_ = (live.get(a["id"]) or {}).get("pose")
+                if p_:
+                    poses[a["id"]].update({k: _num(p_.get(k))
+                                           for k in ("x", "y", "z")})
+                # THE POWERS HAVE TO COME FROM THE RUN, NOT FROM THE FILE.
+                # Reported: "I don't think the heatmap is affected by the
+                # power of the agent". It was not, and this is why - the
+                # world was rebuilt from the composed DOCUMENT every time and
+                # only pose and armed were patched from the frame, so every
+                # live JAM and TXPOWER was drawn at whatever the YAML said.
+                # A spectrum view that ignores the spectrum commands is worse
+                # than no spectrum view.
+                jam = (live.get(a["id"]) or {}).get("jammer")
+                if jam is not None:
+                    a["armed"] = bool(jam.get("on", a.get("armed")))
+                    if jam.get("tx_dbm") is not None:
+                        a.setdefault("jammer", {})["tx_power"] = {
+                            "value": _num(jam.get("tx_dbm")), "unit": "dBm",
+                            "source": "live"}
+                    if jam.get("band_mhz") is not None:
+                        a.setdefault("jammer", {})["band"] = {
+                            "value": _num(jam.get("band_mhz")), "unit": "MHz",
+                            "source": "live"}
+                rad = (live.get(a["id"]) or {}).get("radio")
+                if rad and rad.get("tx_dbm") is not None:
+                    a.setdefault("radio", {})["tx_power"] = {
+                        "value": _num(rad.get("tx_dbm")), "unit": "dBm",
+                        "source": "live"}
+        except Exception as exc:                       # noqa: BLE001
+            self.say(f"cannot read the world: {exc}")
+            return None
+        return st, arena, agents, poses, band
+
+    def toggle_wavefront(self, on):
+        """Rings by side, and the ground the other side owns.
+
+        The companion to the spectrum toggle and deliberately a SEPARATE
+        view. The field answers "how much power is here" and has to be one
+        hue to stay readable as a magnitude; this answers "whose", which
+        needs the side colours. Trying to do both at once would mean a
+        rainbow, and a rainbow field is unreadable as either.
+        """
+        self.viewport.show_wavefront = bool(on)
+        if not on:
+            self.viewport.set_wavefront(None, None)
+            return
+        if self.viewport.mode != self.viewport.TOP:
+            self.viewport.show_wavefront = False
+            self.say("The wavefront view is drawn in plan - choose Top.")
+            return
+        world = self._live_world()
+        if world is None:
+            self.viewport.show_wavefront = False
+            return
+        st, arena, agents, poses, band = world
+        # The rings are traced on the Z plane - the same one the plan section
+        # uses - so the two views always agree about what height they mean.
+        z = self.slice_at("z")
+        try:
+            rings = st.wavefront_rings(arena, agents, poses, band, z=z)
+            sides = {str(a.get("network")).lower() for a in agents}
+            adv = (st.advantage_field(arena, agents, poses, band, at=z)
+                   if {"blue", "red"} <= sides else None)
+        except Exception as exc:                       # noqa: BLE001
+            self.viewport.show_wavefront = False
+            self.say(f"wavefront: {exc}")
+            return
+        n = len(rings.get("emitters") or [])
+        if not n:
+            self.viewport.set_wavefront(None, None)
+            self.say(f"Nothing is transmitting on {band:.0f} MHz in this "
+                     f"scene, so there are no wavefronts to draw.")
+            return
+        self.viewport.set_wavefront(rings, adv)
+        if adv is None:
+            self.say(f"Wavefront at {band:.0f} MHz: {n} emitters, "
+                     f"z = {z:.2f} m. Only one side is present, so there is "
+                     f"no contested ground to shade.")
+            return
+        vals = [v for row in adv["dbm"] for v in row if v is not None]
+        lost = sum(1 for v in vals if v < 0) / max(len(vals), 1)
+        self.say(f"Wavefront at {band:.0f} MHz: {n} emitters, z = {z:.2f} m. "
+                 f"The hostile signal is the louder one over "
+                 f"{lost*100:.0f}% of the floor.")
+
+    def _walls_picked(self, indices):
+        """A wall was clicked, or a box swept over several: ask what they are.
+
+        Opened straight away rather than behind a menu, because there is
+        exactly one thing anybody wants to do with a selected wall and making
+        them find it twice is not a feature. Cancel leaves the selection up.
+        """
+        if not indices:
+            return
+        walls = (self.viewport.arena or {}).get("walls") or []
+        if not walls:
+            return
+        dlg = WallDialog(walls, indices, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        n = dlg.apply_to()
+        mat = dlg.mat.currentText()
+        # THE LIVE WORLD AND THE COMPOSED DOCUMENT ARE TWO OBJECTS, and both
+        # have to change or the edit survives until the next recompose and
+        # then silently reverts.
+        for holder in (self.doc, getattr(self, "resolved", None)):
+            hw = ((holder or {}).get("arena") or {}).get("walls")
+            if hw is not None and len(hw) == len(walls):
+                for i in dlg.indices:
+                    hw[i].update({k: walls[i][k] for k in
+                                  ("material", "height", "thickness",
+                                   "rf_db", "reflectance")})
+        self.viewport.selected_walls = set()
+        self.viewport.update()
+        self.say(f"{n} wall{'s' if n != 1 else ''} set to {mat}. "
+                 f"This run only - use File > Save scene as... to keep it.")
+        self.dirty = True
+
     def _select_series(self, path):
         """Light one series on every plot; click it again to unlight it.
 
@@ -8098,7 +9883,7 @@ class Console(QMainWindow):
                   if a.get("platform") not in ("ground_station", "result")
                   and not a.get("jammer")]
         out = []
-        out.append("DEADBAND " + ("SWEEP" if sweep else "RUN")
+        out.append("CommsEv " + ("SWEEP" if sweep else "RUN")
                    + f" - {time.strftime('%Y-%m-%d %H:%M')}")
         out.append("")
         out.append("CONFIGURATION")
@@ -8356,8 +10141,10 @@ class Console(QMainWindow):
         # Placeholders the live refresh will fill; kept as headers so the
         # shape of the tree is stable whether or not a run is going.
         self._c_emitters = QTreeWidgetItem(tree, ["Emitters (none - run to see)"])
+        self._c_radios = QTreeWidgetItem(tree, ["Radios (none - run to see)"])
         self._c_spectrum = QTreeWidgetItem(tree, ["Experienced spectrum"])
         self._c_emitters.setExpanded(True)
+        self._c_radios.setExpanded(True)
         self._c_spectrum.setExpanded(True)
 
     def _refresh_contested(self, frame):
@@ -8377,6 +10164,28 @@ class Console(QMainWindow):
                          f"{e['tx_dbm']:.0f} dBm @ {e['band_mhz']:.0f} MHz"
                          f"   (double-click to edit)"])
                 row.setData(0, Qt.UserRole, ("jammer", e["id"]))
+        # THE FRIENDLY TRANSMITTERS, in the same list and editable the same
+        # way. Listing only jammers under "Emitters" was a small untruth with
+        # a real consequence: every radio in the scene is an emitter, they are
+        # what a listener hears and what the fleet interferes with itself
+        # over, and leaving them out made blue look like it was not on the
+        # air at all.
+        rd = getattr(self, "_c_radios", None)
+        if rd is not None:
+            rd.takeChildren()
+            radios = [a for a in frame.get("agents", [])
+                      if (a.get("radio") or {}).get("tx_dbm") is not None]
+            rd.setText(0, f"Radios ({len(radios)})" if radios
+                       else "Radios (none - run to see)")
+            for a in radios:
+                r = a["radio"]
+                row = QTreeWidgetItem(
+                    rd, [f"{a['id']} [{a.get('network','?')}]  "
+                         f"{_num(r.get('tx_dbm')):.0f} dBm"
+                         + (f" @ {_num(r.get('band_mhz')):.0f} MHz"
+                            if r.get("band_mhz") else "")
+                         + "   (double-click to edit)"])
+                row.setData(0, Qt.UserRole, ("radio", a["id"]))
         sp = getattr(self, "_c_spectrum", None)
         if sp is not None:
             sp.takeChildren()
@@ -8565,12 +10374,12 @@ class Console(QMainWindow):
         self._lock_setup(True)
         # Anything left from a previous run holds the port and wins the race.
         self.say("Clearing any previous ROS processes...")
-        # [d]eadband is not a typo. pkill -f matches against the FULL command
+        # [c]ommsev is not a typo. pkill -f matches against the FULL command
         # line, and this shell's own command line contains the pattern, so a
-        # plain `pkill -f deadband_ros` signals the shell that is running it.
-        # The bracket makes the regex match "deadband_ros" while the literal
-        # text "[d]eadband_ros" sitting in our own argv does not match it.
-        cleanup = self.wsl("pkill -f '[d]eadband_ros'; "
+        # plain `pkill -f commsev_ros` signals the shell that is running it.
+        # The bracket makes the regex match "commsev_ros" while the literal
+        # text "[c]ommsev_ros" sitting in our own argv does not match it.
+        cleanup = self.wsl("pkill -f '[c]ommsev_ros'; "
                            "pkill -f 'ros2 bag [r]ecord'; true",
                            "cleanup")
         cleanup.waitForFinished(4000)
@@ -8587,7 +10396,7 @@ class Console(QMainWindow):
         scn = _wsl_path(self.path) if getattr(self, "path", None) else ""
         self.say(f"Scenario: {scn or 'launch default'}")
         self.ros_proc = self.wsl(
-            "ros2 launch deadband_ros fleet.launch.py"
+            "ros2 launch commsev_ros fleet.launch.py"
             + (f" scenario:={scn}" if scn else ""), "ros")
         # MCAP where the storage plugin exists: PlotJuggler reads it with a
         # built-in loader and never opens the plugin-choice dialog that its
@@ -8815,7 +10624,7 @@ class Console(QMainWindow):
         self.bag_name = None
 
         answer = QMessageBox.question(
-            self, "Deadband Console",
+            self, "CommsEv Console",
             f"Keep the recording?\n\nruns/{name}\n\n"
             "A bag is every ROS message from this run, with timestamps. It can "
             "be replayed, and PlotJuggler opens it directly.",
@@ -8841,7 +10650,7 @@ class Console(QMainWindow):
         name = titled
         self.say(f"Kept runs/{name}")
         if QMessageBox.question(
-                self, "Deadband Console", "Open it in PlotJuggler now?",
+                self, "CommsEv Console", "Open it in PlotJuggler now?",
                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
             bag = f"{REPO_WSL_PATH}/runs/{name}"
             # Launch FIRST, then show the instructions. The dialog is modal, so
@@ -9061,7 +10870,84 @@ class Console(QMainWindow):
 
     def set_view(self, mode):
         self.viewport.mode = mode
+        # THE SECTION FOLLOWS THE VIEW. Top cuts a horizontal slice, front and
+        # side cut vertical ones; the field belongs to exactly one of them, so
+        # changing the view has to recut it or the picture silently vanishes
+        # and looks like a bug.
+        if getattr(self.viewport, "show_spectrum", False):
+            self.refresh_spectrum()
         self.viewport.update()
+
+    # Which section plane each view is allowed to show, and what the slider
+    # means there: (plane, axis it moves along).
+    SLICE_FOR = {"TOP": ("top", "z"), "FRONT": ("front", "y"),
+                 "SIDE": ("side", "x")}
+
+    def _sync_slice_range(self):
+        """Give each slider the extent of the room along its own axis.
+
+        Called when a scene is composed, not when the view changes: the
+        planes belong to the scene, so a new room re-ranges them and turning
+        the camera does not.
+        """
+        if not getattr(self, "slice_sliders", None):
+            return
+        ext = ((self.viewport.arena or {}).get("extent") or {})
+        for axis, sl in self.slice_sliders.items():
+            if axis == "z":
+                lo, hi, default = 0.0, _num(ext.get("z"), 3.0), 0.2
+            else:
+                half = _num(ext.get(axis), 8.0) / 2.0
+                lo, hi, default = -half, half, 0.0
+            sl.blockSignals(True)
+            sl.setRange(int(round(lo * 100)), int(round(hi * 100)))
+            # Keep where it was if that is still inside the room - loading a
+            # scene of the same size should not throw away a chosen section.
+            if not (lo <= sl.value() / 100.0 <= hi):
+                sl.setValue(int(round(default * 100)))
+            sl.blockSignals(False)
+        self._slice_label()
+
+    def slice_at(self, axis):
+        sl = (getattr(self, "slice_sliders", None) or {}).get(axis)
+        return (sl.value() / 100.0) if sl is not None else (0.2 if axis == "z"
+                                                            else 0.0)
+
+    def _slice_label(self):
+        for axis, rd in (getattr(self, "slice_reads", None) or {}).items():
+            rd.setText(f"{axis} {self.slice_at(axis):5.2f}")
+        # The viewport needs the numbers whether or not anything recomputes -
+        # the cut-away drawing follows the handle live, because hiding a wall
+        # is free and waiting for it would feel broken.
+        self.viewport.slice = {a: self.slice_at(a) for a in ("x", "y", "z")}
+        self.viewport.update()
+
+    def _slice_moved(self):
+        """Live while dragging, recompute on release.
+
+        The cut-away follows the handle immediately. The FIELD does not: a
+        third of a second per section is fine to ask for and impossible to do
+        sixty times a second, so the picture catches up when you let go.
+        """
+        self._slice_label()
+        if not any(sl.isSliderDown()
+                   for sl in self.slice_sliders.values()):
+            self._slice_released()
+
+    def _slice_released(self):
+        if getattr(self.viewport, "show_spectrum", False):
+            self.refresh_spectrum()
+        if getattr(self.viewport, "show_wavefront", False):
+            self.toggle_wavefront(True)
+
+    def toggle_cut(self, on):
+        """Open the scene on the three section planes, or close it again."""
+        self.viewport.cut_away = bool(on)
+        self._slice_label()
+        self.say("Cut away ON - walls below the Z plane are hidden and "
+                 "anything past the X or Y plane is ghosted. The three "
+                 "sliders move the planes."
+                 if on else "Cut away off - the whole scene is drawn.")
 
     def _prov(self):
         if not self.report:
@@ -9097,7 +10983,7 @@ class Console(QMainWindow):
         self.stop_run()
         if self.dirty:
             answer = QMessageBox.question(
-                self, "Deadband Console",
+                self, "CommsEv Console",
                 "The scenario has unsaved changes. Save before closing?",
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
             if answer == QMessageBox.Cancel:
@@ -9163,7 +11049,7 @@ ERROR_LOG = Path(__file__).resolve().parent / "last_error.log"
 def _record(exc_type, exc, tb):
     import traceback
     text = "".join(traceback.format_exception(exc_type, exc, tb))
-    header = (f"Deadband Console crash\npython  {sys.version}\n"
+    header = (f"CommsEv Console crash\npython  {sys.version}\n"
               f"exe     {sys.executable}\nrepo    {REPO_ROOT}\n{'-' * 60}\n")
     try:
         ERROR_LOG.write_text(header + text, encoding="utf-8")
@@ -9172,7 +11058,7 @@ def _record(exc_type, exc, tb):
     sys.stderr.write(header + text)
     try:
         if QApplication.instance():
-            QMessageBox.critical(None, "Deadband Console",
+            QMessageBox.critical(None, "CommsEv Console",
                                  f"{exc_type.__name__}: {exc}\n\nDetails: {ERROR_LOG}")
     except Exception:
         pass

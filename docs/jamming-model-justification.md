@@ -83,7 +83,7 @@ substrate for detection, and it is one.**
 ## The honest verdict
 
 As a **testbed for network structure and command resilience under contested
-comms** — which is what DEADBAND is for — the model is sound and grounded: the
+comms** — which is what CommsEv is for — the model is sound and grounded: the
 right quantity (JSR), the right causal chain (jamming → link loss → authority
 loss), and the right observables for the detection/ML work to come. As a
 **physical-layer RF fidelity model** it is deliberately coarse, and we should

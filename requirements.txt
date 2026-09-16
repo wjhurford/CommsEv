@@ -1,0 +1,8 @@
+# CommsEv — everything the Console needs. The model and the test suite need
+# only PyYAML; the rest is the GUI.
+#
+#   pip install -r requirements.txt
+#   (Windows: double-click "Setup (run once).bat" instead)
+PyYAML>=6.0
+PySide6>=6.6
+ruamel.yaml>=0.18

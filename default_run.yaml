@@ -1,5 +1,5 @@
 # =============================================================================
-# Deadband DEFAULT RUN — scene + fleet, no mission
+# CommsEv DEFAULT RUN — scene + fleet, no mission
 # =============================================================================
 # What headless tools (stub, netcheck, ROS launch) load when nothing else is
 # named: the lab scene with the lab fleet, untasked. In the Console this same

@@ -1,4 +1,4 @@
-# DEADBAND — orientation for a coding session
+# CommsEv (Communications Evaluator) — orientation for a coding session
 
 Read this first. It is the shortest complete picture of what this is, what the
 rules are, and where things live.
@@ -50,9 +50,16 @@ A run is composed in the Console's Setup tab, or by a file naming
 | --- | --- |
 | `tools/stub_telemetry.py` | the whole model: RF, jamming, authority, drift, dynamics |
 | `console/app.py` | the GUI (PySide6) |
-| `deadband/spec.py` | schema loading + validation + provenance report |
-| `tests/test_all.py` | 166 checks, `python3 tests/test_all.py` |
-| `docs/` | see docs/vocabulary.md and docs/ROADMAP.md first |
+| `commsev/spec.py` | schema loading + validation + provenance report |
+| `tools/sweep.py` | headless experiment harness; `tools/plot_results.py` plots it |
+| `ros2/src/commsev_ros/` | the same model as ROS 2 nodes + Console bridge (optional) |
+| `tests/test_all.py` | 557 checks, `python3 tests/test_all.py`, no pytest |
+| `docs/` | see docs/README.md; vocabulary.md and ROADMAP.md first |
+| `SOURCES.md` | every constant and its status; `COMMANDS.md` the terminal grammar |
+
+Naming: the project is **CommsEv** in prose, `commsev` in code (package,
+CLI `python3 -m commsev`, ROS package `commsev_ros`, env var `COMMSEV_ROOT`).
+It was called Deadband until September 2026; do not reintroduce that name.
 
 ## The command grammar (terminal / retask spool)
 
@@ -66,7 +73,7 @@ Console cells are scoped: **blue** commands blue, **red** commands red
 
 ## Before you change the model
 
-- Run `python3 tests/test_all.py` first and last. 166 should pass.
+- Run `python3 tests/test_all.py` first and last. 557 should pass, 0 fail.
 - If you add a constant, add it to `SOURCES.md` with its status.
 - If you change behaviour, add a test that would have caught the old bug.
 - Known open issues are in `docs/REVIEW-2026-09-01.md` — read the top three

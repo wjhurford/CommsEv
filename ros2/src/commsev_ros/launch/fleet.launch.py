@@ -11,8 +11,8 @@ def generate_launch_description():
     scenario = LaunchConfiguration("scenario")
     return LaunchDescription([
         DeclareLaunchArgument("scenario", default_value=""),
-        Node(package="deadband_ros", executable="world", name="deadband_world",
+        Node(package="commsev_ros", executable="world", name="commsev_world",
              output="screen", parameters=[{"scenario": scenario}]),
-        Node(package="deadband_ros", executable="bridge", name="deadband_bridge",
+        Node(package="commsev_ros", executable="bridge", name="commsev_bridge",
              output="screen", parameters=[{"scenario": scenario}]),
     ])

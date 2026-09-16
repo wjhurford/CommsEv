@@ -108,7 +108,7 @@ def yaw_to_quaternion(yaw):
 
 class WorldNode(Node):
     def __init__(self):
-        super().__init__("deadband_world")
+        super().__init__("commsev_world")
         self.declare_parameter("scenario", default_scenario())
         self.declare_parameter("rate_hz", 20.0)
 
