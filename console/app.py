@@ -44,6 +44,19 @@ REPO_WSL_PATH = _wsl_path(REPO_ROOT)
 
 # Where the bag recorder writes its own pid, inside WSL. See stop_ros_stack.
 BAG_PIDFILE = "/tmp/commsev_bag.pid"
+
+# The Console reaches a Linux shell for the ROS 2 side and for the terminal's
+# shell escape. On Windows that shell is WSL; on Linux - a desktop, or the
+# Docker image - it is just bash. One place decides, so a Linux user never
+# sees "cannot start wsl.exe".
+def _shell():
+    """(program, argv_prefix, human_name) for running `bash -lc <cmd>`."""
+    if sys.platform == "win32":
+        return "wsl.exe", ["-e", "bash", "-lc"], "wsl.exe - is WSL installed and on PATH?"
+    return "bash", ["-lc"], "bash"
+
+
+SHELL_EXE, SHELL_ARGS, SHELL_NAME = _shell()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -3507,10 +3520,10 @@ class ShellPanel(QWidget):
             lambda code, _st, p=proc: (
                 self.out.appendPlainText(f"[exit {code}]") if code else None,
                 self.procs.remove(p) if p in self.procs else None))
-        proc.start("wsl.exe", ["-e", "bash", "-lc", full])
+        proc.start(SHELL_EXE, SHELL_ARGS + [full])
         if not proc.waitForStarted(3000):
             self.out.appendPlainText(
-                "[cannot start wsl.exe - is WSL installed and on PATH?]")
+                f"[cannot start {SHELL_NAME}]")
 
     def _cut(self, args):
         """CUT x|y|z <metres> | CUT on | CUT off | CUT
@@ -9495,10 +9508,10 @@ class Console(QMainWindow):
             lambda code, _st, p=proc: (
                 self.term_out.appendPlainText(f"[exit {code}]") if code else None,
                 self._shell_procs.remove(p) if p in self._shell_procs else None))
-        proc.start("wsl.exe", ["-e", "bash", "-lc", full])
+        proc.start(SHELL_EXE, SHELL_ARGS + [full])
         if not proc.waitForStarted(3000):
             self.term_out.appendPlainText(
-                "[cannot start wsl.exe - is WSL installed and on PATH?]")
+                f"[cannot start {SHELL_NAME}]")
 
     def select_agent_by_id(self, agent_id):
         """Selecting on the map selects everywhere: tree, properties, sensor."""
@@ -10355,7 +10368,7 @@ class Console(QMainWindow):
         full = (f"cd {REPO_WSL_PATH}/ros2 && "
                 f"source /opt/ros/humble/setup.bash && "
                 f"source install/setup.bash && {command}")
-        proc.start("wsl.exe", ["-e", "bash", "-lc", full])
+        proc.start(SHELL_EXE, SHELL_ARGS + [full])
         return proc
 
     def start_ros_bridge(self):

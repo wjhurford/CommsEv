@@ -1,0 +1,14 @@
+.git
+runs
+CommsEv_References
+Deadband_References
+Claude outputs
+ros2/build
+ros2/install
+ros2/log
+**/__pycache__
+*.patch
+*.bak
+test_output.txt
+*.bat
+!Open in browser (Docker).bat

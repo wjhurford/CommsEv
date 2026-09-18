@@ -57,6 +57,7 @@ Launch the Console:
 | --- | --- |
 | Windows | double-click `Setup (run once).bat`, then `console\CommsEv Console.bat` |
 | Linux / macOS | `python3 console/app.py` |
+| Any, in a browser | `docker compose up` (Windows: double-click `Open in browser (Docker).bat`), then <http://localhost:5800> — no Python on the host (see below) |
 
 Then, in the Console: **Setup** tab → scene `maze` → blue fleet
 `8_roboracer_no_lidar` → red fleet `custom_red` (one jammer) → add a few
@@ -67,6 +68,26 @@ the Console; the fixed fleets the tests use (`3_roboracer`, `red_jammer`, …)
 live in `tests/fixtures/fleets/` and can be copied into `fleets/` if you want
 them. `docs/HANDOVER-DEMO.md` walks the full ten-minute demo with what you
 should see at each step, and `COMMANDS.md` is the complete terminal grammar.
+
+### In a browser, with Docker
+
+```bash
+docker compose up          # first time builds the image (~5 min); after that, seconds
+```
+
+Open <http://localhost:5800>. That is the same Console, running inside the
+container and drawn in your browser tab; `./runs`, `./fleets` and
+`./formations` are mounted from the host so nothing you save is lost when
+the container stops. It looks soft until the browser shows it at 1:1 — set
+`DISPLAY_WIDTH` / `DISPLAY_HEIGHT` in `docker-compose.yml` to your monitor's
+size and press F11. Port 5900 is plain VNC if you prefer a VNC client. The
+build runs the full test suite as its last step, so an image that builds is
+an image that works. The image is Ubuntu 22.04 — ROS 2 Humble's platform —
+so the ROS bridge can join it later without changing the base.
+
+> New in September 2026 and not yet built in CI. If `docker compose up`
+> fails for you, please open an issue with the last twenty lines of output —
+> a missing shared library in the `apt-get` line is the likely cause.
 
 Headless, no GUI:
 
@@ -104,6 +125,7 @@ command authority — an agent whose decider cannot reach it is not retasked.
 | --- | --- |
 | `tools/stub_telemetry.py` | the whole model: RF propagation, jamming, link state, authority, GNSS drift, vehicle dynamics, missions |
 | `console/app.py` | the Console (PySide6 GUI): setup, map, terminals, network view, experiments |
+| `Dockerfile`, `docker-compose.yml` | the Console in a browser tab, no host Python |
 | `commsev/spec.py` | schema loading, validation and the provenance report |
 | `tools/sweep.py`, `tools/plot_results.py`, `tools/netcheck.py` | headless experiment harness and diagnostics |
 | `ros2/src/commsev_ros/` | the same model as ROS 2 nodes plus a bridge to the Console (optional; Windows users run it in WSL) |

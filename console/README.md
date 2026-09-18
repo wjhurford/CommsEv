@@ -8,6 +8,7 @@ The application. One file, `app.py`, PySide6.
 | --- | --- |
 | Windows | `Setup (run once).bat` at the repo root installs the dependencies into your **Windows** Python; then double-click **CommsEv Console.bat** here. `Debug Console.bat` does the same but keeps the terminal open so a crash is readable. |
 | Linux / macOS | `pip install -r requirements.txt` at the repo root, then `python3 console/app.py`. |
+| Browser (Docker) | `docker compose up` at the repo root, then <http://localhost:5800>. |
 
 A crash is also written to `console/last_error.log` and shown in a dialog.
 
@@ -16,7 +17,7 @@ A crash is also written to `console/last_error.log` and shown in a dialog.
 The Console is a client over three things: the layer files (`scenes/`,
 `fleets/`, `missions/`), the simulation model in `tools/stub_telemetry.py`,
 which it runs as a background process and animates, and — optionally — the ROS 2
-bridge in `ros2/`, which on Windows it starts inside WSL.
+bridge in `ros2/`, which on Windows it starts inside WSL and on Linux (including the Docker image) in plain `bash`.
 
 The left-hand sidebar, in the order a run happens:
 

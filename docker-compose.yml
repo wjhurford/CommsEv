@@ -1,0 +1,24 @@
+# One command, no Python on the host:
+#     docker compose up
+# then open http://localhost:5800 in a browser. Runs written by the Console
+# land in ./runs on the host, same as when it runs natively.
+services:
+  commsev:
+    build: .
+    image: commsev
+    container_name: commsev
+    ports:
+      - "5800:5800"     # the browser viewer
+      - "5900:5900"     # plain VNC, if you prefer a VNC client
+    volumes:
+      - ./runs:/app/runs
+      - ./fleets:/app/fleets           # fleets you build in the Console persist
+      - ./formations:/app/formations   # so do formations you draw
+    environment:
+      - TZ=Europe/London
+      # The Console is drawn at this size and the browser scales it to fit, so
+      # anything other than 1:1 looks soft. Match your monitor, then press F11
+      # (or the viewer's full-screen button) for exact pixels.
+      - DISPLAY_WIDTH=1920
+      - DISPLAY_HEIGHT=1080
+    restart: unless-stopped
