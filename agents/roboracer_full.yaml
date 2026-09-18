@@ -19,7 +19,7 @@
 # for, and it comes out of their datasheets rather than being asserted.
 #
 # It is also the heaviest radio load: more sensors is more to publish, and
-# channel contention counts contenders. See docs/BACKLOG.md - contention
+# channel contention counts contenders. See docs/history/BACKLOG.md - contention
 # counts AGENTS, not traffic, so that cost is not yet charged. Until it is,
 # this car is flattered.
 # =============================================================================

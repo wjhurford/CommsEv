@@ -8,7 +8,7 @@ the bottom with a date.
 
 ## Resuming in a new session
 
-This file plus `docs/writing-a-mission.md` and `docs/ros2-and-missions.md` are
+This file plus `docs/history/writing-a-mission.md` and `docs/ros2-and-missions.md` are
 the handover. Nothing important should live only in a chat.
 
 **Where things stand (26 Aug 2026).** The Console runs, drives a real ROS 2
@@ -159,7 +159,7 @@ break the simulator. Order is roughly dependency order.
 - [ ] **Simple retask grammar + a retask mode in the Console** — a command box
       that puts you in "retask mode": `retask` then `car1 pursue car3`, or
       `shuttle 1 3` (between points 1 and 3). Writes the same line the file
-      channel already consumes (docs/maps-missions-and-retasking.md). The stub
+      channel already consumes (docs/history/maps-missions-and-retasking.md). The stub
       channel exists; this is the friendly front end and the grammar polish.
 - [ ] **Retask over ROS** — the `--retask` file channel is stub-only. A real
       ROS 2 service is needed to retask a running ROS controller. Gates live
@@ -312,7 +312,7 @@ break the simulator. Order is roughly dependency order.
   saying where it was, was not
 - 2026-08-26 — Mission contract v2: `target(agent, world)`, with lidar and link
   state reachable from inside a mission. Old four-argument form still runs,
-  deprecated. `docs/writing-a-mission.md`, plus `wall_follow.py` (sensor loop)
+  deprecated. `docs/history/writing-a-mission.md`, plus `wall_follow.py` (sensor loop)
   and `return_on_link_loss.py` (network-reactive)
 - 2026-08-26 — PlotJuggler instructions rewritten for the MCAP flow
 - 2026-08-26 — ROS 2 nodes: world, bridge, controller. Real `LaserScan`,

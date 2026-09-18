@@ -116,7 +116,7 @@ demonstrated and handed over with no ROS installed at all.
 
 A mission answers one question: **where should this agent be heading right now?**
 
-> **The full walkthrough is [`writing-a-mission.md`](writing-a-mission.md)** —
+> **The full walkthrough is [`history/writing-a-mission.md`](history/writing-a-mission.md)** —
 > the contract, what bites you, one written from scratch, and how to run it.
 > What follows is the summary.
 

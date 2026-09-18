@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: If CommsEv contributes to published work, please cite it as below.
+title: "CommsEv: a command-and-control resilience testbed for multi-agent fleets under jamming and GNSS denial"
+type: software
+authors:
+  - family-names: Hurford
+    given-names: William
+    affiliation: Loughborough University
+version: 0.2.0
+date-released: 2026-09-18
+license: Apache-2.0
+repository-code: https://github.com/wjhurford/CommsEv
+abstract: >-
+  A deterministic testbed that carries RF propagation and jamming through link
+  state, command authority and agent behaviour to mission outcome, with
+  authority (who decides) and routing (how messages travel) as independent
+  axes. Built at Loughborough University's LUCAS Lab.

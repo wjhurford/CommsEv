@@ -35,7 +35,7 @@ RATE_HZ = 10.0
 
 # Keeps a shuttle lane off the literal wall. Shared by mission_target()'s
 # default endpoints AND validate_objective()'s bounds check, so "in bounds"
-# means the same thing everywhere in this file - see docs/PATCH-07-CHECKS.md.
+# means the same thing everywhere in this file - see docs/history/PATCH-07-CHECKS.md.
 WALL_MARGIN_M = 0.6
 
 # --- GNSS / dead-reckoning drift model. See docs/jamming-effects-research.md
@@ -513,7 +513,7 @@ def load_scenario(path):
     extent = arena.get("extent") or {}
 
     # lat/lon/alt of this scene's local (0,0,0) - a schema seam only, no
-    # conversion happens yet. See docs/maps-missions-and-retasking.md.
+    # conversion happens yet. See docs/history/maps-missions-and-retasking.md.
     origin_doc = arena.get("origin")
     origin = None
     if origin_doc:
@@ -591,7 +591,7 @@ def load_scenario(path):
                       "z": _num(pose.get("z")), "yaw": _num(pose.get("yaw"))},
             "mission": a.get("mission") or {"type": "static"},
             # Assigning an objective never arms it - only LAUNCH/HALT do. See
-            # "The state machine" in docs/PATCH-07-CHECKS.md.
+            # "The state machine" in docs/history/PATCH-07-CHECKS.md.
             "armed": False,
             "last_rejection": None,
             # The sim time this agent's CURRENT objective became active -
@@ -600,7 +600,7 @@ def load_scenario(path):
             # raw absolute t, so an agent armed at t=30s starts its cycle
             # cleanly from that moment instead of jumping to wherever a
             # 30-second-old clock would put it. See "Bug fix: the launch
-            # hiccup" in docs/PATCH-07-CHECKS.md.
+            # hiccup" in docs/history/PATCH-07-CHECKS.md.
             "phase_t0": 0.0,
             # POSITION ESTIMATE. `belief` is where the agent THINKS it is;
             # the pose in `poses` is the truth. They agree while the agent has
@@ -666,7 +666,7 @@ def load_scenario(path):
     # onto an agent. Validate it exactly like a live REOBJECTIVE would - an
     # unresolvable or out-of-bounds shuttle at load time gets rejected loudly
     # and the agent holds static, rather than silently doing the wrong thing
-    # for the whole run. See "Bug fix" in docs/PATCH-07-CHECKS.md.
+    # for the whole run. See "Bug fix" in docs/history/PATCH-07-CHECKS.md.
     for a in agents:
         ok, err = validate_objective(a["mission"], world["points"], world)
         if not ok:
@@ -901,7 +901,7 @@ def _call_mission(mod, agent, world):
             mod._commsev_warned = True
             print(f"mission {mod.__name__}: target(agent, t, poses, arena) is "
                   f"deprecated - use target(agent, world); see "
-                  f"docs/writing-a-mission.md", file=sys.stderr)
+                  f"docs/history/writing-a-mission.md", file=sys.stderr)
         return mod.target(agent, world.t, world.poses, world.arena)
     return mod.target(agent, world)
 
@@ -1508,7 +1508,7 @@ def validate_objective(mission_dict, points, arena):
     Only 'shuttle' has anything to check today: its endpoints must resolve
     (named point exists, or a literal was given) AND land inside the arena.
     Every other objective type is accepted as-is. See "Bug fix" and
-    "Out-of-bounds decisions" in docs/PATCH-07-CHECKS.md.
+    "Out-of-bounds decisions" in docs/history/PATCH-07-CHECKS.md.
     """
     if not isinstance(mission_dict, dict):
         return False, "not an objective"
@@ -5079,7 +5079,7 @@ def parse_retask(text, agents_by_id):
 # ---------------------------------------------------------------------------
 # SETMISSION - the run's mission: a file of per-agent objectives applied as
 # one command, gated by command authority. See "SETMISSION"
-# in docs/PATCH-07-CHECKS.md for the full reasoning; summary here.
+# in docs/history/PATCH-07-CHECKS.md for the full reasoning; summary here.
 # ---------------------------------------------------------------------------
 
 def _is_taskable(agent, networks):
@@ -5328,7 +5328,7 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
     changed.
 
     A command is one file, `cmd_*.txt`, one line, in retask_dir - see
-    "Bug fix: the retask race" in docs/PATCH-08-CHECKS.md for why it isn't
+    "Bug fix: the retask race" in docs/history/PATCH-08-CHECKS.md for why it isn't
     one shared file any more. Claiming a file (by renaming it) consumes it,
     so a command fires once. File-based rather than a socket because the
     same channel then works from a terminal, from the Console, and later
@@ -5337,7 +5337,7 @@ def drain_retasks(retask_dir, agents_by_id, arena, links, poses, t=0.0):
     (re)armed also resets that agent's `phase_t0` to it, so a shuttle/
     patrol/orbit phase is always measured from "since this became active,"
     never from the run's absolute clock - see "Bug fix: the launch hiccup"
-    in docs/PATCH-07-CHECKS.md. Recognises, per line:
+    in docs/history/PATCH-07-CHECKS.md. Recognises, per line:
 
         <agent>: <verb> <args>      REOBJECTIVE, one agent (parse_retask)
         LAUNCH <network-or-agent>   arm - see "The state machine"

@@ -1,12 +1,12 @@
 # Roadmap — agreed with Will, 1 Sep 2026
 
-The build order from here, one step per patch section in PATCH-09-CHECKS (and
+The build order from here, one step per patch section in history/PATCH-09-CHECKS (and
 onward), each applied + tested + click-checked before the next. Newest
-decisions supersede older text in BACKLOG.md; this file is the order.
+decisions supersede older text in history/BACKLOG.md; this file is the order.
 
 ## Done
 
-**1. Contested tree — DONE (1 Sep, Step 4 in PATCH-09-CHECKS).** Jamming becomes physics, not a word:
+**1. Contested tree — DONE (1 Sep, Step 4 in history/PATCH-09-CHECKS).** Jamming becomes physics, not a word:
 - the scene's background (noise floor, path-loss exponent) feeds `rf_link()`
   instead of function defaults — the baseline is the scene's;
 - a **jammer is an ordinary agent** (`jammer:` block: tx power, band) on the
@@ -61,7 +61,7 @@ deceptive).
 scripted jamming levels, graded on comms quality + mission outcome + time.
 
 ## Standing constraints
-- Every step ships tests + a PATCH-09-CHECKS section; commit after each.
+- Every step ships tests + a history/PATCH-09-CHECKS section; commit after each.
 - Provenance rule everywhere; free parameters declared, never hidden.
 - Spawn dialog stays simple (x, y, z, yaw) — click-to-place is not queued
   until the companion apps exist.

@@ -37,7 +37,7 @@ Three commits, applying on top of `fc9f219`.
 
 ## 2. Patch 5 checklist (`a2c1a3a`)
 
-`docs/PATCH-05-CHECKS.md`, plus the standing policy: every patch ships a
+`docs/history/PATCH-05-CHECKS.md`, plus the standing policy: every patch ships a
 checklist stating what changed, what to check in the Console, what to check
 outside it, and **explicitly what is not visible**.
 

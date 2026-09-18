@@ -1,7 +1,7 @@
 # Vocabulary — the three layers
 
 This supersedes the earlier "a run is a MAP plus a MISSION" decision in
-`docs/BACKLOG.md`. Agreed with Will, 1 Sep 2026 (revised same day: the middle
+`docs/history/BACKLOG.md`. Agreed with Will, 1 Sep 2026 (revised same day: the middle
 layer is called a **fleet**, not a "scenario" — "scenario" was the word causing
 the confusion, so it is retired from the framework entirely).
 

@@ -17,8 +17,9 @@ services:
     environment:
       - TZ=Europe/London
       # The Console is drawn at this size and the browser scales it to fit, so
-      # anything other than 1:1 looks soft. Match your monitor, then press F11
-      # (or the viewer's full-screen button) for exact pixels.
-      - DISPLAY_WIDTH=1920
-      - DISPLAY_HEIGHT=1080
+      # anything other than 1:1 looks soft. The Windows launcher sets these to
+      # the real screen size; on Linux/macOS export them before `docker compose
+      # up`, or leave the defaults and press F11.
+      - DISPLAY_WIDTH=${DISPLAY_WIDTH:-1920}
+      - DISPLAY_HEIGHT=${DISPLAY_HEIGHT:-1080}
     restart: unless-stopped

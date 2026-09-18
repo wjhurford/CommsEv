@@ -149,7 +149,7 @@ is the point in the run where you can inspect what every agent has actually
 been assigned - open the Mission tab and check each objective reads what you
 meant - before anything moves. Confirming the *commanded* state before launch
 is what makes measuring deviation from it, later, mean something. See
-`docs/maps-missions-and-retasking.md` for the full assign → inspect → launch
+`docs/history/maps-missions-and-retasking.md` for the full assign → inspect → launch
 sequence and the retasking grammar.
 
 ### Then make it react to something

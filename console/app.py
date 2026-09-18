@@ -357,7 +357,7 @@ def _objective_label(obj, armed=None):
 
     e.g. {'type': 'shuttle', 'between': ['A','B']} -> "shuttle A-B"
 
-    `armed` is the assign/inspect/launch state - see docs/PATCH-07-CHECKS.md
+    `armed` is the assign/inspect/launch state - see docs/history/PATCH-07-CHECKS.md
     - and is appended as a tag so the tree row itself answers "is this what
     I meant, and will it move": None (not known - a file that hasn't run
     yet) omits the tag, False shows "assigned, not launched", True shows
@@ -3440,7 +3440,7 @@ class ShellPanel(QWidget):
         #         authority - an unreachable agent is not retasked) and
         #         titles the run. Do this after Play, before `blue launch`.
         # Tokenizing keeps a parenthesized "(-3, 3, 0)" as one token even with
-        # the internal spaces - see docs/maps-missions-and-retasking.md.
+        # the internal spaces - see docs/history/maps-missions-and-retasking.md.
         head = _tokenize_args(cmd) if _tokenize_args else cmd.split()
         if len(head) == 2 and head[1].lower() in ("launch", "halt"):
             if self._cell_allows("launch", scope=head[0]):
@@ -3685,7 +3685,7 @@ class ShellPanel(QWidget):
                 -> forwarded verbatim as "REMISSION <network> <objective>
                 <args>" - a system order the running sim decomposes into
                 per-agent objectives, gated by that network's authority. See
-                docs/maps-missions-and-retasking.md.
+                docs/history/maps-missions-and-retasking.md.
             LOADMISSION <mission-file>
                 -> forwarded as "LOADMISSION <path>" - that file's own
                 per-agent objectives, applied verbatim, no decomposition.
@@ -3714,7 +3714,7 @@ class ShellPanel(QWidget):
         """`<scope> launch` / `<scope> halt` -> "LAUNCH <scope>" / "HALT
         <scope>" on the queue. Scope is a network name or an agent id; the
         running sim resolves which one - see "The state machine" in
-        docs/PATCH-07-CHECKS.md."""
+        docs/history/PATCH-07-CHECKS.md."""
         self._send_queue_line(f"{verb.upper()} {scope}\n", f"{verb} {scope}")
 
     def _send_queue_line(self, line, summary):
@@ -3738,7 +3738,7 @@ class ShellPanel(QWidget):
         sim never sees a partial write either. Nothing else ever reopens
         this path once it exists, so there is nothing left for the sim's
         reader to contend with. See "Bug fix: the retask race" in
-        docs/PATCH-08-CHECKS.md.
+        docs/history/PATCH-08-CHECKS.md.
         """
         try:
             qdir = REPO_ROOT / "runs" / "retask"

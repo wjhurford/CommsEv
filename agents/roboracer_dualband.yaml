@@ -59,7 +59,7 @@ radio:
   band:     {value: 2400, unit: MHz, source: "2.4 GHz ISM, the fleet's command band"}
 
 # THE SECOND RADIO. Listed separately and NOT yet read by the link model -
-# see docs/BACKLOG.md. Declaring the hardware before the behaviour exists is
+# see docs/history/BACKLOG.md. Declaring the hardware before the behaviour exists is
 # deliberate: the agent file is what you could buy, and the channel-agility
 # policy that uses it is a DECISION that belongs in the Console, not in here.
 #

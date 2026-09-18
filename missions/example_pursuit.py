@@ -23,7 +23,7 @@ def target(agent, world):
     """Sit `standoff` metres behind whichever agent this one is chasing.
 
     agent  - this agent's own config: id, dimensions, speed, mission, sensors
-    world  - what this agent knows. See docs/writing-a-mission.md.
+    world  - what this agent knows. See docs/history/writing-a-mission.md.
              world.t, world.dt, world.arena
              world.pose(id), world.distance_to(a, b), world.bearing_to(a, b)
              world.scan(id), world.nearest_return(id, lo, hi)

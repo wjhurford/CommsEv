@@ -397,7 +397,7 @@ def _poses_for(agents):
 def _queue_with(qdir, line):
     """Write one command exactly the way the Console does now - its own
     brand-new cmd_*.txt file, never an overwrite of a shared path. See
-    "Bug fix: the retask race" in docs/PATCH-08-CHECKS.md."""
+    "Bug fix: the retask race" in docs/history/PATCH-08-CHECKS.md."""
     qdir.mkdir(parents=True, exist_ok=True)
     (qdir / f"cmd_{time.monotonic_ns():020d}.txt").write_text(line)
 

@@ -4,7 +4,7 @@ Comms realism, one real bug found live-testing patch 7, and the two tree
 headers pulled forward from the Phase 2 design. Custom mode, SPAWN/
 RELOCATE/RENAME/DESPAWN, NETWORK/SQUAD, multi-terminal and SAVE SCENARIO
 are designed and approved but **not** in this patch — see
-`docs/BACKLOG.md` / the saved plan for that design.
+`docs/history/BACKLOG.md` / the saved plan for that design.
 
 ---
 
@@ -150,7 +150,7 @@ Pulled forward from the Phase 2 design since it's small and standalone.
   Structurally the same split Overview/Sensor-panel already draws
   (declared equipment vs. live sensor readings) — a third tab is the
   consistent extension, not scope creep. This is also the item
-  `docs/PATCH-06-CHECKS.md` already flagged as the top of the "still not
+  `docs/history/PATCH-06-CHECKS.md` already flagged as the top of the "still not
   visible" queue: `netcheck.py`'s COMMAND AUTHORITY table, live, in the
   GUI. Not built - queued.
 - **RESYNC (queued, not built)** — sound. Patch 7's `phase_t0` fix (each

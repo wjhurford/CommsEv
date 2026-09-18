@@ -112,7 +112,7 @@ full diagonal (`y` moves with `x`, not flat).
 - **This applies to every file, uniformly** — a bare scene, a split mission,
   or a legacy self-contained `scenarios/` file. Pressing Play never starts
   anything moving any more; it starts the sim idle. This is a deliberate,
-  confirmed decision (see `docs/maps-missions-and-retasking.md`, "Assign,
+  confirmed decision (see `docs/history/maps-missions-and-retasking.md`, "Assign,
   inspect, launch") — the three existing demo scenarios
   (`three_car_fleet.yaml`, `formation_demo.yaml`, `wall_follow_demo.yaml`)
   now need `blue launch` after Play where they didn't before. Their header
@@ -212,7 +212,7 @@ full diagonal (`y` moves with `x`, not flat).
   to the running agent set — no decomposition, no authority gating, a
   direct operator action like `REOBJECTIVE`, just file-sourced and
   multi-agent. Different job from REMISSION on purpose — see
-  `docs/maps-missions-and-retasking.md`.
+  `docs/history/maps-missions-and-retasking.md`.
 - An agent the file names that isn't in the running scene is warned about,
   not silently dropped or crashed on.
 

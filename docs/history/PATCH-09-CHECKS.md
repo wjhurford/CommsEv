@@ -16,7 +16,7 @@ now the **fleet**. This section describes the result as it stands.)
 - **`docs/vocabulary.md`** (new) — locks the model: **scene** (world only),
   **fleet** (agents + networks, no world, no tasking), **mission** (names a
   scene AND a fleet, then commands the fleet). "Scenario" is retired.
-  Supersedes the old "map + mission" decision in `docs/BACKLOG.md`.
+  Supersedes the old "map + mission" decision in `docs/history/BACKLOG.md`.
 - **`tools/stub_telemetry.py`** — `resolve_mission()` rewritten: resolves
   `scene:` (alias `map:`) and `fleet:` references recursively and overlays the
   file on top; factored into `_base_path` / `_overlay`. A file naming no base
