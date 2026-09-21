@@ -1,5 +1,9 @@
 # CommsEv — Communications Evaluator
 
+[![tests](https://github.com/wjhurford/CommsEv/actions/workflows/tests.yml/badge.svg)](https://github.com/wjhurford/CommsEv/actions/workflows/tests.yml)
+[![docker](https://github.com/wjhurford/CommsEv/actions/workflows/docker.yml/badge.svg)](https://github.com/wjhurford/CommsEv/pkgs/container/commsev)
+[![licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)
+
 A command-and-control resilience testbed for robot and drone fleets under
 jamming and GNSS denial. One causal chain, kept whole:
 
@@ -10,19 +14,23 @@ Robotics simulators move robots and assume communications are free; network
 simulators model the radio and do not move robots. CommsEv does both, so a
 change in the spectrum reaches the mission score without anyone hand-wiring it.
 
+![A jammer comes up on the command band; links drop, cars are held with no commander, the Network tab shows authority shrinking](docs/gifs/03-jamming.gif)
+
 Built at Loughborough University (LUCAS Lab) by William Hurford, 2026,
 supervised by Dr Chengyuan Liu. Formerly *Deadband*. Research prototype:
-the model, the Console and the 557-test suite work; the API is not frozen.
+the model, the Console and the 561-test suite work; the API is not frozen.
 
 ## Run it
 
 **In a browser, no Python** — needs [Docker Desktop](https://www.docker.com/products/docker-desktop/):
 
 ```bash
-docker compose up        # Windows: double-click "Open in browser (Docker).bat"
+docker run --rm -p 5800:5800 ghcr.io/wjhurford/commsev     # prebuilt image
+docker compose up        # or build from source; Windows: "Open in browser (Docker).bat"
 ```
 
-then open <http://localhost:5800> and press F11. First build ≈ 2 min.
+then open <http://localhost:5800> and press F11. Building from source takes
+about two minutes and runs the test suite as its last step.
 
 **Natively** — Python 3.10+:
 
@@ -40,11 +48,22 @@ red fleet `custom_red` → add a few points → **Play**. Blue terminal:
 **Headless:**
 
 ```bash
-python3 tests/test_all.py                          # 557 passed, 0 failed
+python3 tests/test_all.py                          # 561 passed, 0 failed
 python3 -m commsev validate default_run.yaml       # schema + provenance report
 python3 tools/sweep.py experiments/penetration.yaml   # sweep → runs/sweep_*/results.csv
 python3 tools/plot_results.py runs/sweep_*/results.csv
 ```
+
+## Tour
+
+Every GIF below is the real Console driven headless by `tools/make_gifs.py`
+— regenerate them with one command after any change.
+
+| | |
+| --- | --- |
+| ![compose a run](docs/gifs/01-setup.gif) **Compose.** Scene, blue fleet, red fleet, points, Play. Nothing else unlocks until the run exists. | ![command it](docs/gifs/02-command.gif) **Command.** `SETMISSION advance to P1 P2 P3`, `blue launch`. Typing a red order into the blue cell is refused with the reason. |
+| ![jamming](docs/gifs/03-jamming.gif) **Jam.** `JAM jam1 band 2400 power 30`, `red launch`. Links degrade in every same-band receiver; agents whose decider cannot reach them are held. | ![drift](docs/gifs/04-drift.gif) **Deny GNSS.** `JAM jam1 band 1575.42`. IMU-only cars dead-reckon; belief and truth part company, and a reported arrival that is not true fails the mission. |
+| ![wavefront](docs/gifs/05-wavefront.gif) **See whose signal wins.** The wavefront overlay says whose emission dominates where; the spectrum section shows how much. | ![results](docs/gifs/06-results.gif) **Sweep.** `authority × routing × jammer power` from one file; every numeric output plottable; double-click a row to replay that exact cell. |
 
 ## What it is for
 
@@ -74,7 +93,7 @@ jammer, mesh routing kept ~97% of a fleet commanded where tiered kept ~1%.
 | `commsev/spec.py` | schema, validation, provenance report |
 | `tools/sweep.py` `plot_results.py` `netcheck.py` | headless experiments and diagnostics |
 | `ros2/src/commsev_ros/` | the same model as ROS 2 nodes + Console bridge (optional) |
-| `tests/test_all.py` | 557 checks, no pytest |
+| `tests/test_all.py` | 561 checks, no pytest |
 | `docs/` | design and grounding — start at `docs/README.md` |
 | `SOURCES.md` `COMMANDS.md` `CLAUDE.md` | constants ledger · terminal grammar · rules for AI coding sessions |
 

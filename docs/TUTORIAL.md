@@ -13,6 +13,8 @@ left, map in the centre, three terminals and the log below.
 
 ## 2. Compose a run
 
+![compose](gifs/01-setup.gif)
+
 Only the **Setup** tab is live; the rest unlock when a run exists.
 
 1. **Scene** → `maze`. A 20 × 20 m room with eight interior walls of mixed
@@ -33,6 +35,8 @@ The run exists. Setup locks, the other tabs light up, nothing moves yet.
 > `tests/fixtures/fleets/` and never appear in the dropdown.
 
 ## 3. Command it
+
+![command](gifs/02-command.gif)
 
 In the **blue** terminal:
 
@@ -57,12 +61,16 @@ JAM jam1 band 2400 power 30
 red launch
 ```
 
+![jamming](gifs/03-jamming.gif)
+
 Open the **Network** tab. Links degrade or drop as the jammer's power lands
 in every same-band receiver's SINR; agents whose decider can no longer reach
 them stop taking orders. The **Contested** tab shows the noise floor each
 receiver actually experiences. `red halt` switches the jammer off again.
 
 ## 4. See what an agent believes
+
+![drift](gifs/04-drift.gif)
 
 Open **System**, pick a car, note it carries an IMU and nothing else. Switch
 the scene to `open_field` (a new run), spawn the same fleet, add points, play,
@@ -80,6 +88,8 @@ car that reports an arrival it did not make has failed the mission, and the
 log says so. This is the belief-vs-truth model — `gnss-drift-model.md`.
 
 ## 5. Run an experiment
+
+![results](gifs/06-results.gif)
 
 **Results** tab → **Run an experiment…** → `penetration`. This sweeps
 `experiments/penetration.yaml`: a fleet advancing 190 m down

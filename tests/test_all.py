@@ -3786,6 +3786,39 @@ def test_the_validator_lets_a_fleet_defer_authority_to_setup():
           f"errors={hier.errors} warnings={hier.warnings}")
 
 
+def test_the_terminal_forwards_setmission_goals():
+    """COMMANDS.md documents `SETMISSION advance to P1 P2 P3` and the sim
+    parses it, but the Console's terminal accepted exactly two tokens and
+    printed usage for anything longer - so the documented form could not be
+    typed. Found by tools/make_gifs.py, which types what the tutorial says.
+    The terminal now forwards the whole line and only checks the shape."""
+    print("\nTHE TERMINAL FORWARDS SETMISSION GOALS")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except Exception as exc:                            # noqa: BLE001
+        check("PySide6 is available for the terminal", False, str(exc))
+        return
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "console"))
+    import app as gui
+    QApplication.instance() or QApplication([])
+    sent = []
+    sh = gui.ShellPanel(str(REPO), cell="blue", console=None)
+    sh._send_queue_line = lambda line, summary: sent.append(line)
+    for cmd in ("SETMISSION advance to P1 P2 P3", "SETMISSION test",
+                "SETMISSION shuttle to P1 P2 laps 4"):
+        sh.inp.setText(cmd); sh.run()
+    check("`SETMISSION advance to P1 P2 P3` reaches the sim verbatim",
+          "SETMISSION advance to P1 P2 P3\n" in sent, str(sent))
+    check("the bare form still works", "SETMISSION test\n" in sent, str(sent))
+    check("...and so does laps", "SETMISSION shuttle to P1 P2 laps 4\n" in sent, str(sent))
+    n = len(sent)
+    sh.inp.setText("SETMISSION advance P1 P2"); sh.run()
+    check("a malformed line is refused with usage, not forwarded",
+          len(sent) == n and "usage" in sh.out.toPlainText(), str(sent[n:]))
+
+
 if __name__ == "__main__":
     for fn in (test_rf, test_topology, test_two_squad_hierarchy,
                test_authority_modes, test_blast_radius, test_files_load, test_three_layer_chain,
@@ -3844,7 +3877,8 @@ if __name__ == "__main__":
                test_the_experiment_dialog_does_not_block_the_window,
                test_the_field_shows_level_not_just_shape,
                test_a_vehicle_drives_forward_through_its_objectives,
-               test_the_validator_lets_a_fleet_defer_authority_to_setup):
+               test_the_validator_lets_a_fleet_defer_authority_to_setup,
+               test_the_terminal_forwards_setmission_goals):
         try:
             fn()
         except Exception:

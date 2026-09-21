@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      # What Qt needs to run offscreen on a bare runner; nothing else.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglib2.0-0 libfontconfig1 libdbus-1-3 libxkbcommon0
+      - run: pip install -r requirements.txt
+      - name: test suite (557 checks, no pytest)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python3 tests/test_all.py
+      - name: validate the default run
+        run: python3 -m commsev validate default_run.yaml

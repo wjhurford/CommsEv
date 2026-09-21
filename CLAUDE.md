@@ -53,7 +53,7 @@ A run is composed in the Console's Setup tab, or by a file naming
 | `commsev/spec.py` | schema loading + validation + provenance report |
 | `tools/sweep.py` | headless experiment harness; `tools/plot_results.py` plots it |
 | `ros2/src/commsev_ros/` | the same model as ROS 2 nodes + Console bridge (optional) |
-| `tests/test_all.py` | 557 checks, `python3 tests/test_all.py`, no pytest |
+| `tests/test_all.py` | 561 checks, `python3 tests/test_all.py`, no pytest |
 | `docs/` | see docs/README.md; vocabulary.md and ROADMAP.md first |
 | `SOURCES.md` | every constant and its status; `COMMANDS.md` the terminal grammar |
 
@@ -73,7 +73,7 @@ Console cells are scoped: **blue** commands blue, **red** commands red
 
 ## Before you change the model
 
-- Run `python3 tests/test_all.py` first and last. 557 should pass, 0 fail.
+- Run `python3 tests/test_all.py` first and last. 561 should pass, 0 fail.
 - If you add a constant, add it to `SOURCES.md` with its status.
 - If you change behaviour, add a test that would have caught the old bug.
 - Known open issues are in `docs/REVIEW-2026-09-01.md` — read the top three

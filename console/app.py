@@ -3692,14 +3692,21 @@ class ShellPanel(QWidget):
         """
         verb = tokens[0].upper()
         if verb == "SETMISSION":
-            if len(tokens) != 2:
+            # SETMISSION <name> [to <P1> <P2> ...] [laps <n>] - the sim owns
+            # the grammar (COMMANDS.md); the terminal only checks that a
+            # name was given and forwards the rest verbatim. It used to
+            # accept exactly two tokens, which silently made the documented
+            # "to P1 P2" form unreachable from the Console.
+            if len(tokens) < 2 or (len(tokens) > 2 and tokens[2].lower()
+                                   not in ("to", "laps")):
                 self.out.appendPlainText(
-                    "[usage: SETMISSION <name>   e.g. SETMISSION test   "
+                    "[usage: SETMISSION <name> [to <P1> <P2> ...] [laps <n>]"
+                    "   e.g. SETMISSION advance to P1 P2   "
                     "(missions/<name>.yaml; set it after Play, before "
                     "`blue launch`)]")
                 return
-            self._send_queue_line(f"SETMISSION {tokens[1]}\n",
-                                  f"SETMISSION {tokens[1]}")
+            line = "SETMISSION " + " ".join(tokens[1:])
+            self._send_queue_line(line + "\n", line)
             return
         if len(tokens) < 3:
             self.out.appendPlainText(
