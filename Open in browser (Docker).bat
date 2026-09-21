@@ -4,6 +4,22 @@ REM your browser. Needs Docker Desktop running. Nothing else - no Python.
 cd /d "%~dp0"
 where docker >nul 2>nul || (echo Docker Desktop is not installed or not on PATH. & echo Get it from docker.com, start it, then run this again. & pause & exit /b 1)
 
+REM Start Docker Desktop if its engine is not running yet (after a reboot,
+REM typically), and wait for it - up to two minutes.
+docker info >nul 2>nul && goto engine_up
+echo Docker Desktop is not running - starting it...
+if exist "%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe" start "" "%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe"
+if exist "%ProgramFiles%\Docker\Docker\Docker Desktop.exe" start "" "%ProgramFiles%\Docker\Docker\Docker Desktop.exe"
+set /a ENGINE_TRIES=0
+:engine_wait
+timeout /t 3 >nul
+docker info >nul 2>nul && goto engine_up
+set /a ENGINE_TRIES+=1
+if %ENGINE_TRIES% GEQ 40 (echo. & echo *** Docker Desktop did not come up in two minutes. Open it from the Start menu, wait for "Engine running", then run this again. *** & pause & exit /b 1)
+echo   waiting for the Docker engine...
+goto engine_wait
+:engine_up
+
 REM Draw the Console at the size the browser will actually have in full
 REM screen: the screen size AFTER Windows display scaling (a 1920x1080 laptop
 REM at 125%% gives apps 1536x864). Anything else gets rescaled and looks soft.
