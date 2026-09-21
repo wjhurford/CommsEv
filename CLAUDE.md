@@ -33,7 +33,7 @@ A run is composed in the Console's Setup tab, or by a file naming
 
 1. **Provenance.** Every physical quantity is `{value, unit, source}`. An empty
    source is allowed but counted and flagged. **Never invent a number that
-   looks researched.** Free parameters must be declared as free (SOURCES.md).
+   looks researched.** Free parameters must be declared as free (docs/SOURCES.md).
 2. **Missions never import `rclpy`.** Algorithms take plain numbers and return
    plain numbers; the ROS node is a wrapper. This is the sim-to-real argument.
 3. **`target(agent, world)` is frozen.** Add new senses to `world`, never to
@@ -55,7 +55,7 @@ A run is composed in the Console's Setup tab, or by a file naming
 | `ros2/src/commsev_ros/` | the same model as ROS 2 nodes + Console bridge (optional) |
 | `tests/test_all.py` | 561 checks, `python3 tests/test_all.py`, no pytest |
 | `docs/` | see docs/README.md; vocabulary.md and ROADMAP.md first |
-| `SOURCES.md` | every constant and its status; `COMMANDS.md` the terminal grammar |
+| `docs/SOURCES.md` | every constant and its status; `docs/COMMANDS.md` the terminal grammar |
 
 Naming: the project is **CommsEv** in prose, `commsev` in code (package,
 CLI `python3 -m commsev`, ROS package `commsev_ros`, env var `COMMSEV_ROOT`).
@@ -74,7 +74,7 @@ Console cells are scoped: **blue** commands blue, **red** commands red
 ## Before changing the model
 
 - Run `python3 tests/test_all.py` first and last. 561 should pass, 0 fail.
-- A new constant is added to `SOURCES.md` with its status.
+- A new constant is added to `docs/SOURCES.md` with its status.
 - A change in behaviour is accompanied by a test that would have detected the
   previous behaviour.
 - Known open issues are in `docs/REVIEW-2026-09-01.md` — read the top three

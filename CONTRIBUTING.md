@@ -8,7 +8,7 @@ produced with it can still be defended. Accordingly:
   `check(name, condition, note)` and is registered in the list at the bottom.
 - A change in behaviour is accompanied by a test that would have detected the
   previous behaviour.
-- A new constant is accompanied by a row in `SOURCES.md` giving its source,
+- A new constant is accompanied by a row in `docs/SOURCES.md` giving its source,
   or declaring it a free parameter. An empty source is permitted; an invented
   one is not.
 - Physics belongs in `tools/stub_telemetry.py`, never in the Console.

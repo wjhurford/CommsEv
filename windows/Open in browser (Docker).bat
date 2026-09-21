@@ -1,7 +1,7 @@
 @echo off
 REM Builds the CommsEv image if needed, starts it, and opens the Console in
 REM your browser. Needs Docker Desktop running. Nothing else - no Python.
-cd /d "%~dp0"
+cd /d "%~dp0.."
 where docker >nul 2>nul || (echo Docker Desktop is not installed or not on PATH. & echo Get it from docker.com, start it, then run this again. & pause & exit /b 1)
 
 REM Start Docker Desktop if its engine is not running yet (after a reboot,
@@ -38,7 +38,7 @@ set /a TRIES=0
 :waitloop
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://localhost:5800; exit 0 } catch { exit 1 }" >nul 2>nul && goto up
 set /a TRIES+=1
-if %TRIES% GEQ 30 (echo. & echo *** The container started but nothing is answering on port 5800 after 60 s. *** & echo *** Double-click "Docker log.bat" and send the output to Claude. *** & pause & exit /b 1)
+if %TRIES% GEQ 30 (echo. & echo *** The container started but nothing is answering on port 5800 after 60 s. *** & echo *** Double-click "windows\Docker log.bat" and send the output to Claude. *** & pause & exit /b 1)
 timeout /t 2 >nul
 goto waitloop
 :up

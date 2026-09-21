@@ -34,7 +34,7 @@ Claude outputs/
 # permanently 100 MB heavier and no `git rm` afterwards takes it back out.
 #
 # The papers live beside the repo (OneDrive, a shared drive, wherever) and
-# what IS in version control is the thing that matters: SOURCES.md, which
+# what IS in version control is the thing that matters: docs/SOURCES.md, which
 # names each one and says exactly which table or equation is being relied on.
 # A reader can find a paper from a citation. They cannot find a citation from
 # a PDF sitting in a folder.

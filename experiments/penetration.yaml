@@ -75,7 +75,7 @@ description: >
 #   swept here rather than pinned.
 #
 # NOT YET CHECKED: whether this survives indoors. Ding et al. (arXiv:1503.04251,
-# see SOURCES.md) warn that densifying a network can REDUCE coverage once the
+# see docs/SOURCES.md) warn that densifying a network can REDUCE coverage once the
 # interference is line-of-sight too, which would make a mesh worse in a maze
 # than in an open corridor. The model can now express that and nobody has run it.
 # =============================================================================

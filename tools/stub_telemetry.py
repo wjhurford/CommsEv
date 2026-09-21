@@ -75,7 +75,7 @@ WALL_MARGIN_M = 0.6
 #             subordinate to seek new direction once the assigned effect is
 #             achieved rather than invent a next task - not yet modelled.
 #
-# See docs/jamming-model-justification.md and SOURCES.md.
+# See docs/jamming-model-justification.md and docs/SOURCES.md.
 LINK_LOSS_KEEPS_GOING = {"intent", "continue"}
 
 
@@ -126,7 +126,7 @@ DRIFT_RATE_UNAIDED = 0.005
 # cannot stand. Picking a better number by feel would be exactly the kind of
 # invention this constant just stopped being. Held equal to unaided (an
 # aiding sensor is at least not harmful) until a measured lidar- or
-# vision-aided drift figure is sourced. See SOURCES.md.
+# vision-aided drift figure is sourced. See docs/SOURCES.md.
 DRIFT_RATE_AIDED = DRIFT_RATE_UNAIDED
 # A sensor that gives an RF-immune position fix (lidar/vision localisation)
 # greatly reduces drift but does NOT remove it: scan-matching and loop-closure
@@ -134,7 +134,7 @@ DRIFT_RATE_AIDED = DRIFT_RATE_UNAIDED
 # Visual Navigation System in UNKNOWN terrain, and "no measurable drift" only
 # against KNOWN terrain (a surveyed map). 1% is the honest default; a scene
 # that declares a surveyed map could justify less. Zero was an over-claim.
-# LIDAR SCAN-MATCHING DRIFT. See SOURCES.md - this is an OPEN question, not a
+# LIDAR SCAN-MATCHING DRIFT. See docs/SOURCES.md - this is an OPEN question, not a
 # settled number, and it is deliberately not a guess dressed as one.
 #
 # What is measured: LOAM (Zhang & Singh, RSS 2014, Table I) reports 0.9% of

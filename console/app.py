@@ -3693,7 +3693,7 @@ class ShellPanel(QWidget):
         verb = tokens[0].upper()
         if verb == "SETMISSION":
             # SETMISSION <name> [to <P1> <P2> ...] [laps <n>] - the sim owns
-            # the grammar (COMMANDS.md); the terminal only checks that a
+            # the grammar (docs/COMMANDS.md); the terminal only checks that a
             # name was given and forwards the rest verbatim. It used to
             # accept exactly two tokens, which silently made the documented
             # "to P1 P2" form unreachable from the Console.
@@ -7724,7 +7724,7 @@ class Console(QMainWindow):
     # The verbs still exist for what they are for: retasking ONE vehicle onto
     # something the fleet is not doing - a scout, a pursuer, a deliberate
     # relay left behind. That is a per-agent exception, it is typed at the
-    # terminal where exceptions belong, and it is documented in COMMANDS.md:
+    # terminal where exceptions belong, and it is documented in docs/COMMANDS.md:
     #
     #     car3: pursue car1
     #     car3: wall_follow right

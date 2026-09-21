@@ -5,6 +5,10 @@ All notable changes. Dates are release dates; the format follows
 
 ## [Unreleased]
 
+### Changed
+- Windows launchers moved to `windows/`; `COMMANDS.md` and `SOURCES.md` moved
+  to `docs/`. The repository root now holds only standard project files.
+
 ## [0.2.0] — 2026-09-18
 
 First public release.

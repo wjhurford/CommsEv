@@ -1121,7 +1121,7 @@ def test_gnss_jamming_causes_drift_that_grows_recovers_and_lidar_resists():
     # measured unaided 0.49% - incoherent, so it was held at the unaided rate
     # rather than replaced with a better-feeling guess. Restore the stronger
     # assertion (aided is MUCH better) the moment a measured lidar- or
-    # vision-aided drift figure is sourced. See SOURCES.md.
+    # vision-aided drift figure is sourced. See docs/SOURCES.md.
     # Asserted on the RATES, not on two runs in different rooms over
     # different distances - which is what the old version did, and it only
     # ever passed because the unaided rate was ten times too big.
@@ -3787,7 +3787,7 @@ def test_the_validator_lets_a_fleet_defer_authority_to_setup():
 
 
 def test_the_terminal_forwards_setmission_goals():
-    """COMMANDS.md documents `SETMISSION advance to P1 P2 P3` and the sim
+    """docs/COMMANDS.md documents `SETMISSION advance to P1 P2 P3` and the sim
     parses it, but the Console's terminal accepted exactly two tokens and
     printed usage for anything longer - so the documented form could not be
     typed. Found by tools/make_gifs.py, which types what the tutorial says.

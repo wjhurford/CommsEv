@@ -28,7 +28,7 @@ operational; the API is not frozen.
 
 ```bash
 docker run --rm -p 5800:5800 ghcr.io/wjhurford/commsev     # prebuilt image
-docker compose up        # or build from source; Windows: "Open in browser (Docker).bat"
+docker compose up        # or build from source; Windows: "windows\Open in browser (Docker).bat"
 ```
 
 then open <http://localhost:5800> and press F11 for full screen. Building from
@@ -38,7 +38,7 @@ source takes about two minutes and runs the test suite as its final step.
 
 ```bash
 pip install -r requirements.txt
-python3 console/app.py   # Windows: "Setup (run once).bat", then console\CommsEv Console.bat
+python3 console/app.py   # Windows: "windows\Setup (run once).bat", then windows\CommsEv Console.bat
 ```
 
 **First run.** Setup tab → scene `maze` → blue fleet `8_roboracer_no_lidar` →
@@ -46,7 +46,7 @@ red fleet `custom_red` → add three points → **Play**. In the blue terminal:
 `SETMISSION advance to P1 P2 P3`, then `blue launch`. In the red terminal:
 `JAM jam1 band 2400 power 30`, then `red launch`. The links degrade and
 command authority contracts. `docs/TUTORIAL.md` is the full walk-through;
-`COMMANDS.md` is the terminal grammar.
+`docs/COMMANDS.md` is the terminal grammar.
 
 **Headless:**
 
@@ -74,7 +74,7 @@ change to the interface.
 CommsEv supports comparative claims under identical conditions — architecture
 A against B, sensor fit A against B, doctrine A against B. It does not support
 absolute figures: no link margin in dB or packet-delivery ratio (PDR) produced
-by the model is a measurement. `SOURCES.md` records which constants are
+by the model is a measurement. `docs/SOURCES.md` records which constants are
 grounded in the literature and which are declared free parameters.
 
 The contribution is the **separation of authority from routing**. `authority`
@@ -100,8 +100,9 @@ commanded where tiered routing kept approximately 1%.
 | `tools/sweep.py` `plot_results.py` `netcheck.py` | headless experiments and diagnostics |
 | `ros2/src/commsev_ros/` | the same model as ROS 2 nodes + Console bridge (optional) |
 | `tests/test_all.py` | 561 checks, no pytest |
-| `docs/` | design and grounding — start at `docs/README.md` |
-| `SOURCES.md` `COMMANDS.md` `CLAUDE.md` | constants ledger · terminal grammar · rules for AI coding sessions |
+| `docs/` | design, grounding, tutorial, `COMMANDS.md`, `SOURCES.md` — start at `docs/README.md` |
+| `windows/` | double-click launchers for Windows |
+| `CLAUDE.md` | rules and orientation for AI coding sessions |
 
 Not in the repository: `attic/` (ignored by git) holds the reference-library
 PDFs, supervisor handover notes and working images.

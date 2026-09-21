@@ -6,7 +6,7 @@ command; `vocabulary.md` defines scene, fleet and mission.
 
 ## 1. Start it
 
-Docker: `docker compose up` (Windows: `Open in browser (Docker).bat`), then
+Docker: `docker compose up` (Windows: `windows\Open in browser (Docker).bat`), then
 <http://localhost:5800>, F11. Native: `pip install -r requirements.txt`,
 `python3 console/app.py`. Both routes present the same window: sidebar on the
 left, map in the centre, terminals and log below.

@@ -32,7 +32,7 @@ def budget():
         print(f"{d:>5}m  {r['rx_dbm']:>8.1f}  {r['sinr_db']:>8.1f}  "
               f"{r['pdr']:>6.3f}  {r['state']}")
     print("\nNOTE: path loss exponent 2.8 and noise floor -95 dBm are "
-          "defensible\ndefaults, NOT measurements. See SOURCES.md.")
+          "defensible\ndefaults, NOT measurements. See docs/SOURCES.md.")
 
 
 def first_frame(scenario):

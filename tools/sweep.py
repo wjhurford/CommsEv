@@ -55,7 +55,7 @@
 #                       link, not the average (Zhou et al. 2020).
 #
 # NOT MEASURED, and deliberately so: anything that would need a threshold or
-# a fitted constant this project cannot yet source. See SOURCES.md.
+# a fitted constant this project cannot yet source. See docs/SOURCES.md.
 # =============================================================================
 from __future__ import annotations
 

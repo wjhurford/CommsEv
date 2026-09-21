@@ -2,7 +2,7 @@
 REM Runs the whole CommsEv test suite, keeps the window open, and saves the
 REM full output to test_output.txt so a failure can be read back later.
 REM Expect the last line to read: N passed, 0 failed
-cd /d "%~dp0"
+cd /d "%~dp0.."
 REM Pick whichever Python already has PySide6; failing that, install the
 REM requirements into "python" (or "py") first. Same thing Setup (run once).bat does.
 set PY=
