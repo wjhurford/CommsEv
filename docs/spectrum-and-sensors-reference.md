@@ -1,15 +1,16 @@
 # Reference — jamming targets, real frequencies, and vehicle sensors
 
-Raised by Will (1 Sep). A working reference for what to build next, so the
-model's bands and sensors match reality rather than two placeholders.
+Raised 1 September 2026. A working reference for what to build next, so that
+the model's bands and sensors match reality rather than two placeholders.
 
 ## There are more than two jammings
 
-We model two TARGETS (what is denied): the comms link and GNSS. That is the
-right starting pair, but not the whole picture. Jamming is better thought of as
-target x technique.
+The model represents two **targets** (what is denied): the communications link
+and GNSS. That is the right starting pair, but not the whole picture. Jamming
+is better thought of as target × technique.
 
 **Targets (what an emitter denies):**
+
 - Comms / control link (uplink command, downlink telemetry, video) — modelled.
 - GNSS / positioning — modelled.
 - Radar (a vehicle's own radar, or a seeker's) — not modelled.
@@ -17,16 +18,18 @@ target x technique.
 - Data links specifically (e.g. Link 16, MAVLink) as distinct from generic RF.
 
 **Techniques (how) — the survey's taxonomy (Priyadarshani et al. 2025):**
+
 - Proactive: constant (modelled), random, deceptive.
-- Reactive (fires only when it hears you) — the sensing half needs interception.
+- Reactive (fires only when it detects a transmission) — the sensing half
+  needs interception.
 - Advanced: follow-on (chases a frequency-hopper), smart/adaptive.
 - Spatial: barrage (wide band) vs spot (one channel) vs sweep; directional /
   spatial-nulling (needs antenna directionality, not yet modelled).
 
 ## Real frequencies (what a small UAS / ground robot actually uses)
 
-Our 2400 MHz (comms) and 1575.42 MHz (GPS L1) are both real and common, but a
-military platform spans far more. To build next:
+The model's 2400 MHz (comms) and 1575.42 MHz (GPS L1) are both real and common,
+but a military platform spans far more. To build next:
 
 | Use | Band(s) | Note |
 |---|---|---|
@@ -43,13 +46,13 @@ defeats a spot jammer but not a follow-on one.
 
 ## Sensors on real military vehicles — the localisation menu
 
-Why it matters: GNSS denial only bites if GNSS is the ONLY position source.
-Real platforms layer several, and which ones survive jamming is the whole
-resilience question. To add (todo), roughly in order of value here:
+GNSS denial only bites if GNSS is the **only** position source. Real platforms
+layer several, and which ones survive jamming is the central resilience
+question. To add (todo), roughly in order of value here:
 
 - **IMU** (have) — dead-reckoning source; drifts. Always present.
 - **GNSS** (have) — absolute fix; jammable/spoofable.
-- **LiDAR** (have, now scene-aware) — localises against STRUCTURE (walls,
+- **LiDAR** (have, now scene-aware) — localises against **structure** (walls,
   terrain); useless in open space; RF-immune.
 - **EO/IR camera + visual odometry / optical flow** — localises against ground
   texture and features; works in open field where lidar cannot (optical flow
@@ -61,12 +64,14 @@ resilience question. To add (todo), roughly in order of value here:
 - **Wheel odometry (ground)** — distance travelled; better than IMU alone for
   a car; slips.
 - **Terrain-referenced navigation (TERCOM/TERPROM)** — match a radar/baro
-  terrain profile to a stored map; classic cruise-missile GNSS-free nav.
+  terrain profile to a stored map; classic cruise-missile GNSS-free navigation.
 - **UWB / radio beacons / signals-of-opportunity** — range off known emitters;
-  the paper's collaborative-positioning idea (cars range off each other).
+  the collaborative-positioning idea from the literature (cars range off each
+  other).
 - **Celestial / vision-of-stars** — high-end, GNSS-free absolute.
 
-The design pattern is already right: each sensor is an input to the position
-ESTIMATE, and the estimator (a Kalman filter, the queued step) fuses whichever
-survive. GNSS jamming then degrades but does not blind a well-sensored vehicle,
-and that difference is measurable — which is the project.
+The design pattern is already correct: each sensor is an input to the position
+**estimate**, and the estimator (a Kalman filter, the queued step) fuses
+whichever survive. GNSS jamming then degrades but does not blind a
+well-sensored vehicle, and that difference is measurable — which is the
+project's purpose.

@@ -1,11 +1,11 @@
 # CommsEv — Console command reference
 
-Every command you can type into a Console terminal, and which cell may type it.
+Every command accepted by a Console terminal, and which cell may issue it.
 
 The Console has three terminals, and they are not cosmetic. **A cell may only
 act on its own side.** Typing a red command into the blue cell is refused with a
-reason printed, and the command is never sent. This is how the exercise stays
-honest: blue cannot switch the jammer off, and red cannot retask blue's fleet.
+reason printed, and the command is never sent. This is what keeps the exercise
+valid: blue cannot switch the jammer off, and red cannot retask blue's fleet.
 
 | Cell | May act on | Cannot |
 |---|---|---|
@@ -13,9 +13,9 @@ honest: blue cannot switch the jammer off, and red cannot retask blue's fleet.
 | **Blue** | blue agents and networks; missions | anything red, including `JAM` |
 | **Red** | red agents and networks; jammers | anything blue, including `SETMISSION` |
 
-White is the exercise controller. If you are running alone, use White and
-ignore the split; use Blue and Red when you want the refusals to catch you
-doing something the experiment shouldn't allow.
+White is the exercise controller. A single operator can use White and ignore
+the split; Blue and Red are for exercises where the refusals should catch
+actions the experiment does not allow.
 
 ---
 
@@ -47,8 +47,8 @@ the things worth measuring.
 
 ## The map is an editor, before the run starts
 
-Everything below can also be done by hand, on the Setup tab, before you press
-Play. Nothing here needs a coordinate typed into a file.
+Everything below can also be done by hand, on the Setup tab, before Play is
+pressed. Nothing here needs a coordinate typed into a file.
 
 | Do this | And this happens |
 |---|---|
@@ -56,14 +56,14 @@ Play. Nothing here needs a coordinate typed into a file.
 | Sweep a box over several | They become one selection |
 | Drag any selected one | **All of them move together**, by the same vector — the formation translates instead of coming apart |
 | Shift while sweeping | Named points join the selection too |
-| Drag a named point | The objective itself moves. `FAR` is where you put it |
+| Drag a named point | The objective itself moves. `FAR` is wherever it was placed |
 | **Add point…** | Invent a destination this scene never had, then drag it |
 | Middle-drag | Pans the view (the left button is the placement tool while placing) |
 
 A drag is **clamped to the arena**, using the same bounds check that validates
 an objective — so the map cannot express a setup the model would then refuse.
 
-Points are excluded from a box selection unless you hold Shift, and that is a
+Points are excluded from a box selection unless Shift is held, and that is a
 safety rule rather than a preference: penetration is measured to the goal, so a
 box swept round a fleet that quietly dragged `FAR` along with it would move the
 ruler and the thing being measured together, and the numbers would still look
@@ -78,8 +78,8 @@ and the label reverts to `(as spawned)`.
 
 Choosing a fleet asks one coordinate: **where this side sets up**. The ground
 station goes there and the vehicles form up ahead of it, one spacing clear of
-the bench, in whatever formation you picked. Move the spawn point and the whole
-side moves with it, shape intact.
+the bench, in the chosen formation. Move the spawn point and the whole side
+moves with it, shape intact.
 
 ### Objectives, from the Setup tab
 
@@ -107,8 +107,8 @@ car2 halt                   un-arm one named agent
 
 `launch`/`halt` are also accepted uppercase. An agent that is not armed is
 idle regardless of what objective it holds — assignment and activation are
-separate steps on purpose, so you can task a fleet, inspect what it intends to
-do, and only then set it going.
+separate steps on purpose, so a fleet can be tasked, its intended behaviour
+inspected, and only then set going.
 
 ---
 
@@ -123,14 +123,14 @@ SETMISSION <name> to <P1> <P2> <P3>        a route, visited in order
 SETMISSION patrol to <P1> <P2> laps 4      and how many times round
 ```
 
-### A mission says what SHAPE the task is. Everything else is yours
+### A mission says what shape the task is. Everything else is set at the run
 
 There are three, and between them they cover everything:
 
 | Mission | Goals | Laps | What it is |
 |---|---|---|---|
-| `advance` | as many as you add | 1, fixed | Visit each point once, in order. One goal is the penetration command; three is a route |
-| `patrol` | as many as you add | yours | The same circuit, repeated. **Two points patrolled is a shuttle** — which is why there is no shuttle mission |
+| `advance` | as many as are given | 1, fixed | Visit each point once, in order. One goal is the penetration command; three is a route |
+| `patrol` | as many as are given | set at the run | The same circuit, repeated. **Two points patrolled is a shuttle** — which is why there is no shuttle mission |
 | `forward` | none | — | Drive on until a wall or until command is lost. No arrival, so no score: a probe, not a task |
 
 `advance` fixes one lap deliberately. Offering it a lap count would be offering
@@ -146,13 +146,13 @@ the terminal, where an exception belongs.
 
 ### A mission says how many goals it needs, not where they are
 
-This is the important one, and it replaces the old behaviour completely.
+This replaces the old behaviour completely.
 
 `missions/advance.yaml` used to say `to: FAR`. `FAR` existed only in the
 corridor, so the one mission the whole experiment programme is built on could
 run on exactly one scene — and pointed at any other it did not fail loudly, it
-tasked **nobody** and produced a table of vehicles that had not moved. Worse,
-it let whoever wrote the *scene* decide the *objective*.
+tasked **nobody** and produced a table of vehicles that had not moved. It also
+let the author of the *scene* decide the *objective*.
 
 A mission now declares a **count**:
 
@@ -161,7 +161,7 @@ plan: {who: all, goals: 2, laps: 4}    # a shuttle needs two ends
 ```
 
 and the run says where they are — from the Setup tab's goal pickers, which
-grow and shrink to match the mission you chose, or from the terminal:
+grow and shrink to match the chosen mission, or from the terminal:
 
 ```
 SETMISSION advance to P1        corridor
@@ -176,7 +176,7 @@ does. `forward` asks for none and is left alone by any goal offered to it.
 
 ### Where points come from now
 
-**No scene ships points. Not one.** `HOME`, `FAR`, `APEX`, `WINGL`, `WINGR`,
+**No scene ships points.** `HOME`, `FAR`, `APEX`, `WINGL`, `WINGR`,
 `A`–`F` — every one of them was an objective in disguise.
 `APEX`/`WINGL`/`WINGR` were a wedge's formation slots hardcoded into the room
 it happened to be standing in, which is exactly what formations-as-functions
@@ -194,7 +194,7 @@ two controls either way.
 The one exception is `missions/test.yaml`, the fixed benchmark, which carries
 its own **literal coordinates**. It is the control condition everything else is
 measured against, so it has to be identical every time and must not depend on
-points somebody set up differently this morning. Every other mission names no
+points set up differently in a given session. Every other mission names no
 geometry at all — which is what makes one mission file run on any scene.
 
 ### The mission is set before Play
@@ -204,10 +204,10 @@ trees, the map and the properties panel show what the fleet has been told
 without a simulator having to be running to be told it. **Issue mission** is
 the button; **arming stays at the terminal** — `blue launch` — because tasking
 a fleet and setting it going are two decisions, and being able to inspect what
-it intends to do in between is the whole reason they were split.
+it intends to do in between is the reason they were split.
 
 Nothing about the command gate is lost. At t=0 nothing has been jammed yet, so
-gating the initial assignment would be theatre. Every order issued *after* the
+gating the initial assignment would gate nothing. Every order issued *after* the
 run starts still travels the command channel and is still refused when it
 cannot get through.
 
@@ -233,7 +233,7 @@ titles the run with its name, so results come out as
 
 **Gated by command authority.** Every agent's decider chain is checked before
 it is retasked. An agent its decider cannot currently reach is skipped, and the
-skip is printed — you can watch a jammed fleet refuse an order.
+skip is printed — a jammed fleet can be observed refusing an order.
 
 ---
 
@@ -261,12 +261,12 @@ REOBJECTIVE car3 script missions/return_on_link_loss.py
 | `orbit` | — | radius (m) | Circle the origin |
 | `wall_follow` | `wall` | `left` / `right` | Track a wall (needs a lidar and a wall) |
 | `static` | `stop`, `hold` | — | Hold position |
-| `script` | — | a `.py` path | Your own mission file decides |
+| `script` | — | a `.py` path | Determined by the mission file |
 
 **Points can be named or literal.** `shuttle between E F` uses the points the
 *scene* defines, so the same objective runs on any scene that defines E and F.
 `shuttle (-3,3,0) (3,3,0)` welds it to these coordinates. Named points are what
-make a mission portable; use them unless you have a reason not to.
+make a mission portable; use them unless there is a specific reason not to.
 
 Objectives are validated when they are **assigned** — named points must
 resolve, endpoints must be inside the arena. A bad objective is refused with a
@@ -276,8 +276,8 @@ reason, not silently turned into something else.
 
 ## Jamming — `JAM`
 
-**Cell: RED only.** The blue cell is refused — blue does not get to turn off the
-thing attacking it.
+**Cell: RED only.** The blue cell is refused — blue cannot switch off the
+emitter attacking it.
 
 ```
 JAM jam1 band 2400 power 25     set the whole emission in one line
@@ -287,13 +287,13 @@ JAM jam1 power 25               one property on its own still works
 
 **Set band and power together.** Two separate commands leave a window where
 the jammer is on the new band at the *old* power — a third emission, which is
-not the one you meant and not the one you had. One line, one emission.
+neither the intended emission nor the previous one. One line, one emission.
 
 A malformed line applies **nothing**: a half-applied emission is worse than a
 rejected one, because the run carries on using settings nobody chose.
 
 Takes effect **live**, mid-run. Arming and silencing is `red launch` /
-`red halt`, not a `JAM` argument — the vehicle is deployed or it isn't.
+`red halt`, not a `JAM` argument — the vehicle is either deployed or not.
 
 ### Frequencies worth knowing
 
@@ -304,8 +304,8 @@ Takes effect **live**, mid-run. Arming and silencing is `red launch` /
 
 These do different things and they are not interchangeable. Comms jamming
 strips command, so a `hold` fleet stops — and a stopped vehicle no longer
-dead-reckons, so comms jamming *suppresses* the drift GNSS jamming causes. If
-you sweep both together you cannot tell the two effects apart.
+dead-reckons, so comms jamming *suppresses* the drift GNSS jamming causes.
+Sweeping both together makes the two effects inseparable.
 
 ### Dual-emitter vehicles — PLANNED, NOT YET BUILT
 
@@ -335,7 +335,7 @@ command in WSL, from the repo root, with ROS 2 sourced. So `ls runs/`,
 
 ---
 
-## Refusals you will meet
+## Refusals
 
 | Message | Why |
 |---|---|
@@ -344,7 +344,8 @@ command in WSL, from the repo root, with ROS 2 sourced. So `ls runs/`,
 | `[blocked: 'car1' is on the blue side; this is the red cell]` | Wrong side for `launch`/`halt`/`REOBJECTIVE` |
 | `SETMISSION: <agent> skipped - commander unreachable` | Not a refusal. The order could not get through. This is a **result**, not an error |
 
-That last one is the point of the whole exercise. Write it down when it happens.
+The last message is the central measurement of the exercise; record it when it
+occurs.
 
 ---
 

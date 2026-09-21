@@ -1,7 +1,8 @@
 # Getting to ROS 2, and writing missions
 
-Two things this answers: how ROS 2 actually fits, and how a researcher writes a
-behaviour that runs in simulation and on a real car without being rewritten.
+This document answers two questions: how ROS 2 fits into the framework, and how
+a researcher writes a behaviour that runs in simulation and on a real car
+without being rewritten.
 
 ---
 
@@ -10,11 +11,11 @@ behaviour that runs in simulation and on a real car without being rewritten.
 No, and the distinction matters for how this framework is built.
 
 **ROS 2 is middleware.** It is the plumbing between processes: topics, services,
-discovery, QoS. It is not a language, a control library, or a place algorithms
-live. A ROS 2 node is an ordinary Python or C++ program that happens to publish
-and subscribe.
+discovery, QoS. It is not a language, a control library, or a place where
+algorithms live. A ROS 2 node is an ordinary Python or C++ program that happens
+to publish and subscribe.
 
-So a real RoboRacer is three layers, and only the middle one is ROS:
+A real RoboRacer is therefore three layers, and only the middle one is ROS:
 
 | Layer | What it is | Is it ROS 2? |
 | --- | --- | --- |
@@ -24,8 +25,8 @@ So a real RoboRacer is three layers, and only the middle one is ROS:
 
 The algorithm layer does not know ROS exists. That is what makes the same
 controller file runnable in the simulator and on hardware: only the wrapper
-changes. If your algorithm imports `rclpy`, you have mixed two layers and you
-will not be able to test it without a robot.
+changes. An algorithm that imports `rclpy` has mixed two layers and cannot be
+tested without a robot.
 
 **Design rule for this project: never let ROS types into an algorithm.** A
 mission or detector takes plain numbers and returns plain numbers.
@@ -50,9 +51,10 @@ sudo apt update && sudo apt install -y ros-humble-desktop python3-colcon-common-
 echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc && source ~/.bashrc
 ```
 
-Check it: `ros2 topic list` should print `/parameter_events` and `/rosout`.
+Check the installation: `ros2 topic list` should print `/parameter_events` and
+`/rosout`.
 
-### 2. Prove it works before adding anything
+### 2. Verify the installation before adding anything
 
 Two terminals:
 
@@ -61,7 +63,7 @@ ros2 run demo_nodes_cpp talker
 ros2 run demo_nodes_py listener
 ```
 
-If that does not work, nothing after it will. Fix it here.
+Every later step depends on this one; resolve any failure here first.
 
 ### 3. The f1tenth simulator
 
@@ -73,13 +75,13 @@ colcon build && source install/setup.bash
 ros2 launch f1tenth_gym_ros gym_bridge_launch.py
 ```
 
-This is the thing to compare against. It publishes `/scan`, `/ego_racecar/odom`
-and takes `/drive`.
+This is the reference to compare against. It publishes `/scan`,
+`/ego_racecar/odom` and takes `/drive`.
 
 ### 4. ArduPilot, for the air layer
 
-Follow ArduPilot's own ROS 2 + Gazebo guide. Two things that cost a day each if
-missed: `export GZ_VERSION=harmonic` before building, and never install
+Follow ArduPilot's own ROS 2 + Gazebo guide. Two points each cost a day if
+missed: set `export GZ_VERSION=harmonic` before building, and never install
 `ros-humble-ros-gz*` alongside `ros-humble-ros-gzharmonic` — they conflict.
 
 ---
@@ -99,7 +101,7 @@ crosses the WSL boundary without special setup.
   commsev_bridge  ---- JSON frames over ws ---->  CommsEv Console
         ^                                          (draws, records, plots)
         |  ROS 2 topics
-  your controller nodes
+  controller nodes
 ```
 
 `commsev_bridge` is one node: it subscribes to every agent's topics, packs them
@@ -107,7 +109,7 @@ into the frame shape `tools/stub_telemetry.py` already emits, and writes them to
 a WebSocket. Nothing in the Console changes — `start_run()` points at the bridge
 instead of the stub.
 
-The stub stays. It is the zero-dependency mode: the Console can be developed,
+The stub remains. It is the zero-dependency mode: the Console can be developed,
 demonstrated and handed over with no ROS installed at all.
 
 ---
@@ -117,8 +119,8 @@ demonstrated and handed over with no ROS installed at all.
 A mission answers one question: **where should this agent be heading right now?**
 
 > **The full walkthrough is [`history/writing-a-mission.md`](history/writing-a-mission.md)** —
-> the contract, what bites you, one written from scratch, and how to run it.
-> What follows is the summary.
+> the contract, common pitfalls, one mission written from scratch, and how to
+> run it. What follows is the summary.
 
 ### The simulation version
 
@@ -132,16 +134,16 @@ def target(agent, world):
             lead["y"] - 1.2 * math.sin(lead["yaw"]))
 ```
 
-You get:
+The function receives:
 
 - `agent` — this agent's own config: id, dimensions, speed, sensors, mission
-- `world` — everything it is allowed to know:
+- `world` — everything the agent is allowed to know:
   - `world.t`, `world.dt`, `world.arena`
   - `world.pose(id)`, `world.distance_to(a, b)`, `world.bearing_to(a, b)`
   - `world.scan(id)`, `world.nearest_return(id, lo, hi)` — the lidar
-  - `world.link(a, b)` — quality, state, latency, PDR
+  - `world.link(a, b)` — quality, state, latency, packet-delivery ratio (PDR)
 
-Speed limits and collision still apply, so you cannot cheat physics by
+Speed limits and collision still apply, so physics cannot be bypassed by
 returning a point behind a wall.
 
 The older `target(agent, t, poses, arena)` still runs with a deprecation
@@ -153,7 +155,7 @@ Point a scenario at it:
 mission:
   type: script
   file: missions/my_mission.py
-  target: car1        # anything extra reaches you inside `agent["mission"]`
+  target: car1        # anything extra reaches the script inside `agent["mission"]`
 ```
 
 ### The same behaviour on a real car
@@ -174,15 +176,15 @@ class MissionNode(Node):
         self.pub.publish(msg)
 ```
 
-`target()` is imported unchanged from the same file the simulator ran. That is
-the whole point: test the behaviour against three simulated cars under a jammed
-link, then run the identical file on hardware.
+`target()` is imported unchanged from the same file the simulator ran. This is
+the sim-to-real argument: test the behaviour against three simulated cars under
+a jammed link, then run the identical file on hardware.
 
-### Start here
+### Starting point
 
 1. Copy `missions/example_pursuit.py` to `missions/my_mission.py`
 2. Change the returned point — make it circle, or hold formation
-3. Point `car3`'s mission at your file and press Run
+3. Point `car3`'s mission at the new file and press Run
 4. If it throws, the error prints to the Log tab. It is never silently ignored
 
 ---

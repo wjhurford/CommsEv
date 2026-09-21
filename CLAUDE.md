@@ -71,10 +71,11 @@ It was called Deadband until September 2026; do not reintroduce that name.
 Console cells are scoped: **blue** commands blue, **red** commands red
 (JAM only), **white** is the umpire and does anything.
 
-## Before you change the model
+## Before changing the model
 
 - Run `python3 tests/test_all.py` first and last. 561 should pass, 0 fail.
-- If you add a constant, add it to `SOURCES.md` with its status.
-- If you change behaviour, add a test that would have caught the old bug.
+- A new constant is added to `SOURCES.md` with its status.
+- A change in behaviour is accompanied by a test that would have detected the
+  previous behaviour.
 - Known open issues are in `docs/REVIEW-2026-09-01.md` — read the top three
   before touching the model.

@@ -4,29 +4,30 @@ Every physical parameter in CommsEv carries a source. This file tracks what
 still needs one.
 
 **Rules.** No number enters the codebase without a source. A source is a
-datasheet, a paper, or a measurement we took ourselves and can describe. Where
-no good source exists, say so and make the parameter explicitly free rather than
-inventing a value that looks researched.
+datasheet, a paper, or a measurement made by the project and described. Where
+no good source exists, state so and make the parameter explicitly free rather
+than inventing a value that looks researched.
 
 Status: `TODO` · `FOUND` · `MEASURED` · `NO SOURCE` (declared free parameter)
 
-### Open, 2026-09: what a lidar actually buys is not a lower drift rate
+### Open, 2026-09: what a lidar buys is not a lower drift rate
 
-Searched for the aided figure and found something more useful than a number:
+A search for the aided figure found something more useful than a number:
 **the measured evidence does not support the claim that lidar aiding reduces
 drift per metre.** LOAM measures 0.9% of distance in an indoor corridor with no
 loop closure — *worse* than the 0.49% measured for plain wheel odometry.
 
-That is not a contradiction, it is the wrong question. What a lidar or a depth
-camera buys is **bounded** error: return to a place you have already mapped and
-the accumulated error is corrected, which is exactly why Intel's T265 figure is
-quoted **closed loop**. Error that stops growing is a different property from
-error that grows more slowly, and this model has only the second.
+That is not a contradiction; it is the wrong question. What a lidar or a depth
+camera buys is **bounded** error: when the vehicle returns to a place already
+mapped, the accumulated error is corrected, which is exactly why Intel's T265
+figure is quoted **closed loop**. Error that stops growing is a different
+property from error that grows more slowly, and this model has only the second.
 
-So the honest state is: both aided constants are held at the unaided rate ("an
-aiding sensor is at least not harmful"), and the real fix is **structural** —
-model loop closure so aided error is bounded in a mapped space — not a better
-constant. That is a modelling decision, flagged rather than taken.
+The current state is therefore: both aided constants are held at the unaided
+rate ("an aiding sensor is at least not harmful"), and the real fix is
+**structural** — model loop closure so aided error is bounded in a mapped
+space — not a better constant. That is a modelling decision, flagged rather
+than taken.
 
 ### Correction, 2026-09: the unaided drift rate was invented
 
@@ -50,7 +51,7 @@ That looked decisive and was an artefact.
 | --- | --- | --- |
 | Lidar range, FOV, scan rate, accuracy (UST-10LX) | TODO | Datasheet in project files |
 | Radio tx power, sensitivity, data rate | TODO | Depends on module choice — pick hardware first |
-| Rover mass, wheelbase, CoG, steering limits | TODO | Traxxas spec + our own measurements |
+| Rover mass, wheelbase, CoG, steering limits | TODO | Traxxas spec + the project's own measurements |
 | Rover dimensions | MEASURED | Car #1, 2026-07-21 |
 
 ## Needs literature
@@ -62,7 +63,7 @@ That looked decisive and was an artefact.
 | Indoor path loss exponent, confined room | TODO | Matters most for the 8 m box |
 | Multipath fading model, K-factor, walled arena | TODO | Depends on wall material |
 | Outdoor propagation, short ground strip | TODO | Ground reflection is not negligible at 80 m |
-| Background spectrum occupancy per band | TODO | Also replaceable by our own field recordings |
+| Background spectrum occupancy per band | TODO | Also replaceable by the project's own field recordings |
 | Quadcopter thrust and drag coefficients | TODO | Rotor characterisation, or a thrust stand |
 | GNSS receiver behaviour under spoofing | TODO | Well covered in GNSS security literature |
 | Estimator innovation gate thresholds | TODO | ArduPilot defaults are in source; rationale is in the literature |
@@ -71,7 +72,7 @@ That looked decisive and was an artefact.
 
 | Parameter | Status | Notes |
 | --- | --- | --- |
-| Fiber tether mass/m, drag, bend radius, spool | NO SOURCE | Manufacturer data plus our own measurement. Model should say so. |
+| Fiber tether mass/m, drag, bend radius, spool | NO SOURCE | Manufacturer data plus the project's own measurement. Model should say so. |
 | Emissions detectability, time-to-geolocate | NO SOURCE | Open literature thins out fast. Model parametrically, declare free. |
 
 ---
@@ -107,7 +108,7 @@ The RF / jamming / navigation model. Status per the rules above.
 | Contention audibility threshold | −85 dBm | NO SOURCE | Same as receiver sensitivity; declared free parameter |
 | Vehicle max accel (default) | 2.0 m/s² | NO SOURCE | Nominal for a 1:10 car; **measure the real cars** |
 | Vehicle min turn radius (default) | 0.6 m | NO SOURCE | Nominal; **measure the real cars** |
-| LoS / NLoS excess path loss | 3 dB / 23 dB | FOUND, NOT YET USED | Zhou et al. 2020 — we do not model an LoS/NLoS split yet |
+| LoS / NLoS excess path loss | 3 dB / 23 dB | FOUND, NOT YET USED | Zhou et al. 2020 — the model does not yet include an LoS/NLoS split |
 
 ---
 
@@ -122,10 +123,10 @@ literature rather than on the intuition.**
 
 **The short answer: no, and the literature is fairly clear about it.** Raising
 transmit power is not the equilibrium strategy against a responsive jammer, and
-it costs you twice — the jammer gains from power symmetrically, and a louder
-transmitter is a more interceptable one.
+it costs the transmitter twice — the jammer gains from power symmetrically, and
+a louder transmitter is a more interceptable one.
 
-| Claim available to us | Source | What it actually shows | Caveat |
+| Claim available | Source | What it actually shows | Caveat |
 | --- | --- | --- | --- |
 | Against jammers the transmitter's equilibrium power is **lower**, not higher, when it commits first — and its payoff is no worse | Garnaev, Petropulu, Trappe, Poor, *A Multi-Jammer Power Control Game*, IEEE Communications Letters 25(9):3031–3035, 2021. Proposition 6(a), `P_S ≤ P_N`; §V | The cleanest statement that escalation is not the winning move: the strategic structure (who moves first) dominates raw power | SINR utility with an explicit linear transmission-cost term, single link. The conclusion depends on that cost term existing |
 | With transmission costs the jamming game is non-zero-sum with a unique equilibrium in which the transmitter does **not** max out power | Altman, Avrachenkov, Garnaev, *A Jamming Game in Wireless Networks with Transmission Cost*, NET-COOP 2007, LNCS 4465, pp. 1–12. Theorem 7 (uniqueness), Theorems 5–6 (closed form) | Sets `c_t = c_n = 0` and it collapses to the classical zero-sum saddle point, so the cost term is what creates the result | Allocation across parallel channels, so it argues for spreading and channel choice as much as for power level |
@@ -138,7 +139,7 @@ transmitter is a more interceptable one.
 | --- | --- | --- |
 | A node can set **per-neighbour** transmit power from measured received signal strength and still provably preserve connectivity, node degree ≤ 6 | Li, Hou, Sha, *Design and Analysis of an MST-Based Topology Control Algorithm* (LMST), IEEE INFOCOM 2003. Measured mean degree 2.06 (LMST) vs 2.97 (CBTC) over 100 nodes | Assumes monotone distance-based path loss. Indoor 2.4 GHz multipath breaks the RSS → distance → power inversion, so the mechanism transfers and the numbers do not |
 | Transmitting at the lowest **common** power that keeps the network connected raises capacity, extends battery life and cuts MAC contention | Narayanaswamy, Kawadia, Sreenivas, Kumar, *Power Control in Ad-Hoc Networks* (COMPOW) | Widely cited as European Wireless 2002 pp. 156–162, **venue unverified from the paper itself**. One global power level, not per-link |
-| Minimum power such that every cone of angle α ≤ 5π/6 contains a reachable neighbour preserves connectivity; α > 5π/6 does not | Li, Halpern, Bahl, Wang, Wattenhofer, *Cone-Based Distributed Topology Control* (CBTC), IEEE INFOCOM 2001 | Needs angle-of-arrival at each node, which a commodity module does not have. Cite for the existence of a proved threshold, not as something our fleet could run |
+| Minimum power such that every cone of angle α ≤ 5π/6 contains a reachable neighbour preserves connectivity; α > 5π/6 does not | Li, Halpern, Bahl, Wang, Wattenhofer, *Cone-Based Distributed Topology Control* (CBTC), IEEE INFOCOM 2001 | Needs angle-of-arrival at each node, which a commodity module does not have. Cite for the existence of a proved threshold, not as something the fleet could run |
 | Per-node throughput scales Θ(1/√(n log n)) under a common power; the range/interference trade-off is quadratic in range | Gupta & Kumar, *The Capacity of Wireless Networks*, IEEE Trans. Inf. Theory 46(2):388–404, 2000 | **Correction to a common misreading:** the paper makes **no** prescription that minimum power is better. Cite it for the scaling law and the footprint-vs-hops trade-off only. Asymptotic in n; says nothing about ten robots in a room |
 
 **Low probability of intercept, quantitatively**
@@ -176,7 +177,7 @@ interception figure is a lower bound.
 | Claim | Source |
 | --- | --- |
 | A **reactive** jammer "stays quiet until there is activity on the channel", so it necessarily contains a receiver. Four-model taxonomy: constant, deceptive, random, reactive | Xu, Trappe, Zhang, Wood, *The Feasibility of Launching and Detecting Jamming Attacks in Wireless Networks*, ACM MobiHoc 2005, pp. 46–57 |
-| **Signal strength alone cannot detect a reactive or random jammer**; PDR is the statistic that separates jamming from congestion | Same paper. Directly relevant to how a blue fleet would ever *know* it is being jammed — a detection question we have not modelled |
+| **Signal strength alone cannot detect a reactive or random jammer**; PDR is the statistic that separates jamming from congestion | Same paper. Directly relevant to how a blue fleet would ever *know* it is being jammed — a detection question the model does not yet address |
 | Reactive jamming is realisable on commodity SDR: FPGA on a USRP2, jamming bursts as short as **32 µs** for 802.15.4 | Wilhelm, Martinovic, Schmitt, Lenders, *WiFire: A Firewall for Wireless Networks*, SIGCOMM'11 demo, pp. 456–457 (companion to WiSec 2011 pp. 47–52). **Detect-to-jam latency not published in the demo** — read the WiSec paper before quoting a reaction time |
 | A **follower jammer** is a receiver + direction-finder + transmitter in one unit: three spaced antennas → wideband receivers → FFT → Watson-Watt DF → jamming decision → transmit, jamming only bearings it selects | Karlsson, *Method and apparatus for surgical high speed follower jamming based on selectable target direction*, US Patent 7,099,369, Networkfab Corp., 2006. A patent is evidence of a claimed **architecture**, never of fielded performance |
 | Follower jamming of frequency-hopping systems, and a **communications** J/S | Poisel, *Modern Communications Jamming Principles and Techniques*, 2nd ed., Artech House 2011, Ch. 8, 10, 11. **Table of contents verified, chapters not read** |
@@ -185,7 +186,7 @@ interception figure is a lower bound.
 `agents/jam_single.yaml` are currently separate because the model has no reason
 to combine them — a constant jammer does not need ears. The literature says a
 *reactive* jammer does, and that a real follower jammer is one box. So the
-honest next step is not to merge them but to add the capability that needs it:
+correct next step is not to merge them but to add the capability that needs it:
 a reactive emitter, which listens and then transmits. Sourced enough to build;
 **not built.**
 
@@ -208,20 +209,20 @@ interrupt one.
 | COST 231 multi-wall light/heavy wall values | — | **UNVERIFIED** | The primary COST 231 Final Report could not be retrieved. **Do not cite the L_w values** on secondary authority |
 | Diffuse reflectance of interior finishes at ~905 nm | plasterboard 0.70 · wood 0.45 · brick 0.35 · concrete 0.30 · glass 0.08 · metal 0.60 | **NO SOURCE — declared free** | No source found that tabulates diffuse reflectance of *interior* finishes at lidar wavelengths. What IS sourced is **how reflectance maps to range**: the UST-10LX is specified to 10 m against white paper and 4 m at 10% diffuse (Hokuyo spec §2-2, §4), and `effective_range()` interpolates between those anchors. **So the mapping is measured and the input to it is a guess.** Nearest candidate for real numbers: the **SLUM** spectral library (Kotthaus, Smith, Wooster, Grimmond, *ISPRS J. Photogramm. Remote Sens.* **94**, 194–212, 2014), 74 impervious urban material samples at 300–2500 nm — but they are exterior materials and the per-sample list was not confirmed to contain painted plasterboard |
 
-### LoS / NLoS as a modelling choice — two papers Will added, 2026-09-10
+### LoS / NLoS as a modelling choice — two papers added 2026-09-10
 
-| Claim available to us | Source | Status and why |
+| Claim available | Source | Status and why |
 | --- | --- | --- |
-| **NLoS is not just extra dB — it is a STEEPER PATH-LOSS EXPONENT.** 3GPP Case 1: `α_L = 2.09`, `α_NL = 3.75`, with `A_L = 10^-10.38`, `A_NL = 10^-14.54`, breakpoint `d1 = 0.3 km` | Ding, Wang, López-Pérez, Mao, Lin, *Performance Impact of LoS and NLoS Transmissions in Dense Cellular Networks*, arXiv:1503.04251v3 (2015), §VII numerical parameters, citing 3GPP Tables A.1-3, A.1-4, A.1-7 | **FOUND, DELIBERATELY NOT USED.** This is the *outdoor stochastic* form: LoS is a probability that falls with distance, `Pr_L(r)`, because you cannot know where the buildings are. CommsEv now computes LoS **geometrically** from actual walls, which is strictly better information for a maze — and applying a steeper exponent *as well as* the per-wall loss would double-count the same obstruction. Keep this for the day there is outdoor or terrain geometry too coarse to trace: then `Pr_L(r)` is the right tool and these are the right numbers. Caveat either way: cellular, ~2 GHz, hundreds of metres, 0.3 km breakpoint - the STRUCTURE transfers to a 20 m room, the VALUES do not |
-| **Coverage first improves and then DEGRADES as a network is densified**, because at short range the interference becomes line-of-sight too | Same paper, abstract and §VII: *"the network coverage probability first increases with the increase of the base station density, and then decreases as the network becomes denser"* | **FOUND, NOT USED — and it is a warning about our own routing axis.** CommsEv's contention model already says more agents on a band is worse. This says something sharper: once geometry exists, adding links is not monotonically good, because **your link may be NLoS while the interferer's path to you is LoS**. A mesh in a maze may be worse than a star. We have never tested that and the model can now express it |
-| **Co-channel interference hurts the NLoS link far more than the LoS one.** Measured: an NLoS link sharing a channel with a LoS link scored 68%; moved to a non-overlapping channel it scored **89%** | Fahad & Bulut, *Channel Matters: Exploring LoS/NLoS Channel Effects on WiFi Sensing Performance*, Virginia Commonwealth University, Table II. ESP32 CSI, 2.4 GHz, indoor, walls | **SUGGESTIVE, NOT A NUMBER WE CAN USE.** The metric is *activity-recognition accuracy*, not PDR, so it cannot be lifted into the link model. What it supports is a principle, in the right band and the right kind of room: **the agent already round a corner is the one congestion hurts most**, because it has the least margin left. Our contention model charges every link the same. It also says channel choice matters *more* for the NLoS agent, which is a reason for frequency agility that has nothing to do with jamming |
+| **NLoS is not just extra dB — it is a STEEPER PATH-LOSS EXPONENT.** 3GPP Case 1: `α_L = 2.09`, `α_NL = 3.75`, with `A_L = 10^-10.38`, `A_NL = 10^-14.54`, breakpoint `d1 = 0.3 km` | Ding, Wang, López-Pérez, Mao, Lin, *Performance Impact of LoS and NLoS Transmissions in Dense Cellular Networks*, arXiv:1503.04251v3 (2015), §VII numerical parameters, citing 3GPP Tables A.1-3, A.1-4, A.1-7 | **FOUND, DELIBERATELY NOT USED.** This is the *outdoor stochastic* form: LoS is a probability that falls with distance, `Pr_L(r)`, because the building positions are unknown. CommsEv now computes LoS **geometrically** from actual walls, which is strictly better information for a maze — and applying a steeper exponent *as well as* the per-wall loss would double-count the same obstruction. Keep this for the day there is outdoor or terrain geometry too coarse to trace: then `Pr_L(r)` is the right tool and these are the right numbers. Caveat either way: cellular, ~2 GHz, hundreds of metres, 0.3 km breakpoint - the STRUCTURE transfers to a 20 m room, the VALUES do not |
+| **Coverage first improves and then DEGRADES as a network is densified**, because at short range the interference becomes line-of-sight too | Same paper, abstract and §VII: *"the network coverage probability first increases with the increase of the base station density, and then decreases as the network becomes denser"* | **FOUND, NOT USED — and it is a warning about the project's own routing axis.** CommsEv's contention model already says more agents on a band is worse. This says something sharper: once geometry exists, adding links is not monotonically good, because **an agent's own link may be NLoS while the interferer's path to it is LoS**. A mesh in a maze may be worse than a star. This has never been tested and the model can now express it |
+| **Co-channel interference hurts the NLoS link far more than the LoS one.** Measured: an NLoS link sharing a channel with a LoS link scored 68%; moved to a non-overlapping channel it scored **89%** | Fahad & Bulut, *Channel Matters: Exploring LoS/NLoS Channel Effects on WiFi Sensing Performance*, Virginia Commonwealth University, Table II. ESP32 CSI, 2.4 GHz, indoor, walls | **SUGGESTIVE, NOT A USABLE NUMBER.** The metric is *activity-recognition accuracy*, not PDR, so it cannot be lifted into the link model. What it supports is a principle, in the right band and the right kind of room: **the agent already round a corner is the one congestion hurts most**, because it has the least margin left. The contention model charges every link the same. It also says channel choice matters *more* for the NLoS agent, which is a reason for frequency agility that has nothing to do with jamming |
 
 ### Terrain-referenced navigation — sourced, not built
 
 Wanted for the GNSS-denied story and for a future contoured scene. **Nothing
 implemented.**
 
-| Claim available to us | Source |
+| Claim available | Source |
 | --- | --- |
 | TRN accuracy has a **Cramér–Rao lower bound that is a function of the terrain gradient along the trajectory** — `H_t = ∇h(x_t)` in the matrix Riccati recursion. Flat terrain carries **no position information**: `H_t → 0`, the measurement update contributes nothing, and covariance grows at the process-noise rate | Niclas Bergman, *Recursive Bayesian Estimation: Navigation and Tracking Applications*, Linköping Dissertation No. 579, 1999, **Ch. 7 §7.2–7.3**; the flat-terrain statement at **p. 7**. Simulated **12.2 m CEP** over a 25-minute Swedish-terrain track (**§2.4, p. 18**), which also cites 50 m CEP and 75 m from field tests. **Caveat: airborne radar-altimeter formulation — the `∇h` structure transfers to a ground robot, the numbers do not** |
 | TERCOM / SITAN / DSMAC are established GNSS-denied methods, and TERCOM *"struggles in areas with uniform or featureless landscapes"* | Jarraya et al., *GNSS-denied unmanned aerial vehicle navigation*, **Satellite Navigation 6:9, 2025**, §4.1.1. Open access. **Qualitative only — no accuracy figures in metres** |
@@ -230,9 +231,10 @@ implemented.**
 
 **Answering the question directly:** yes, the literature bounds TRN accuracy as a
 function of terrain relief — as a CRLB in terms of `∇h`, not as a scalar
-"X metres for Y metres of relief". I would not trust a source claiming the latter.
+"X metres for Y metres of relief". A source claiming the latter should be
+treated with suspicion.
 
-**Honest total (live files, Sep 2026): 35 of 57 declared quantities carry a
+**Total (live files, Sep 2026): 35 of 57 declared quantities carry a
 source. 22 do not.** Every unsourced one above is a declared free parameter,
 not a disguised guess — but a result that turns on any of them must say so.
 
@@ -267,7 +269,7 @@ car crossing `scenes/maze.yaml` from (-8, 8) to (8, -8):
 | RealSense D435i, 87°, 3 m | **23.7 m** of path, reaches (-0.3, -5.6) |
 | Hokuyo UST-10LX, 270°, 10 m | **448.9 m** of path, reaches (-2.3, -5.5) |
 
-The lidar's 449 m for ~15 m of progress is the honest signature of a local
+The lidar's 449 m for ~15 m of progress is the characteristic signature of a local
 method with no memory: it escapes the first obstacles and then oscillates.
 **A real planner is still the missing piece.** What this buys is that sensor
 fit is now a difference in BEHAVIOUR a mission outcome can measure, which is

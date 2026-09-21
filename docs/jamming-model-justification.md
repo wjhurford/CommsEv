@@ -1,9 +1,9 @@
-# Is the jamming model actually useful? An honest, sourced answer
+# Usefulness of the jamming model — a sourced assessment
 
-Will asked the fair question. Short answer: **yes as a network- and
-command-resilience testbed, no as a physical-layer RF simulator** — and the
-distinction matters for what we may claim from it. Every decision below is
-tied to the project's own library.
+The question was raised in review whether the jamming model is useful. Short
+answer: **yes as a network- and command-resilience testbed; no as a
+physical-layer RF simulator.** The distinction governs what may be claimed from
+it. Every decision below is tied to the project's own library.
 
 ## What the model does, and why each choice is defensible
 
@@ -14,7 +14,7 @@ define jamming as "transmitting signal on the same frequency band used by the
 legitimate system," and the governing quantity throughout the GNSS literature
 is the **jamming-to-signal ratio (JSR/J-S)** — e.g. detectors validated "for
 JSR above −10 dB" and jammers detected "at JSR of 45 dB" (Sokolova et al.,
-*sensors* 2024, 24 04210). Our `rf_link()` computes exactly a
+*sensors* 2024, 24 04210). The `rf_link()` function computes exactly a
 signal-versus-(noise+interference) ratio, so JSR falls straight out of it.
 **Verdict: the core quantity is the right one.**
 
@@ -24,74 +24,77 @@ model is a jammer "placed statically… emits a high-power signal on a particula
 bandwidth… omnidirectional antenna, so the emitted interference propagates
 360° around its location." Their received-power law is a path-loss model of
 distance — `Pr(d) = Θ(d) + Ψ(d) + φ(t)` — whose deterministic term Θ(d) is
-exactly our log-distance path loss. **Verdict: modelling the jammer as an
-ordinary emitter obeying the same path loss as any signal is the accepted
-approach, and it is what lets "a jammer degrades comms" and "comms loss
-strips command authority" be one causal chain rather than two bolted-on
-effects.** That chain is the thing this project is actually about, and few
-off-the-shelf sims represent it.
+exactly the log-distance path loss used here. **Verdict: modelling the jammer
+as an ordinary emitter obeying the same path loss as any signal is the accepted
+approach, and it is what lets "a jammer degrades comms" and "comms loss strips
+command authority" be one causal chain rather than two bolted-on effects.**
+That chain is the subject of this project, and few off-the-shelf simulators
+represent it.
 
 **The scene owns the noise floor; the jammer's rise is measured from it.**
 Tedeschi names a boundary RSS "P_ω expected at the boundary of the jammed
-area" against ambient — a jammed region is defined relative to the resting
-floor. Our `baseline_dbm` vs experienced `noise_floor_dbm` is that same
-relative reading. **Verdict: correct framing.**
+area" against ambient: a jammed region is defined relative to the resting
+floor. The `baseline_dbm` versus experienced `noise_floor_dbm` reading is that
+same relative measure. **Verdict: correct framing.**
 
 **Band separation is a hard defence.** Off-band jammers contribute nothing in
-our model. The survey lists frequency-hopping as a primary anti-jam, and names
-the *follow-on jammer* as its specific counter — both only meaningful if band
-separation matters. **Verdict: correct, and the seam for FHSS work later.**
+the model. The survey lists frequency-hopping as a primary anti-jam measure,
+and names the *follow-on jammer* as its specific counter; both are meaningful
+only if band separation matters. **Verdict: correct, and the seam for FHSS
+work later.**
 
-**The observables we emit are the ones detectors actually consume.** The
-survey's detection methods are RSS, Packet Error Rate / PDR, and noise-level
-measurement; the ML detectors it cites (random forest at ~97.5% accuracy) take
-"RSS, bad packet ratio, packet delivery ratio, clear channel assessment." We
-already produce per-agent RSS, PDR and noise floor every frame. **Verdict:
-this is the strongest single argument that the tool is useful — its telemetry
-IS the feature set the Kalman/ML step will consume. It was built to be a
-substrate for detection, and it is one.**
+**The observables emitted are the ones detectors consume.** The survey's
+detection methods are RSS, Packet Error Rate / packet-delivery ratio (PDR), and
+noise-level measurement; the ML detectors it cites (random forest at ~97.5%
+accuracy) take "RSS, bad packet ratio, packet delivery ratio, clear channel
+assessment." The model already produces per-agent RSS, PDR and noise floor
+every frame. **Verdict: this is the strongest single argument for the tool's
+usefulness. Its telemetry is the feature set the Kalman/ML step will consume.
+It was built as a substrate for detection, and it functions as one.**
 
-## Where the model is genuinely weak — do not oversell it
+## Where the model is weak — not to be oversold
 
 - **The PDR curve is a logistic stand-in, not a modulation/coding curve.**
   Real link quality is a BER-vs-SINR curve set by modulation and FEC; the
-  survey names LDPC and Reed-Solomon as anti-jam coding. We have none of that.
-  A result that turns on the *exact* PDR at a given SINR is not trustworthy;
-  a result about *trends and ordering* (this topology survives, that one does
-  not) is.
+  survey names LDPC and Reed-Solomon as anti-jam coding. The model has none of
+  that. A result that turns on the *exact* PDR at a given SINR is not
+  trustworthy; a result about *trends and ordering* (this routing survives,
+  that one does not) is.
 - **No processing gain / spread spectrum.** DSSS/FHSS give a real dB margin
-  against a jammer; we don't model it, so we currently *understate* a
-  spread-spectrum radio's resilience. This is the biggest single gap before
-  any "anti-jam radio" claim.
+  against a jammer; the model does not include it, so it currently
+  *understates* a spread-spectrum radio's resilience. This is the largest
+  single gap before any "anti-jam radio" claim.
 - **Omnidirectional only.** No beamforming, no directional antennas, no
   spatial nulling or MIMO interference rejection — all of which the survey and
-  the mmWave papers treat as central. Our range is therefore a *circle*; a
-  real directional jammer or victim is not. (This is why the README's
-  "directionality" idea is a real future axis, not polish.)
-- **Constant jammer only.** We model the *proactive/constant* class. Reactive,
-  random, deceptive, follow-on and smart jammers (the survey's taxonomy, and
-  the README's ladder) are not built — they are behaviours on the jammer
-  agent, and the honest levels ladder is exactly that taxonomy.
+  the mmWave papers treat as central. The modelled range is therefore a
+  *circle*; a real directional jammer or victim is not. (This is why the
+  README's "directionality" idea is a real future axis, not polish.)
+- **Constant jammer only.** The model represents the *proactive/constant*
+  class. Reactive, random, deceptive, follow-on and smart jammers (the survey's
+  taxonomy, and the README's ladder) are not built; they are behaviours on the
+  jammer agent, and the levels ladder is exactly that taxonomy.
 - **Point isotropic, single number.** The Baltic Sea field trial (sensors
   2024) found a jammer's "area of influence exceeds a radius of three
-  kilometres, although its effect is not uniform." Our range ring is a nominal
-  contour and must be labelled as such — real jammed areas are ragged.
+  kilometres, although its effect is not uniform." The modelled range ring is
+  a nominal contour and must be labelled as such; real jammed areas are
+  ragged.
 - **Defaults are unsourced.** Noise floor and path-loss exponent are
-  defensible defaults, not measurements — the provenance rule already flags
+  defensible defaults, not measurements. The provenance rule already flags
   them, and any load-bearing result must say so.
 
-## The honest verdict
+## Verdict
 
 As a **testbed for network structure and command resilience under contested
-comms** — which is what CommsEv is for — the model is sound and grounded: the
+comms**, which is what CommsEv is for, the model is sound and grounded: the
 right quantity (JSR), the right causal chain (jamming → link loss → authority
 loss), and the right observables for the detection/ML work to come. As a
-**physical-layer RF fidelity model** it is deliberately coarse, and we should
-never present a specific dB or PDR figure as if it were. Build the levels
-ladder and processing-gain next if we want to strengthen the anti-jam side;
-keep stating the free parameters.
+**physical-layer RF fidelity model** it is deliberately coarse, and a specific
+dB or PDR figure must never be presented as if it were one. To strengthen the
+anti-jam side, build the levels ladder and processing gain next, and keep
+stating the free parameters.
 
 ### Sources (project library)
+
 - Priyadarshani et al., *Jamming Intrusions in Extreme Bandwidth
   Communication: A Comprehensive Overview*, IEEE Access 6, 2025. (jammer
   taxonomy; detection metrics; anti-jam techniques)

@@ -12,7 +12,7 @@ First public release.
 ### Added
 - Console in a browser: `Dockerfile`, `docker-compose.yml`, published image
   at `ghcr.io/wjhurford/commsev`. The build runs the full test suite.
-- `docs/TUTORIAL.md`: clone to your own experiment in thirty minutes.
+- `docs/TUTORIAL.md`: from a fresh clone to a first experiment in about thirty minutes.
 - `CITATION.cff`, `CONTRIBUTING.md`, `NOTICE`, CI on every push.
 - Validator accepts a fleet that declares no `authority` (fleets defer that
   decision to Setup by design); pinned by a test.
